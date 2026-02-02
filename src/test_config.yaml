@@ -1,0 +1,37 @@
+
+
+
+# toy model prior settings
+
+# THIS IS IN INV-SIGMA SPACE
+MAX_VAR: 10.0
+MIN_VAR:  0.0666666666666667
+
+MAX_MU: 5.0
+MIN_MU: -5.0
+
+n_d: 100
+
+scale_theta_to: [0.5, 1.5]
+SCALE_THETA: 0
+
+
+
+
+# FISHNETS NETWORK HYPERPARAMETERS
+n_params: 2
+
+
+
+# FLATTENER NETWORK HYPERPARAMETERS
+
+hidden_size: 200
+n_layers: 4
+activation: 'softplus'
+
+learning_rate: 5e-6
+batch_size: 250
+epochs: 5500
+min_epochs: 1000
+patience: 1000
+

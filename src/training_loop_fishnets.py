@@ -142,11 +142,19 @@ def train_fishnets(theta,
     keys = jr.split(key, num=num_models)
     ws = [models[i].init(keys[i], data[0]) for i in range(num_models)]
 
+    # -------------- SHUFFLE DATA BEFORE TRAINING --------------
+    # Shuffle training data before batching to ensure proper randomization
+    key = jr.PRNGKey(seed_train)
+    key, shuffle_key = jr.split(key)
+    n_train_samples = theta.shape[0]
+    shuffle_idx = jr.permutation(shuffle_key, jnp.arange(n_train_samples))
+    theta = theta[shuffle_idx]
+    data = data[shuffle_idx]
+    
     # -------------- DEFINE TRAINING LOOP --------------
     train_batch = train_batch_size
     train_epochs_val = train_epochs
     train_min_epochs_val = train_min_epochs
-    key = jr.PRNGKey(seed_train)
 
     def training_loop(key, model, w, data, theta, data_val, theta_val,
                       patience=patience, epochs=train_epochs_val, min_epochs=train_min_epochs_val):

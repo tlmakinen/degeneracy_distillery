@@ -33,6 +33,7 @@ def load_config(config_name, config_path="./"):
 #Sigma = jnp.diag(jnp.array([1.0, 2.0])**2) <-- default
 Sigma = jnp.diag(jnp.array([4.0, 1.0])**2) # <-- stress test
 
+print("Sigma", Sigma)
 
 
 def mu_x_from_y(y):
@@ -46,20 +47,19 @@ def mu_y_from_x(x):
 
 
 #@jax.jit
-def Fisher2(θ, nd):
-    #cov = jnp.eye(dim)
-    cov = Sigma
-    invC = jnp.linalg.inv(cov)
+# def Fisher2(θ, nd):
+#     #cov = jnp.eye(dim)
+#     cov = Sigma
+#     invC = jnp.linalg.inv(cov)
 
-    dμ_dθ = jax.jacrev(mu_x_from_y)(θ)
-    # do the simple case first
-    return nd * jnp.einsum("ij,ik,kl->jl", dμ_dθ, invC, dμ_dθ)
+#     dμ_dθ = jax.jacrev(mu_x_from_y)(θ)
+#     # do the simple case first
+#     return nd * jnp.einsum("ij,ik,kl->jl", dμ_dθ, invC, dμ_dθ)
 
 
 #@jax.jit
 def Fisher(θ, nd):
     #cov = jnp.eye(dim)
-    print("Sigma", Sigma)
     cov = (Sigma)
     invC = jnp.linalg.inv(cov)
 
@@ -523,7 +523,7 @@ def main():
 
                 sims = jax.vmap(simulator)(keys, jnp.tile(jnp.array([[_mu], [_sigma]]), num_sims_avg).T) #[:, :, jnp.newaxis]
                 #sims /= datascale
-                sims = data_scaler.transform(sims.reshape(-1, n_d)).reshape(sims.shape)
+                sims = data_scaler.transform(sims.reshape(-1, data_shape)).reshape(sims.shape)
 
 
                 fpreds = jax.vmap(_getf)(sims)
@@ -565,15 +565,7 @@ def main():
 
     ensemble_F_predictions = jnp.array([predicted_fishers(models[i], ws[i], data_test) for i in range(num_models)])
     ensemble_mle_predictions = jnp.array([predicted_mle(models[i], ws[i], data_test) for i in range(num_models)])
-    # calculate true fisher at the same theta
-
-    _f = lambda t: Fisher2(t, nd=n_d)
-
-    F_true_out = jax.vmap(_f)(theta_test)
-
-
-    ensemble_F_predictions = jnp.array([predicted_fishers(models[i], ws[i], data_test) for i in range(num_models)])
-    ensemble_mle_predictions = jnp.array([predicted_mle(models[i], ws[i], data_test) for i in range(num_models)])
+    
     # calculate true fisher at the same theta
     _f = lambda t: Fisher(t, nd=n_d)
     F_true_out = jax.vmap(_f)(theta_test)

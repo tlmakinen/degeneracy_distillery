@@ -7,6 +7,7 @@ aggregated from a fishnet procedure) and θs (the parameter values).
 """
 
 import os, sys
+import argparse
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -22,6 +23,21 @@ from tqdm import tqdm
 from fishnets import *
 from flatten_net import *
 # from sr_functions import *
+
+from jax import lax
+
+def stable_sin_swish(x):
+    """
+    Composite activation: sin(swish(x))
+    Numerical stability is handled by jax.nn.swish's internal 
+    safe-sigmoid logic.
+    """
+    # jax.nn.swish(x) = x * sigmoid(x) = x / (1 + exp(-x))
+    swish_x = nn.swish(x)
+    
+    # sin is generally stable for float inputs, but we use lax.sin 
+    # for direct access to stablehlo operations if accuracy is critical.
+    return lax.sin(swish_x)
 
 
 # ---------------------- ROTATION UTILS -----------------------
@@ -95,7 +111,7 @@ class custom_MLP(nn.Module):
     features: Sequence[int]
     max_x: jnp.array
     min_x: jnp.array
-    act: Callable = nn.softplus
+    act: Callable = stable_sin_swish
 
     @nn.compact
     def __call__(self, x):
@@ -105,9 +121,14 @@ class custom_MLP(nn.Module):
 
         # Small dense layers for coefficients.
         x = nn.Dense(self.features[-1])(x)
+
+        
         x = self.act(nn.Dense(self.features[0])(x))
         for feat in self.features[1:-1]:
-            x = self.act(nn.Dense(feat)(x))
+            z = self.act(nn.Dense(feat)(x))
+            z = nn.Dense(feat)(z)
+            x = self.act(x + z)
+
         x = nn.Dense(self.features[-1])(x)
         return x
 
@@ -221,21 +242,24 @@ def fit_flattening(F_network_ensemble, θs,
             r = λ * loss / (loss + jnp.exp(-α * loss))
             loss *= r
             
-            l1_loss = l1_reg(J_eta)
+            l1_loss = 0.0 # l1_reg(J_eta)
 
-            # add in cosine similarity loss to point along PCA of F
-            #y_star = mymodel(theta_star)
-            #cos_loss = 0 #optax.losses.cosine_similarity(y_star, theta_evalue, epsilon=1e-4)
-
-            return loss, jnp.linalg.det(Q), l1_loss
+            return jnp.log(loss), jnp.linalg.det(Q), l1_loss
 
         loss, Q, l1_loss = jax.vmap(fn)(theta_batched, F_batched)
-        return jnp.log(jnp.mean(loss)) + l1_loss.mean(), jnp.mean(Q)
+        return (jnp.mean(loss)) + l1_loss.mean(), jnp.mean(Q)
 
     # ---------------------- PREPARE TRAINING DATA -----------------------
+    # Shuffle data before batching to ensure proper train/val split randomization
+    key, shuffle_key = jr.split(key)
+    n_samples = θs.shape[0]
+    shuffle_idx = jr.permutation(shuffle_key, jnp.arange(n_samples))
+    θs_shuffled = θs[shuffle_idx]
+    F_fishnets_shuffled = F_fishnets[shuffle_idx]
+    
     # Expect θs and F_fishnets to be 2D or higher; here we reshape them in batch format.
-    theta_true = θs.reshape(-1, batch_size, n_params)
-    F_fishnets = F_fishnets.reshape(-1, batch_size, n_params, n_params)
+    theta_true = θs_shuffled.reshape(-1, batch_size, n_params)
+    F_fishnets = F_fishnets_shuffled.reshape(-1, batch_size, n_params, n_params)
 
     # ---------------------- TRAINING LOOP DEFINITION -----------------------
     def training_loop(key, w, theta_true, F_fishnets,
@@ -419,7 +443,7 @@ def fit_flattening(F_network_ensemble, θs,
 
     for i,y in enumerate(η_ensemble):
         try:
-            y, rotmat = rotate_coords(y, theta=θs, theta_fid=theta_fid)
+            # y, rotmat = rotate_coords(y, theta=θs, theta_fid=theta_fid)
             ys.append(y)
             dy = Jbar_ensemble[i]
             #dys.append(np.dot(dy, rotmat))
@@ -509,27 +533,45 @@ def fit_flattening(F_network_ensemble, θs,
 
 # ---------------------- EXECUTION (for testing) -----------------------
 if __name__ == '__main__':
-    # Example: F_fishnets and θs should be provided externally.
-    # For testing purposes, we create fake input arrays.
-    #fake_theta = jnp.linspace(-3.0, 3.0, 1000).reshape(-1, 2)
-    #fake_F = jnp.tile(jnp.eye(2), (fake_theta.shape[0], 1, 1))
+    parser = argparse.ArgumentParser(
+        description="Fit a flattening network to Fisher matrix estimates from fishnets."
+    )
+    parser.add_argument(
+        "--input", "-i",
+        type=str,
+        default="fishnets-log/fishnets_outputs",
+        help="Path to fishnets output file (without .npz extension). Default: fishnets-log/fishnets_outputs"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default="flattened_coords_sr2",
+        help="Output filename prefix. Default: flattened_coords_sr2"
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable coordinate visualization plot"
+    )
+    args = parser.parse_args()
 
     # ---------------------- LOAD DATA FROM FILE -----------------------
-    fname = "fishnets-log/fishnets_outputs"
+    fname = args.input
     fname_full = fname + ".npz"
+    print(f"Loading fishnets data from: {fname_full}")
+    
     data_npz = np.load(fname_full)
     thetas = jnp.array(data_npz["theta"])
     ensemble_weights = data_npz["ensemble_weights"]
     F_network_ensemble = jnp.array(data_npz["F_network_ensemble"])
-    # Compute weighted average of network Fisher matrices:
-    # Fs = jnp.average(F_network_ensemble, axis=0, weights=ensemble_weights)
 
-    print("thetas", thetas)
-
+    print("thetas shape:", thetas.shape)
+    print("F_network_ensemble shape:", F_network_ensemble.shape)
 
     fit_flattening(F_network_ensemble, thetas,
                    ensemble_weights=ensemble_weights,
                    hidden_size=256,
+                   n_layers=3,
                    batch_size=250,
                    epochs_phase1=10000,
                    epochs_phase2=1000,
@@ -542,6 +584,6 @@ if __name__ == '__main__':
                    lr_finetune=4e-6,
                    noise=1e-7,
                    seed=0,
-                   output_prefix="flattened_coords_sr2",
+                   output_prefix=args.output,
                    SCALE_THETA=False,
-                   do_plot=True)
+                   do_plot=not args.no_plot)

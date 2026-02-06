@@ -9,6 +9,7 @@ import math
 from typing import Sequence
 from tqdm import tqdm
 import yaml,os,sys
+import argparse
 
 from sklearn.preprocessing import MinMaxScaler
 
@@ -27,13 +28,8 @@ def load_config(config_name, config_path="./"):
     return config
 
 
-
-# fixed covariance
-#Sigma = jnp.diag(jnp.array([3.0, 2.0])**2)
-#Sigma = jnp.diag(jnp.array([1.0, 2.0])**2) <-- default
-Sigma = jnp.diag(jnp.array([4.0, 1.0])**2) # <-- stress test
-
-print("Sigma", Sigma)
+# Global covariance matrix (set in main() from command line args)
+Sigma = None
 
 
 def mu_x_from_y(y):
@@ -90,8 +86,8 @@ def make_fisher_plot(network_fishers, filename):
     plt.colorbar(cs2)
 
     ax1.set_title(r'$ \frac{1}{2} \ln \det F_{\rm true}(\theta)$')
-    ax1.set_xlabel('$\mu_1$')
-    ax2.set_ylabel('$\mu_2$')
+    ax1.set_xlabel(r'$\mu_1$')
+    ax2.set_ylabel(r'$\mu_2$')
     ax2.set_title(r'$ \frac{1}{2} \ln \det \langle F_{\rm NN}(\theta) \rangle $')
     plt.tight_layout()
     plt.savefig(filename, dpi=400)
@@ -168,22 +164,55 @@ def predicted_mle(model,w,data):
 
 
 def main():
-    # -------------- DEFINE SIMULATOR AND PARAMS --------------
-    #config = load_config('test_config.yaml')
-
-    do_grid_plot = bool(int(sys.argv[1]))
+    # -------------- COMMAND LINE ARGUMENTS --------------
+    parser = argparse.ArgumentParser(
+        description="Train fishnets on a 2D Gaussian with nonlinear mean parameterization."
+    )
+    parser.add_argument(
+        "--sigma",
+        type=float,
+        nargs=2,
+        default=[1.0, 2.0], # default
+        metavar=("S1", "S2"),
+        help="Diagonal standard deviations for Sigma = diag([S1^2, S2^2]). Default: [1.0, 2.0], \
+            Stress test: [4.0, 1.0]"
+    )
+    parser.add_argument(
+        "--grid-plot",
+        action="store_true",
+        help="Generate grid plots of Fisher predictions"
+    )
+    parser.add_argument(
+        "--n-d",
+        type=int,
+        default=50,
+        help="Number of data points per dimension. Default: 50"
+    )
+    parser.add_argument(
+        "--n-sims",
+        type=int,
+        default=5000,
+        help="Number of training simulations. Default: 5000"
+    )
+    args = parser.parse_args()
+    
+    # Set global Sigma from command line
+    global Sigma
+    Sigma = jnp.diag(jnp.array(args.sigma)**2)
+    print("Sigma =", Sigma)
+    
+    do_grid_plot = args.grid_plot
 
 
     dim = 2 # dimension of the multivariate normal distribution
-    n_d = 50
+    n_d = args.n_d
     n_params = 2 #config["n_params"]
     data_shape = n_d * dim
     input_shape = (data_shape,)
-    nsims = 5000
+    nsims = args.n_sims
 
     print("running with n_d=%d"%(n_d))
     print("generating %d train simulations"%(nsims))
-    print("Sigma = ", Sigma)
 
     MAX_MU = 3 #config["MAX_MU"]
     MIN_MU =  -3 #config["MIN_MU"]
@@ -323,12 +352,15 @@ def main():
         all_n_hidden.append([hidden,hidden,hidden]) # could add in (n_params + 1)
 
     models = [nn.Sequential([
-                MLP(all_n_hidden[i],
+                resMLP(all_n_hidden[i],
                     act=acts[i]),
                 Fishnet_from_embedding(
                             n_p = n_params,
                             act=acts[i],
-                            hidden=all_n_hidden[i][0]
+                            hidden=all_n_hidden[i][0],
+                            act_fisher=nn.gelu,
+                            sharpness=np.random.randn(1,)*0.7 + 5.0,
+                            threshold=np.random.randn(1,)*0.7 + 1.0
                 )]
             )
             for i in range(num_models)]

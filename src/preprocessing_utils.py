@@ -504,6 +504,8 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
 
         # then kabsch rotate
         rotmat, *_ = kabsch_jax(y, y_reference)
+        
+        # y += eigenvec[:, 0]
 
     else:
         rotmat = rotate_x_to_y(eta_star, theta_star)
@@ -514,6 +516,8 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     
     # Rotate Jacobian
     dy_sr = jnp.einsum("ij,bjk->bik", rotmat, dy)
+
+    y -= y_reference.min(0)
     
     return y, dy, dy_sr, rotmat, A
 

@@ -14,6 +14,45 @@ import matplotlib.pyplot as plt
 from functools import partial
 Array = Any
 
+
+class SoftSquelch(nn.Module):
+    threshold: float = 1.0
+    sharpness: float = 5.0  # Higher values make the transition steeper
+
+    @nn.compact
+    def __call__(self, x):
+        # Create a gate that is 0 near the origin and 1 far away
+        # We use abs(x) so the suppression is symmetric
+        gate = jax.nn.sigmoid(self.sharpness * (jnp.abs(x) - self.threshold))
+        return x * gate
+
+class SparseActivation(nn.Module):
+    mode: str = 'squelch' # 'squelch' or 'threshold'
+    init_threshold: float = 0.5
+    init_sharpness: float = 10.0
+
+    @nn.compact
+    def __call__(self, x):
+        # Learnable threshold: always positive using softplus to prevent collapsing
+        t_param = self.param('threshold', 
+                            nn.initializers.constant(self.init_threshold), 
+                            (1,))
+        threshold = jax.nn.softplus(t_param)
+
+        if self.mode == 'threshold':
+            # Learnable Soft-Thresholding
+            return jnp.sign(x) * jnp.maximum(0, jnp.abs(x) - threshold)
+
+        else:
+            # Learnable Double Sigmoid (Squelch)
+            s_param = self.param('sharpness', 
+                                nn.initializers.constant(self.init_sharpness), 
+                                (1,))
+            sharpness = jax.nn.softplus(s_param)
+            gate = jax.nn.sigmoid(sharpness * (jnp.abs(x) - threshold))
+            return x * gate
+
+
 # custom activation function
 @jax.jit
 def smooth_leaky(x: Array) -> Array:
@@ -120,7 +159,8 @@ class resMLP(nn.Module):
     # residual connections
     for feat in self.features[1:-1]:
       z = self.act(nn.Dense(feat)(x))
-      x += z
+      z = nn.Dense(feat)(z)
+      x = self.act(x + z)
     
     x = nn.Dense(self.features[-1])(x)
     return x
@@ -131,13 +171,20 @@ class Fishnet_from_embedding(nn.Module):
     n_p: int=2
     hidden: int=50
     act: nn.activation = nn.swish
-    act_fisher: nn.activation = nn.leaky_relu
-    
+    act_fisher: nn.activation = nn.gelu # make gelu default ?
+    sharpness: float = 5.0
+    threshold: float = 1.0
+
     @nn.compact
     def __call__(self, x):
         priorCinv = jnp.eye(self.n_p)
         t = self.act(nn.Dense(self.hidden)(x))
-        fisher_cholesky = self.act_fisher(nn.Dense(self.hidden)(x))
+        # fisher_cholesky = self.act_fisher(nn.Dense(self.hidden)(x))
+        fisher_cholesky = nn.Dense(self.hidden)(x)
+
+        fisher_cholesky = SoftSquelch(threshold=self.threshold, sharpness=self.sharpness)(fisher_cholesky)
+
+        # fisher_cholesky = SparseActivation('squelch', )(fisher_cholesky)
 
         t = nn.Dense(self.n_p)(t)
         fisher_cholesky = nn.Dense((self.n_p * (self.n_p + 1) // 2))(fisher_cholesky)

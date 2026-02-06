@@ -106,8 +106,127 @@ def rotate_coords(y, theta, theta_fid=np.array([1.0,5.0])):
     y = jnp.dot(y - t_opt, rotmat) + t_opt
     return y, rotmat
 
+# ---------------------- WHITENING UTILITIES -----------------------
+def compute_whitening_transform(F_ensemble, ensemble_weights):
+    """
+    Compute whitening transform from ensemble of Fisher matrices.
+    
+    The whitening is based on the GLOBAL mean Fisher (averaged over both 
+    ensemble members and samples), so W is a single (n_params, n_params) matrix.
+    
+    Args:
+        F_ensemble: Array of shape (n_ensemble, n_samples, n_params, n_params)
+        ensemble_weights: Weights for each ensemble member, shape (n_ensemble,)
+    
+    Returns:
+        W: whitening matrix (F_mean^{-1/2}), shape (n_params, n_params)
+        W_inv: inverse whitening matrix (F_mean^{1/2}), shape (n_params, n_params)
+        F_mean: the global mean Fisher, shape (n_params, n_params)
+    """
+    # First: weighted average over ensemble members -> (n_samples, n_params, n_params)
+    F_ensemble_avg = jnp.average(F_ensemble, axis=0, weights=ensemble_weights)
+    
+    # Second: average over all samples -> (n_params, n_params)
+    # This gives us the GLOBAL mean Fisher matrix
+    F_mean = jnp.mean(F_ensemble_avg, axis=0)
+    
+    print(f"Global mean Fisher shape: {F_mean.shape}")
+    print(f"Global mean Fisher:\n{F_mean}")
+    
+    # Eigendecomposition of the global mean Fisher
+    eigvals, eigvecs = jnp.linalg.eigh(F_mean)
+    
+    print(f"Mean Fisher eigenvalues: {eigvals}")
+    
+    # Ensure numerical stability
+    eigvals = jnp.maximum(eigvals, 1e-10)
+    
+    # W = F_mean^{-1/2} (whitening)
+    W = eigvecs @ jnp.diag(1.0 / jnp.sqrt(eigvals)) @ eigvecs.T
+    
+    # W_inv = F_mean^{1/2} (inverse whitening)
+    W_inv = eigvecs @ jnp.diag(jnp.sqrt(eigvals)) @ eigvecs.T
+
+    print(f"W_inv transformation: ", W_inv)
+    
+    return W, W_inv, F_mean
+
+def whiten_fisher(F, W):
+    """Apply whitening transform: F_white = W @ F @ W.T"""
+    return W @ F @ W.T
+
+def whiten_fisher_batch(F_batch, W):
+    """Apply whitening to a batch of Fisher matrices."""
+    return jax.vmap(lambda F: W @ F @ W.T)(F_batch)
+
+
+# ---------------------- ROBUST NORMALIZATION -----------------------
+def compute_robust_norm_factor(F_ensemble, method: str = "median_max_eig"):
+    """
+    Compute a robust normalization factor for Fisher matrices.
+    
+    This is more stable than using F.max() which can be dominated by outliers.
+    
+    Args:
+        F_ensemble: Array of Fisher matrices, shape (n_ensemble, n_samples, n_params, n_params)
+                    or (n_samples, n_params, n_params)
+        method: Normalization method:
+            - "median_max_eig": Median of maximum eigenvalues (default, most robust)
+            - "median_trace": Median of traces / n_params
+            - "median_det": Median of det^(1/n) (geometric mean of eigenvalues)
+            - "percentile_90": 90th percentile of max eigenvalues
+    
+    Returns:
+        norm_factor: Scalar normalization factor
+    """
+    # Flatten ensemble dimension if present
+    if F_ensemble.ndim == 4:
+        # Shape: (n_ensemble, n_samples, n_params, n_params)
+        n_params = F_ensemble.shape[-1]
+        F_flat = F_ensemble.reshape(-1, n_params, n_params)
+    else:
+        # Shape: (n_samples, n_params, n_params)
+        n_params = F_ensemble.shape[-1]
+        F_flat = F_ensemble
+    
+    if method == "median_max_eig":
+        # Get all eigenvalues
+        eigvals = jax.vmap(jnp.linalg.eigvalsh)(F_flat)
+        # Maximum eigenvalue per sample
+        max_eigvals = eigvals.max(axis=-1)
+        # Use median (robust to outliers)
+        norm_factor = jnp.median(max_eigvals)
+        
+    elif method == "median_trace":
+        # Trace / n_params = average eigenvalue
+        traces = jnp.trace(F_flat, axis1=-2, axis2=-1) / n_params
+        norm_factor = jnp.median(traces)
+        
+    elif method == "median_det":
+        # det^(1/n) = geometric mean of eigenvalues
+        dets = jnp.linalg.det(F_flat)
+        # Handle numerical issues with small/negative determinants
+        dets = jnp.maximum(dets, 1e-20)
+        geo_means = dets ** (1.0 / n_params)
+        norm_factor = jnp.median(geo_means)
+        
+    elif method == "percentile_90":
+        eigvals = jax.vmap(jnp.linalg.eigvalsh)(F_flat)
+        max_eigvals = eigvals.max(axis=-1)
+        norm_factor = jnp.percentile(max_eigvals, 90)
+        
+    else:
+        raise ValueError(f"Unknown normalization method: {method}")
+    
+    # Ensure we don't divide by zero
+    norm_factor = jnp.maximum(norm_factor, 1e-10)
+    
+    return float(norm_factor)
+
+
 # ---------------------- CUSTOM NETWORK DEFINITIONS -----------------------
 class custom_MLP(nn.Module):
+    """MLP that outputs in whitened space (no inverse transform applied)."""
     features: Sequence[int]
     max_x: jnp.array
     min_x: jnp.array
@@ -130,6 +249,59 @@ class custom_MLP(nn.Module):
             x = self.act(x + z)
 
         x = nn.Dense(self.features[-1])(x)
+        return x
+
+
+class WhitenedMLP(nn.Module):
+    """
+    MLP with built-in inverse whitening transform.
+    
+    The network learns η_raw internally, then applies the inverse whitening
+    W_inv = F_mean^{1/2} to get the final output:
+    
+        η(θ) = W_inv @ η_raw(θ)
+    
+    The Jacobian becomes:
+        J = ∂η/∂θ = W_inv @ J_raw
+    
+    When computing the loss Q = J^{-T} @ F @ J^{-1} with ORIGINAL Fishers F:
+        Q = J_raw^{-T} @ (W @ F @ W) @ J_raw^{-1}
+          = J_raw^{-T} @ F_whitened @ J_raw^{-1}
+    
+    So training on ORIGINAL F with this network is equivalent to training
+    on WHITENED F with a raw MLP. No need to pre-whiten the training data!
+    
+    The W_inv layer handles the whitening implicitly through the Jacobian.
+    """
+    features: Sequence[int]
+    max_x: jnp.array
+    min_x: jnp.array
+    W_inv: jnp.array  # Inverse whitening matrix F_mean^{1/2}
+    act: Callable = stable_sin_swish
+    apply_inverse_whitening: bool = True  # Can disable for inspection
+
+    @nn.compact
+    def __call__(self, x):
+        # Adjust input by min-max scaling.
+        x = (x - self.min_x) / (self.max_x - self.min_x)
+        x += 1.0
+
+        # Small dense layers for coefficients.
+        x = nn.Dense(self.features[-1])(x)
+        
+        x = self.act(nn.Dense(self.features[0])(x))
+        for feat in self.features[1:-1]:
+            z = self.act(nn.Dense(feat)(x))
+            z = nn.Dense(feat)(z)
+            x = self.act(x + z)
+
+        x = nn.Dense(self.features[-1])(x)
+        
+        # Apply inverse whitening transform (fixed, non-trainable)
+        # η_final = F_mean^{1/2} @ η_raw
+        if self.apply_inverse_whitening:
+            x = self.W_inv @ x
+        
         return x
 
 # ---------------------- UTILITY FUNCTIONS -----------------------
@@ -175,13 +347,28 @@ def fit_flattening(F_network_ensemble, θs,
                    SCALE_THETA: bool = False,
                    do_average: bool = True,
                    F_avg: Any = None,
-                   norm_factor: float = 1.0,
+                   norm_factor: Any = None,
+                   norm_method: str = "median_max_eig",
+                   use_whitening: bool = True,
                    do_plot: bool = True):
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
     θs (theta values) as inputs along with various hyperparameters controlling the 
     training procedure.
+    
+    Args:
+        norm_factor: Normalization factor for Fishers. If None (default), computed
+                     automatically using robust_norm_factor with norm_method.
+        norm_method: Method for computing norm_factor if not provided:
+            - "median_max_eig": Median of maximum eigenvalues (default, most robust)
+            - "median_trace": Median of traces / n_params  
+            - "median_det": Median of det^(1/n)
+            - "percentile_90": 90th percentile of max eigenvalues
+        use_whitening: If True, use WhitenedMLP which has W_inv = F_mean^{1/2} as a
+                       fixed final layer. This implicitly whitens the Fishers through
+                       the Jacobian transformation (no need to pre-whiten training data).
+                       The network effectively learns to flatten F_whitened = W @ F @ W.
     """
     # ---------------------- CONSTANTS & SETUP -----------------------
     n_params = θs.shape[-1]
@@ -195,20 +382,66 @@ def fit_flattening(F_network_ensemble, θs,
     else:
       F_fishnets = F_avg
 
-    # Normalize F_fishnets using its maximum value (as in the original code)
-    # norm_factor = 1.0 # F_fishnets.max() / 100.
-    print('norm factor', norm_factor)
+    # ---------------------- ROBUST NORMALIZATION -----------------------
+    if norm_factor is None:
+        print(f"COMPUTING ROBUST NORM FACTOR (method: {norm_method})")
+        norm_factor = compute_robust_norm_factor(F_network_ensemble, method=norm_method)
+    
+    print(f'norm_factor = {norm_factor:.6g}')
     F_fishnets = F_fishnets / norm_factor
+
+    # ---------------------- WHITENING TRANSFORM -----------------------
+    W = None
+    W_inv = None
+    F_mean = None
+    
+    if use_whitening:
+        print("COMPUTING WHITENING TRANSFORM")
+        # Compute whitening from the (normalized) ensemble
+        F_ensemble_normalized = F_network_ensemble / norm_factor
+        W, W_inv, F_mean = compute_whitening_transform(
+            F_ensemble_normalized, ensemble_weights
+        )
+        
+        # F_fishnets should be the weighted average (n_samples, n_params, n_params)
+        # NOT the full ensemble. The WhitenedMLP's W_inv layer handles the whitening
+        # implicitly through the Jacobian transformation.
+        # (F_fishnets was already computed above as the weighted average)
+        
+        # Verify: W @ F_mean @ W should be ~I (sanity check)
+        F_white_global_mean = W @ F_mean @ W
+        print("Whitened Fisher global mean (should be ~I):")
+        print(F_white_global_mean)
+        
+        # Check condition number of W (can cause gradient issues if too large)
+        W_eigvals = jnp.linalg.eigvalsh(W_inv @ W_inv.T)
+        W_cond = jnp.sqrt(W_eigvals.max() / W_eigvals.min())
+        print(f"W_inv condition number: {W_cond:.2f}")
+        if W_cond > 100:
+            print("WARNING: High condition number may cause gradient scaling issues!")
 
     # Determine training input bounds from θs
     max_x = θs.max(0) + 1e-3
     min_x = θs.min(0) - 1e-3
 
     # ---------------------- DEFINE THE MODEL -----------------------
-    model = custom_MLP(features=[hidden_size]*n_layers + [n_params],
-                       max_x = max_x,
-                       min_x = min_x,
-                       act = nn.softplus)
+    if use_whitening:
+        print("USING WHITENED MLP (with inverse whitening layer)")
+        model = WhitenedMLP(
+            features=[hidden_size]*n_layers + [n_params],
+            max_x=max_x,
+            min_x=min_x,
+            W_inv=W_inv,
+            act=stable_sin_swish,
+            apply_inverse_whitening=True
+        )
+    else:
+        model = custom_MLP(
+            features=[hidden_size]*n_layers + [n_params],
+            max_x=max_x,
+            min_x=min_x,
+            act=stable_sin_swish
+        )
 
     # ---------------------- LOSS & HELPER FUNCTIONS -----------------------
     @jax.jit
@@ -364,9 +597,16 @@ def fit_flattening(F_network_ensemble, θs,
     # ---------------------- ENSEMBLE FINE-TUNING -----------------------
     # If F_fishnets represents an ensemble, perform fine-tuning per member.
     # Here we assume F_fishnets is an array of ensemble Fisher matrices.
-    F_ensemble = jnp.array(F_network_ensemble) / norm_factor  # Adjust if F_fishnets is already aggregated differently.
+    F_ensemble = jnp.array(F_network_ensemble) / norm_factor  # Normalized ensemble
+    
+    # If whitening, also whiten each ensemble member's Fishers
+    if use_whitening:
+        F_ensemble_for_training = F_ensemble # jnp.array([whiten_fisher_batch(f, W) for f in F_ensemble])
+    else:
+        F_ensemble_for_training = F_ensemble
+    
     theta_true = θs.reshape(-1, batch_size, n_params)
-    F_fishnets_ensemble = [f.reshape(-1, batch_size, n_params, n_params) for f in F_ensemble]
+    F_fishnets_ensemble = [f.reshape(-1, batch_size, n_params, n_params) for f in F_ensemble_for_training]
 
     print("FINE-TUNING EACH ENSEMBLE MEMBER")
     ensemble_ws = []
@@ -459,20 +699,31 @@ def fit_flattening(F_network_ensemble, θs,
     outname = output_prefix
     if SCALE_THETA:
         outname += "_scaled"
-    np.savez(outname,
-             theta=np.array(θs),
-             eta=np.array(ηs),
-             Jacobians=np.array(Jbar),
-             deltaJ=np.array(δJs),
-             delta_invJ=np.array(δinvJ),
-             meanF=np.array(F_ensemble),
-             dFs=np.array(dFs),
-             F_ensemble=np.array(allFs),
-             norm_factor=norm_factor,
-             ensemble_weights=weights,  # Using uniform weights here
-             eta_ensemble=np.array(ys),
-             Jbar_ensemble=np.array(dys)
+    
+    # Build output dictionary
+    output_dict = dict(
+        theta=np.array(θs),
+        eta=np.array(ηs),
+        Jacobians=np.array(Jbar),
+        deltaJ=np.array(δJs),
+        delta_invJ=np.array(δinvJ),
+        meanF=np.array(F_ensemble),
+        dFs=np.array(dFs),
+        F_ensemble=np.array(allFs),
+        norm_factor=norm_factor,
+        ensemble_weights=weights,
+        eta_ensemble=np.array(ys),
+        Jbar_ensemble=np.array(dys),
+        use_whitening=use_whitening
     )
+    
+    # Add whitening matrices if used
+    if use_whitening:
+        output_dict['W'] = np.array(W)  # Whitening matrix F_mean^{-1/2}
+        output_dict['W_inv'] = np.array(W_inv)  # Inverse whitening F_mean^{1/2}
+        output_dict['F_mean'] = np.array(F_mean)  # Mean Fisher (in normalized space)
+    
+    np.savez(outname, **output_dict)
 
     # ---------------------- COORDINATE VISUALISATION -----------------------
     # visualise the first two components vs first two params
@@ -553,6 +804,24 @@ if __name__ == '__main__':
         action="store_true",
         help="Disable coordinate visualization plot"
     )
+    parser.add_argument(
+        "--no-whitening",
+        action="store_true",
+        help="Disable Fisher whitening (not recommended for large dynamic range)"
+    )
+    parser.add_argument(
+        "--norm-method",
+        type=str,
+        default="median_max_eig",
+        choices=["median_max_eig", "median_trace", "median_det", "percentile_90"],
+        help="Method for computing robust norm factor. Default: median_max_eig"
+    )
+    parser.add_argument(
+        "--norm-factor",
+        type=float,
+        default=None,
+        help="Manual normalization factor (overrides --norm-method if provided)"
+    )
     args = parser.parse_args()
 
     # ---------------------- LOAD DATA FROM FILE -----------------------
@@ -574,16 +843,19 @@ if __name__ == '__main__':
                    n_layers=3,
                    batch_size=250,
                    epochs_phase1=10000,
-                   epochs_phase2=1000,
-                   finetune_epochs=1000,
+                   epochs_phase2=250,
+                   finetune_epochs=250,
                    min_epochs=1200,
                    patience=100,
                    lr_phase1=2e-6,
                    lr_schedule_initial=7e-5,
                    lr_decay=0.3,
                    lr_finetune=4e-6,
+                   norm_factor=args.norm_factor,
+                   norm_method=args.norm_method,
                    noise=1e-7,
                    seed=0,
                    output_prefix=args.output,
                    SCALE_THETA=False,
+                   use_whitening=not args.no_whitening,
                    do_plot=not args.no_plot)

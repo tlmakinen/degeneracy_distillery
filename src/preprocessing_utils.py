@@ -473,7 +473,8 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     F_norm = Fs / prior_norm
     
     if use_var:
-        C = F_norm.std(0) / (F_norm[argstar] + prior_norm)
+        print('using var F')
+        C = jnp.linalg.pinv(F_norm[argstar] / F_norm.std(0)) #
     else:
         C = jnp.linalg.pinv(F_norm[argstar])
     
@@ -527,6 +528,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                Favg: np.ndarray,
                                best_model_idx: int,
                                n_d: float = 1.0,
+                               use_var: bool = False,
                                verbose: bool = True) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
@@ -554,6 +556,9 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         Index of the best model to use as reference
     n_d : float
         Normalization factor (e.g., number of data points)
+    use_var : bool
+        If True, use variance-based covariance normalization in rotation.
+        Default is False.
     verbose : bool
         Whether to print progress information
         
@@ -602,7 +607,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         # Rotate to align with reference
         y_rot, dy_orig, dy_sr_rot, rotmat, A = rotate_coords(
             y, theta=X, Fs=Favg, dy=dy, 
-            y_reference=y_reference
+            y_reference=y_reference,
+            use_var=use_var,
         )
         
         if verbose:
@@ -691,6 +697,7 @@ def load_and_process_data(datapath: str, filename: str,
                           process_ensemble: bool = False,
                           n_d: float = 1.0,
                           y_reference_index: int = None,
+                          use_var: bool = False,
                           verbose: bool = True) -> Dict[str, Any]:
     """
     Load and process flattening data file.
@@ -709,6 +716,11 @@ def load_and_process_data(datapath: str, filename: str,
         If True, also run process_ensemble_rotation
     n_d : float
         Normalization factor for ensemble processing
+    y_reference_index : int, optional
+        Index of the model to use as reference. If None, uses the best model.
+    use_var : bool
+        If True, use variance-based covariance normalization in rotation.
+        Passed to process_ensemble_rotation. Default is False.
     verbose : bool
         Whether to print progress
         
@@ -752,7 +764,8 @@ def load_and_process_data(datapath: str, filename: str,
             Favg=Favg,
             best_model_idx=best_model_idx,
             n_d=n_d,
-            verbose=verbose
+            verbose=verbose,
+            use_var=use_var
         )
         # Merge results
         result.update(ensemble_result)

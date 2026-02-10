@@ -124,8 +124,8 @@ def make_fisher_plot_twopanel(network_fishers, filename):
 
     # labels
     ax1.set_title(r'$ \frac{1}{2} \ln \det F_{\rm true}(\theta)$')
-    ax1.set_xlabel('$\mu_1$')
-    ax2.set_ylabel('$\mu_2$')
+    ax1.set_xlabel(r'$\mu_1$')
+    ax2.set_ylabel(r'$\mu_2$')
     ax2.set_title(r'$ \frac{1}{2} \ln \det \langle F_{\rm NN}(\theta) \rangle $')
     plt.tight_layout()
     plt.savefig(filename, dpi=400)
@@ -192,6 +192,12 @@ def main():
         "--n-sims",
         type=int,
         default=5000,
+        help="Number of training simulations. Default: 5000"
+    )
+    parser.add_argument(
+        "--n-nets",
+        type=int,
+        default=20,
         help="Number of training simulations. Default: 5000"
     )
     args = parser.parse_args()
@@ -331,12 +337,11 @@ def main():
     #acts = acts[:15]
 
     # initialise several models
-    num_models = len(acts)
+    num_models = args.n_nets #len(acts)
 
-    # hids = jnp.array([10, 20, 32, 50, 50, 64, 64, 100, 100, 100, 128])
-    # hids = jnp.array([10, 20, 50, 100, 128])
-    #hids = np.arange(10, 100)
-    #hids = np.arange(20, 200)
+    inds = np.random.choice(np.arange(len(acts)), size=(num_models,), replace=True)
+
+    acts = [acts[h] for h in inds]
 
     hids = np.arange(100, 300)
 

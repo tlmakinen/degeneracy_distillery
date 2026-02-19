@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from typing import Sequence
 
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from fishnets import MLP,resMLP, Fishnet_from_embedding, optimized_smooth_leaky
 
@@ -47,6 +47,7 @@ def train_fishnets(theta,
                    patience: int = 20,
                    lr: float = 5e-5,
                    acts: list = None,
+                   scaler_type: str = 'minmax',
                    outdir: str = "fishnets-log"):
     """
     Trains an ensemble of fishnet networks.
@@ -68,6 +69,7 @@ def train_fishnets(theta,
       patience         : Patience before early stopping (calculated on validation set)
       lr               : Learning rate for the optimizer
       acts             : List of activation functions for diversity.
+      scaler_type      : Type of scaler to use for data normalization. Options: 'minmax' (MinMaxScaler) or 'standard' (StandardScaler). Default: 'minmax'.
       outdir           : Directory where outputs will be saved. If it does not exist, it is created;
                          if it exists, it is emptied before saving.
     
@@ -99,7 +101,13 @@ def train_fishnets(theta,
     xmax = theta.max(0) + 1e-3
 
     # -------------- RESCALE DATA --------------
-    data_scaler = MinMaxScaler(feature_range=(0, 1))
+    if scaler_type.lower() == 'minmax':
+        data_scaler = MinMaxScaler(feature_range=(0, 1))
+    elif scaler_type.lower() == 'standard':
+        data_scaler = StandardScaler()
+    else:
+        raise ValueError(f"Unknown scaler_type: '{scaler_type}'. Options are 'minmax' or 'standard'.")
+    
     data = data_scaler.fit_transform(data.reshape(-1, data_shape)).reshape(data.shape)
     data_test = data_scaler.transform(data_test.reshape(-1, data_shape)).reshape(data_test.shape)
     print("data_test shape:", data_test.shape)

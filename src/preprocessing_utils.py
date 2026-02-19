@@ -64,6 +64,8 @@ def reflection(u: np.ndarray, n: np.ndarray) -> np.ndarray:
 
 def rotate_x_to_y(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
+    Householder reflection. 
+
     Compute rotation matrix R such that R @ (x/|x|) = y/|y|.
     
     Uses double reflection method: first reflect over (v+u), then over v.
@@ -474,7 +476,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     
     if use_var:
         print('using var F')
-        C = jnp.linalg.pinv(F_norm[argstar] / F_norm.std(0)) #
+        C = jnp.linalg.pinv(F_norm.std(0)) # jnp.linalg.pinv(F_norm[argstar] / F_norm.std(0)) #
     else:
         C = jnp.linalg.pinv(F_norm[argstar])
     
@@ -685,6 +687,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         'Jbar': Jbar,
         'n_d': n_d,
         'eta_ensemble': eta_ensemble_masked,
+        'norm_factor': datafile['norm_factor']
     }
 
 
@@ -754,6 +757,7 @@ def load_and_process_data(datapath: str, filename: str,
         'Favg': Favg,
         'datafile': datafile,
         'eta_ensemble': datafile['eta_ensemble'],
+        'norm_factor': datafile['norm_factor']
     }
     
     if process_ensemble:

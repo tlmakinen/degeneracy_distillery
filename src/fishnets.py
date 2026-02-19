@@ -69,6 +69,16 @@ def smooth_leaky(x: Array) -> Array:
   """
   return jnp.where(x < -1, x, jnp.where((x < 1), ((-(jnp.abs(x)**3) / 3) + x*(x+2) + (1/3)), 3*x))
 
+@jax.jit
+def optimized_smooth_leaky(x: jnp.ndarray, alpha: float = 0.2) -> jnp.ndarray:
+    """
+    A C-infinity smooth version of a leaky ReLU.
+    Combines linear growth with a smooth transition at the origin.
+    """
+    # Using a softplus-based leak ensures no 'kinks' at -1 or 1
+    return alpha * x + (1 - alpha) * jax.nn.log_sigmoid(x) * x
+
+
 def safe_for_grad_log(x):
   return jnp.log(jnp.where(x > 0., x, 1.))
 

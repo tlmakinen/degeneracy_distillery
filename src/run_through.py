@@ -316,9 +316,8 @@ def main():
             nn.leaky_relu,
             nn.leaky_relu,
             nn.leaky_relu,
-            #nn.elu,   # elus fail the saturation test
-            #nn.elu,  
-            nn.leaky_relu,
+            optimized_smooth_leaky,
+            optimized_smooth_leaky,
             nn.swish,
             nn.swish, # not as good
             nn.swish, # not as good

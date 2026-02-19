@@ -16,7 +16,7 @@ from typing import Sequence
 
 from sklearn.preprocessing import MinMaxScaler
 
-from fishnets import MLP, Fishnet_from_embedding
+from fishnets import MLP,resMLP, Fishnet_from_embedding, optimized_smooth_leaky
 
 # --- Helper functions for prediction ---
 def predicted_fishers(model, w, data):
@@ -114,6 +114,8 @@ def train_fishnets(theta,
         acts = [nn.relu, nn.relu, nn.relu,
                 nn.leaky_relu, nn.leaky_relu, nn.leaky_relu, nn.leaky_relu,
                 nn.swish, nn.swish, nn.swish, mish, mish,
+                optimized_smooth_leaky, optimized_smooth_leaky,
+                optimized_smooth_leaky,
                 nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu]
 
     
@@ -132,8 +134,16 @@ def train_fishnets(theta,
     # Build ensemble: each network is a sequential composition of an MLP and a Fishnet_from_embedding.
     models = [
         nn.Sequential([
-            MLP(all_n_hidden[i], act=acts[i]),
-            Fishnet_from_embedding(n_p=n_params, act=acts[i], hidden=all_n_hidden[i][0])
+            resMLP(all_n_hidden[i], act=acts[i]),
+            Fishnet_from_embedding(
+            n_p = n_params,
+            act=acts[i],
+            hidden=all_n_hidden[i][0],
+            act_fisher=nn.gelu,
+            sharpness=np.random.randn(1,)*0.7 + 5.0,
+            threshold=np.random.randn(1,)*0.7 + 1.0
+                )
+            # Fishnet_from_embedding(n_p=n_params, act=acts[i], hidden=all_n_hidden[i][0])
         ])
         for i in range(num_models)
     ]

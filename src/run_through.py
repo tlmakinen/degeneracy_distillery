@@ -12,6 +12,7 @@ import yaml,os,sys
 import argparse
 
 from sklearn.preprocessing import MinMaxScaler
+from scipy.stats import linregress
 
 #import tensorflow_probability.substrates.jax as tfp
 
@@ -19,6 +20,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from fishnets import *
+from training_loop_fishnets import train_fishnets, predicted_fishers, predicted_mle
 
 # Function to load yaml configuration file
 def load_config(config_name, config_path="./"):
@@ -90,7 +92,10 @@ def make_fisher_plot(network_fishers, filename):
     ax2.set_ylabel(r'$\mu_2$')
     ax2.set_title(r'$ \frac{1}{2} \ln \det \langle F_{\rm NN}(\theta) \rangle $')
     plt.tight_layout()
-    plt.savefig(filename, dpi=400)
+    if not filename.endswith(('.png', '.pdf', '.jpg', '.svg')):
+        filename = filename + '.png'
+    plt.savefig(filename, dpi=400, bbox_inches='tight')
+    print(f"Saved grid plot to: {filename}")
 
     plt.close()
 
@@ -128,29 +133,15 @@ def make_fisher_plot_twopanel(network_fishers, filename):
     ax2.set_ylabel(r'$\mu_2$')
     ax2.set_title(r'$ \frac{1}{2} \ln \det \langle F_{\rm NN}(\theta) \rangle $')
     plt.tight_layout()
-    plt.savefig(filename, dpi=400)
+    if not filename.endswith(('.png', '.pdf', '.jpg', '.svg')):
+        filename = filename + '.png'
+    plt.savefig(filename, dpi=400, bbox_inches='tight')
+    print(f"Saved grid plot to: {filename}")
 
     plt.close()
 
 
 
-
-
-
-
-
-def predicted_fishers(model, w, data):
-    ensemble_predictions = []
-    def _getf(d):
-        return model.apply(w, d)[1]
-    F_network_out = jax.vmap(_getf)(data)
-    return F_network_out
-
-def predicted_mle(model,w,data):
-    def _getmle(d):
-        return model.apply(w, d)[0]
-    mle_out = jax.vmap(_getmle)(data)
-    return mle_out
 
 # plot all the other models as well
 # look at each model separately
@@ -198,7 +189,14 @@ def main():
         "--n-nets",
         type=int,
         default=20,
-        help="Number of training simulations. Default: 5000"
+        help="Number of networks to train. Default: 5000"
+    )
+    parser.add_argument(
+        "--shape-norm",
+        type=str,
+        default="correlation",
+        choices=["correlation", "trace"],
+        help="Normalization method for shape comparison. Default: correlation (Option 1), Alternative: trace (Option 2)"
     )
     args = parser.parse_args()
     
@@ -260,265 +258,46 @@ def main():
     keys = jr.split(key, num=nsims)
     data = jax.vmap(simulator)(keys, theta_)
 
-
     keys = jr.split(key2, num=nsims)
     data_test = jax.vmap(simulator)(keys, theta_test)
     theta = theta_.copy()
 
-
-    # rescale data for network
-    data_scaler = MinMaxScaler(feature_range=(0, 1))
-    data = data_scaler.fit_transform(data.reshape(-1, data_shape)).reshape(data.shape)
-    data_test = data_scaler.transform(data_test.reshape(-1, data_shape)).reshape(data_test.shape)
-
-
-    print("data_test", data_test.shape)
-    print("theta_test", theta_test.shape)
-
-
-    # ---------------------------------------------------------------------------------------------
-
-
-    # -------------- INITIALISE MODELS --------------
-    key = jr.PRNGKey(201)
-
-
+    # Train ensemble using the parent function
+    print("\n" + "="*60)
+    print("TRAINING FISHNETS ENSEMBLE")
+    print("="*60 + "\n")
+    
     mish = lambda x: x * nn.tanh(nn.softplus(x))
-
-
-    # acts = [
-    #         nn.relu,
-    #         nn.relu,
-    #         nn.relu,
-    #         nn.leaky_relu,
-    #         nn.leaky_relu,
-    #         nn.leaky_relu,
-    #         smooth_leaky,
-    #         nn.swish,
-    #         nn.swish,
-    #         nn.elu,
-    #         nn.elu,
-    #         nn.elu,
-    #         mish,
-    #         mish,
-    #         shifted_softplus,
-    #         shifted_softplus,
-    #         nn.softmax,
-    #         nn.softmax,
-    #         nn.gelu,
-    #         nn.gelu,
-    #         nn.gelu,
-    #         ]
-
-    acts = [nn.relu, 
-            nn.relu,
-            nn.relu,
-            nn.leaky_relu,
-            nn.leaky_relu,
-            nn.leaky_relu,
-            optimized_smooth_leaky,
-            optimized_smooth_leaky,
-            nn.swish,
-            nn.swish, # not as good
-            nn.swish, # not as good
-            mish,
-            mish,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            nn.gelu,
-            ]
-
-    #acts = acts[:15]
-
-    # initialise several models
-    num_models = args.n_nets #len(acts)
-
-    inds = np.random.choice(np.arange(len(acts)), size=(num_models,), replace=True)
-
-    acts = [acts[h] for h in inds]
-
-    hids = np.arange(100, 300)
-
-    all_n_hidden = []
-
-    # EDIT: IMPOSE A BOTTLENECK FOR EMBEDDING NET
-
-    for n in range(num_models):
-        key, rng = jr.split(key)
-        hidden = int(jr.choice(key, hids, replace=True))
-        print(hidden)
-
-        all_n_hidden.append([hidden,hidden,hidden]) # could add in (n_params + 1)
-
-    models = [nn.Sequential([
-                resMLP(all_n_hidden[i],
-                    act=acts[i]),
-                Fishnet_from_embedding(
-                            n_p = n_params,
-                            act=acts[i],
-                            hidden=all_n_hidden[i][0],
-                            act_fisher=nn.gelu,
-                            sharpness=np.random.randn(1,)*0.7 + 5.0,
-                            threshold=np.random.randn(1,)*0.7 + 1.0
-                )]
-            )
-            for i in range(num_models)]
-
-    data = jnp.squeeze(data)
-    keys = jr.split(key, num=num_models)
-    ws = [m.init(keys[i], data[0]) for i,m in enumerate(models)]
-
-
-    batch_size = 200 # change to like 10 or 20
-    patience = 200 ## set to 20 ?
-    epochs = 4000
-    min_epochs = 100
-    key = jr.PRNGKey(999)
-
-    def training_loop(key, model, w, data,
-                        theta,
-                        data_val,
-                        theta_val,
-                        patience=patience,
-                        epochs=epochs,
-                    min_epochs=min_epochs):
-
-        @jax.jit
-        def kl_loss(w, x_batched, theta_batched):
-
-            def fn(x, theta):
-                mle,F = model.apply(w, x)
-                return mle, F
-
-            mle, F = jax.vmap(fn)(x_batched, theta_batched)
-
-            res = (theta_batched - mle) #- xmin # subtract minimum
-            #res += 1.0
-
-            return 0.5*jnp.mean(
-                        (jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) \
-                                                        - jnp.log(jnp.linalg.det(F))), 
-                        axis=0)
-
-        #scheduler = optax.warmup_cosine_decay_schedule(
-        #  init_value=1e-5, peak_value=1e-3,
-        #  warmup_steps=200, decay_steps=400, end_value=5e-6
-        #)
-
-        #tx = optax.adam(learning_rate=5e-5) # scheduler
-        tx = optax.adam(learning_rate=5e-5)
-        opt_state = tx.init(w)
-        loss_grad_fn = jax.value_and_grad(kl_loss)
-
-        def body_fun(i, inputs):
-            w,loss_val, opt_state, _data, _theta = inputs
-            x_samples = _data[i]
-            y_samples = _theta[i]
-
-            loss, grads = loss_grad_fn(w, x_samples, y_samples)
-            updates, opt_state = tx.update(grads, opt_state, w)
-            w = optax.apply_updates(w, updates)
-
-            # keep running average
-            loss_val += loss
-
-            return w, loss_val, opt_state, _data, _theta
-
-
-        losses = jnp.zeros(epochs)
-        val_losses = jnp.zeros(epochs)
-
-        loss_val = 0.
-        n_train = nsims
-        lower = 0
-        upper = n_train // batch_size
-
-        counter = 0
-        patience_counter = 0
-        best_loss = jnp.inf
-        best_w = w
-
-        pbar = tqdm(range(epochs), leave=True, position=0)
-
-        for j in pbar:
-            key,rng = jr.split(key)
-
-            # reset loss value every epoch
-            loss_val = 0.0
-
-            data_shape = n_d*dim
-            # shuffle data every epoch
-            randidx = jr.permutation(key, jnp.arange(theta.reshape(-1, n_params).shape[0]), independent=True)
-            _data = data.reshape(-1, data_shape)[randidx].reshape(-1, batch_size, data_shape)
-            _theta = theta.reshape(-1, n_params)[randidx].reshape(-1, batch_size, n_params)
-
-            inits = (w, loss_val, opt_state, _data, _theta)
-
-            w, loss_val, opt_state, _data, _theta = jax.lax.fori_loop(lower, upper, body_fun, inits)
-            loss_val /= _data.shape[0] # average over all batches
-
-            losses = losses.at[j].set(loss_val)
-
-
-                # pass over validation data
-            val_loss, _ = loss_grad_fn(w, data_val, \
-                                        theta_val)
-
-            val_losses = val_losses.at[j].set(val_loss)
-
-
-            pbar.set_description('epoch %d loss: %.5f, val_loss: %.5f'%(j, loss_val, val_loss))
-
-
-            # use last 10 epochs as running average
-            #if j+1 > 10:
-            #  loss_val = jnp.mean(losses[j-10:])
-
-            counter += 1
-
-            # patience criterion
-            if val_loss < best_loss:
-                best_loss = val_loss
-                best_w = w
-
-            else:
-                patience_counter += 1
-
-            if (patience_counter - min_epochs > patience) and (j + 1 > min_epochs):
-                print("\n patience count exceeded: loss stopped decreasing \n")
-                break
-
-
-        return losses[:counter], val_losses[:counter], best_loss, best_w
-
-
-    print("STARTING TRAINING LOOP")
-
-    all_losses = []
-    all_val_losses = []
-    best_val_losses = []
-    trained_weights = []
-
-    keys = jr.split(key, num_models)
-
-    for i,w in enumerate(ws):
-        print("\n training model %d of %d \n"%(i+1, num_models))
-        loss, val_loss, best_val_loss, wtrained = training_loop(keys[i], models[i], w, data, theta,
-                                        data_test.squeeze(),
-                                        theta_test.squeeze())
-        all_losses.append(loss)
-        all_val_losses.append(val_loss)
-        best_val_losses.append(best_val_loss)
-        ws[i] = wtrained
-
-    # EDIT: TAKE THE BEST VALIDATION LOSS BEFORE EARLY STOPPING FOR ENSEMBLE WEIGHTS
-    ensemble_weights = jnp.array([1./jnp.exp(best_val_losses[i]) for i in range(num_models)])
-    print("ensemble weights", ensemble_weights)
+    acts = [nn.relu, nn.relu, nn.relu,
+            nn.leaky_relu, nn.leaky_relu, nn.leaky_relu,
+            optimized_smooth_leaky, optimized_smooth_leaky,
+            nn.swish, nn.swish, nn.swish,
+            mish, mish,
+            nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu, nn.gelu]
+    
+    ws, ensemble_weights, models, data_scaler = train_fishnets(
+        theta=theta,
+        data=data,
+        theta_test=theta_test,
+        data_test=data_test,
+        data_shape=data_shape,
+        hids_min=100,
+        hids_max=300,
+        n_layers=3,
+        num_models=args.n_nets,
+        seed_model=201,
+        seed_train=999,
+        train_batch_size=200,
+        train_epochs=4000,
+        train_min_epochs=100,
+        patience=200,
+        lr=5e-5,
+        acts=acts,
+        scaler_type='minmax',
+        outdir="fishnets-log"
+    )
+    
+    num_models = len(models)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -622,36 +401,210 @@ def main():
 
 
     # make the predictive plots
-
+    plt.figure(figsize=(8, 4))
+    
     plt.subplot(121)
-    plt.scatter(theta_test[:, 0], ensemble_mle_predictions[0, :, 0])
-    plt.scatter(theta_test[:, 0], ensemble_mle_predictions[1, :, 0])
+    plt.scatter(theta_test[:, 0], ensemble_mle_predictions[0, :, 0], alpha=0.5, label='Model 1', s=2)
+    plt.scatter(theta_test[:, 0], ensemble_mle_predictions[1, :, 0], alpha=0.5, label='Model 2', s=2)
+    plt.xlabel(r'$\theta_0$ (true)')
+    plt.ylabel(r'$\hat{\theta}_0$ (predicted)')
+    plt.legend(framealpha=0.0)
 
     plt.subplot(122)
-    plt.scatter(theta_test[:, 1], ensemble_mle_predictions[0, :, 1])
-    plt.scatter(theta_test[:, 1], ensemble_mle_predictions[1, :, 1])
-
+    plt.scatter(theta_test[:, 1], ensemble_mle_predictions[0, :, 1], alpha=0.5, label='Model 1', s=2)
+    plt.scatter(theta_test[:, 1], ensemble_mle_predictions[1, :, 1], alpha=0.5, label='Model 2', s=2)
+    plt.xlabel(r'$\theta_1$ (true)')
+    plt.ylabel(r'$\hat{\theta}_1$ (predicted)')
+    plt.legend(framealpha=0.0)
+    
+    plt.suptitle("MLE Predictions")
+    plt.tight_layout()
+    plt.savefig("mle_predictions.png", dpi=400, bbox_inches='tight')
+    print("Saved MLE predictions plot to: mle_predictions.png")
     plt.show()
 
 
 
-    def weighted_std(values, weights, axis=0):
-        """
-        Return the weighted average and standard deviation.
+def weighted_std(values, weights, axis=0):
+    """
+    Return the weighted average and standard deviation.
 
-        They weights are in effect first normalized so that they
-        sum to 1 (and so they must not all be 0).
+    They weights are in effect first normalized so that they
+    sum to 1 (and so they must not all be 0).
 
-        values, weights -- NumPy ndarrays with the same shape.
-        """
-        average = jnp.average(values, weights=weights, axis=axis)
-        # Fast and numerically precise:
-        variance = jnp.average((values-average)**2, weights=weights, axis=axis)
-        return jnp.sqrt(variance)
+    values, weights -- NumPy ndarrays with the same shape.
+    """
+    average = jnp.average(values, weights=weights, axis=axis)
+    # Fast and numerically precise:
+    variance = jnp.average((values-average)**2, weights=weights, axis=axis)
+    return jnp.sqrt(variance)
 
 
-    from scipy.stats import linregress
+def normalize_to_correlation(F):
+    """
+    Convert Fisher matrix to correlation-like form.
+    Normalizes by diagonal elements so diagonal = 1.
+    Off-diagonals become relative ratios.
+    """
+    diag_sqrt = jnp.sqrt(jnp.diagonal(F, axis1=-2, axis2=-1))
+    diag_sqrt_inv = 1.0 / diag_sqrt
+    return F * diag_sqrt_inv[..., :, None] * diag_sqrt_inv[..., None, :]
 
+
+def normalize_by_trace(F):
+    """
+    Normalize Fisher matrix by its trace.
+    Preserves all relative ratios while removing overall scale.
+    """
+    return F / jnp.trace(F, axis1=-2, axis2=-1)[..., None, None]
+
+
+def predictive_histogram(F_avg, F_std, true_Fishers, 
+                        title="Fisher Matrix",
+                        filename="fisher_components_hist",
+                        matrix_label="F",
+                        abs_offdiag=False):
+    """
+    Create a 3-panel histogram plot comparing predicted vs true Fisher matrix components.
+    
+    Parameters:
+        F_avg: Predicted mean Fisher matrices [n_samples, n_params, n_params]
+        F_std: Predicted std Fisher matrices [n_samples, n_params, n_params]
+        true_Fishers: True Fisher matrices [n_samples, n_params, n_params]
+        title: Title for the plot
+        filename: Filename to save the plot
+        matrix_label: Label for matrix components (e.g., 'F' or 'L')
+        abs_offdiag: Whether to take absolute value of off-diagonal elements
+    """
+    
+    plt.figure(figsize=(7, 3))
+    
+    # Component [0,0]
+    plt.subplot(131)
+    mus_pred = F_avg[:, 0, 0]
+    mus_sig = F_std[:, 0, 0]
+    mus_true = true_Fishers[..., 0, 0]
+    trace_to_plot = (mus_pred - mus_true) / mus_sig
+    
+    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
+             bins=np.linspace(-10, 10, num=50), density=True, label="normal")
+    plt.hist(trace_to_plot, alpha=0.45, density=True,
+             bins=np.linspace(-10, 10, num=50), label="data")
+    plt.xlabel(rf"$(\hat{{{matrix_label}}}_{{{0}{0}}} - {matrix_label}_{{{0}{0}}}) / \delta\hat{{{matrix_label}}}_{{{0}{0}}}$")
+    plt.legend(framealpha=0.0)
+    
+    # Component [0,1]
+    plt.subplot(132)
+    mus_pred = jnp.abs(F_avg[:, 0, 1]) if abs_offdiag else F_avg[:, 0, 1]
+    mus_sig = F_std[:, 0, 1]
+    mus_true = jnp.abs(true_Fishers[..., 0, 1]) if abs_offdiag else true_Fishers[..., 0, 1]
+    trace_to_plot = (mus_pred - mus_true) / mus_sig
+    
+    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
+             bins=np.linspace(-10, 10, num=50), density=True, label="normal")
+    plt.hist(trace_to_plot, alpha=0.45, density=True,
+             bins=np.linspace(-10, 10, num=50), label="data")
+    plt.xlabel(rf"$(\hat{{{matrix_label}}}_{{{0}{1}}} - {matrix_label}_{{{0}{1}}}) / \delta\hat{{{matrix_label}}}_{{{0}{1}}}$")
+    plt.legend(framealpha=0.0)
+    
+    # Component [1,1]
+    plt.subplot(133)
+    mus_pred = F_avg[:, 1, 1]
+    mus_sig = F_std[:, 1, 1]
+    mus_true = true_Fishers[..., 1, 1]
+    trace_to_plot = (mus_pred - mus_true) / mus_sig
+    
+    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
+             bins=np.linspace(-10, 10, num=50), density=True, label="normal")
+    plt.hist(trace_to_plot, alpha=0.45, density=True,
+             bins=np.linspace(-10, 10, num=50), label="data")
+    plt.xlabel(rf"$(\hat{{{matrix_label}}}_{{{1}{1}}} - {matrix_label}_{{{1}{1}}}) / \delta\hat{{{matrix_label}}}_{{{1}{1}}}$")
+    plt.legend(framealpha=0.0)
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    if not filename.endswith(('.png', '.pdf', '.jpg', '.svg')):
+        filename = filename + '.png'
+    plt.savefig(filename, dpi=400, bbox_inches='tight')
+    print(f"Saved histogram plot to: {filename}")
+    plt.show()
+
+
+def predictive_scatter(F_avg, true_Fishers,
+                      title="Fisher Matrix predictive",
+                      filename="fisher_components",
+                      matrix_label="F",
+                      abs_offdiag=False,
+                      do_regression=False):
+    """
+    Create a 3-panel scatter plot comparing predicted vs true Fisher matrix components.
+    
+    Parameters:
+        F_avg: Predicted mean Fisher matrices [n_samples, n_params, n_params]
+        true_Fishers: True Fisher matrices [n_samples, n_params, n_params]
+        title: Title for the plot
+        filename: Filename to save the plot
+        matrix_label: Label for matrix components (e.g., 'F' or 'L')
+        abs_offdiag: Whether to take absolute value of off-diagonal elements
+        do_regression: Whether to compute and print linear regression results
+    """
+    
+    plt.figure(figsize=(7, 3))
+    
+    # Component [0,0]
+    plt.subplot(131)
+    mus_pred = F_avg[:, 0, 0]
+    mus_true = true_Fishers[..., 0, 0]
+    
+    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
+    plt.plot(mus_true, mus_true, ls=':', c='k')
+    plt.xlabel(rf"${matrix_label}_{{{0}{0}}}$")
+    plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{0}{0}}}$")
+    plt.legend(framealpha=0.0)
+    
+    if do_regression:
+        result = linregress(mus_true, mus_pred)
+        print(f"{matrix_label}_00 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    
+    # Component [0,1]
+    plt.subplot(132)
+    mus_pred = jnp.abs(F_avg[:, 0, 1]) if abs_offdiag else F_avg[:, 0, 1]
+    mus_true = jnp.abs(true_Fishers[..., 0, 1]) if abs_offdiag else true_Fishers[..., 0, 1]
+    
+    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
+    plt.plot(mus_true, mus_true, ls=':', c='k')
+    plt.xlabel(rf"${matrix_label}_{{{0}{1}}}$")
+    plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{0}{1}}}$")
+    plt.legend(framealpha=0.0)
+    
+    if do_regression:
+        result = linregress(mus_true, mus_pred)
+        print(f"{matrix_label}_01 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    
+    # Component [1,1]
+    plt.subplot(133)
+    mus_pred = F_avg[:, 1, 1]
+    mus_true = true_Fishers[..., 1, 1]
+    
+    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
+    plt.plot(mus_true, mus_true, ls=':', c='k')
+    plt.xlabel(rf"${matrix_label}_{{{1}{1}}}$")
+    plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{1}{1}}}$")
+    plt.legend(framealpha=0.0)
+    
+    if do_regression:
+        result = linregress(mus_true, mus_pred)
+        print(f"{matrix_label}_11 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    if not filename.endswith(('.png', '.pdf', '.jpg', '.svg')):
+        filename = filename + '.png'
+    plt.savefig(filename, dpi=400, bbox_inches='tight')
+    print(f"Saved scatter plot to: {filename}")
+    plt.show()
+
+    # Fisher Matrix components
     F_ensemble = ((ensemble_F_predictions)) 
     true_Fishers = ((F_true_out))
 
@@ -661,412 +614,82 @@ def main():
     F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
     F_std = weighted_std(F_ensemble, weights=weights, axis=0)
 
-
-
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{00} - F_{00}) / \delta\hat{F}_{00}$")
-    plt.legend(framealpha=0.0)
-
-
-    plt.subplot(132)
-
-    mus_pred = jnp.abs(F_avg[:, 0,1]) #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = jnp.abs(((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{01} - F_{01}) / \delta\hat{F}_{01}$")
-    plt.legend(framealpha=0.0)
-
-
-
-    plt.subplot(133)
-
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{11} - F_{11}) / \delta\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-
-    plt.suptitle("Fisher Matrix")
-    plt.tight_layout()
-    plt.savefig("fisher_components_hist", dpi=400)
-
-    plt.show()
-
-
-    # PREDICTIVE PLOT --------------------------------------------------------------------------------------
-
-    # make a predictive plot
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-
-    plt.xlabel(r"$F_{00}$")
-    plt.ylabel(r"$\hat{F}_{00}$")
-    plt.legend(framealpha=0.0)
-
-    result = linregress(mus_true, mus_pred)
-    print("F_00 regression", "slope", result.intercept, "intercept", result.slope)
-
-
-    plt.subplot(132)
-
-    mus_pred = jnp.abs(F_avg[:, 0,1]) #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = jnp.abs(((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-
-    plt.xlabel(r"$F_{01}$")
-    plt.ylabel(r"$\hat{F}_{01}$")
-    plt.legend(framealpha=0.0)
-
-    result = linregress(mus_true, mus_pred)
-    print("F_01 regression", "slope", result.intercept, "intercept", result.slope)
-
-    plt.subplot(133)
-
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-    plt.xlabel(r"$F_{11}$")
-    plt.ylabel(r"$\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-
-    #result = linregress(mus_true, mus_pred)
-    #print("F_11 regression", "slope", result.intercept, "intercept", result.slope)
-
-
-    plt.suptitle("Fisher Matrix predictive")
-    plt.tight_layout()
-
-    plt.savefig("fisher_components", dpi=400)
-    plt.show()
+    # Fisher Matrix plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title="Fisher Matrix",
+                        filename="fisher_components_hist",
+                        matrix_label="F",
+                        abs_offdiag=True)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title="Fisher Matrix predictive",
+                      filename="fisher_components",
+                      matrix_label="F",
+                      abs_offdiag=True,
+                      do_regression=True)
 
 
 
 
+    # Cholesky Factors
     F_ensemble = jnp.linalg.cholesky(ensemble_F_predictions, upper=True)
     true_Fishers = jnp.linalg.cholesky(F_true_out, upper=True)
 
-
-    #F_ensemble /=  jnp.abs(jnp.triu(F_ensemble, k=-1) + 1.0).reshape(num_models, -1, n_params*n_params).sum(-1)[..., jnp.newaxis, jnp.newaxis]
-    #true_Fishers /= jnp.abs(jnp.triu(true_Fishers, k=-1) + 1.0).reshape(-1, n_params*n_params).sum(-1)[..., jnp.newaxis, jnp.newaxis]
-
     weights = ((ensemble_weights))
 
     F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
     F_std = weighted_std(F_ensemble, weights=weights, axis=0)
 
-
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{L}_{00} - L_{00}) / \delta\hat{L}_{00}$")
-    plt.legend(framealpha=0.0)
-
-
-    plt.subplot(132)
-
-    mus_pred = jnp.abs(F_avg[:, 0,1]) #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = jnp.abs(((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{L}_{01} - L_{01}) / \delta\hat{L}_{01}$")
-    plt.legend(framealpha=0.0)
+    # Cholesky Factors plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title="Cholesky Factors",
+                        filename="cholesky_factors_hist",
+                        matrix_label="L",
+                        abs_offdiag=True)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title="Cholesky Factors predictive",
+                      filename="cholesky_components",
+                      matrix_label="L",
+                      abs_offdiag=True,
+                      do_regression=False)
 
 
 
-    plt.subplot(133)
-
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{11} - F_{11}) / \delta\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-
-
-    plt.suptitle("Cholesky Factors")
-    plt.tight_layout()
-    plt.savefig("cholesky_factors_hist", dpi=400)
-
-    plt.show()
-
-
-
-    # PREDICTIVE PLOT --------------------------------------------------------------------------------------
-
-    # make a predictive plot
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-
-    plt.xlabel(r"$F_{00}$")
-    plt.ylabel(r"$\hat{F}_{00}$")
-    plt.legend(framealpha=0.0)
-
-
-    plt.subplot(132)
-
-    mus_pred = jnp.abs(F_avg[:, 0,1]) #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = jnp.abs(((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-
-    plt.xlabel(r"$F_{01}$")
-    plt.ylabel(r"$\hat{F}_{01}$")
-    plt.legend(framealpha=0.0)
-
-
-
-    plt.subplot(133)
-
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-    plt.xlabel(r"$F_{11}$")
-    plt.ylabel(r"$\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-
-    plt.suptitle("Cholesky Factors predictive")
-    plt.tight_layout()
-    plt.savefig("cholesky_components", dpi=400)
-    plt.show()
-
-
-
+    # Shape comparison
     F_ensemble = ensemble_F_predictions
     true_Fishers = F_true_out
 
-
-    F_ensemble /=  jnp.abs(jnp.triu(F_ensemble, k=-1) + 1.0).reshape(num_models, -1, n_params*n_params).sum(-1)[..., jnp.newaxis, jnp.newaxis]
-    true_Fishers /= jnp.abs(jnp.triu(true_Fishers, k=-1) + 1.0).reshape(-1, n_params*n_params).sum(-1)[..., jnp.newaxis, jnp.newaxis]
+    # Apply shape normalization based on command line argument
+    if args.shape_norm == "correlation":
+        F_ensemble = jax.vmap(jax.vmap(normalize_to_correlation))(F_ensemble)
+        true_Fishers = jax.vmap(normalize_to_correlation)(true_Fishers)
+        title_suffix = r"(correlation-normalized: $D^{-1/2} F D^{-1/2}$)"
+        title_suffix_short = "(correlation-normalized)"
+    elif args.shape_norm == "trace":
+        F_ensemble = jax.vmap(jax.vmap(normalize_by_trace))(F_ensemble)
+        true_Fishers = jax.vmap(normalize_by_trace)(true_Fishers)
+        title_suffix = r"(trace-normalized: $F / \mathrm{tr}(F)$)"
+        title_suffix_short = "(trace-normalized)"
 
     weights = ((ensemble_weights))
 
     F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
     F_std = weighted_std(F_ensemble, weights=weights, axis=0)
 
-
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{00} - F_{00}) / \delta\hat{F}_{00}$")
-    plt.legend(framealpha=0.0)
-
-
-    plt.subplot(132)
-
-    mus_pred = F_avg[:, 0,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{01} - F_{01}) / \delta\hat{F}_{01}$")
-    plt.legend(framealpha=0.0)
-
-
-
-    plt.subplot(133)
-
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-    trace_to_plot = (mus_pred - mus_true) / mus_sig
-
-    plt.hist(np.random.normal(0.0, scale=1.0, size=(10000,)),
-        bins=np.linspace(-10, 10, num=50), density=True, label="normal")
-
-    plt.hist(trace_to_plot, alpha=0.45, density=True,
-        bins=np.linspace(-10, 10, num=50), label="data")
-    plt.xlabel(r"$(\hat{F}_{11} - F_{11}) / \delta\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-    plt.suptitle(r"relative shape $\frac{F_{ij}}{\sum_{i,j < i}|F_{ij}|}$")
-    plt.tight_layout()
-    plt.savefig("shape_components_hist", dpi=400)
-
-    plt.show()
-
-
-
-
-    # PREDICTIVE PLOT --------------------------------------------------------------------------------------
-
-    # make a predictive plot
-    plt.figure(figsize=(7, 3))
-
-    plt.subplot(131)
-
-    mus_pred = F_avg[:, 0,0] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,0] #/ F_std[:, 0,1]
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 0, 0] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-    plt.xlabel(r"$F_{00}$")
-    plt.ylabel(r"$\hat{F}_{00}$")
-    plt.legend(framealpha=0.0)
-
-
-
-    plt.subplot(132)
-    mus_pred = jnp.abs(F_avg[:, 0,1]) #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 0,1] #/ F_std[:, 0,1]
-    # trace of true fishers
-    mus_true = jnp.abs(((true_Fishers)))[..., 0, 1] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-    plt.xlabel(r"$F_{01}$")
-    plt.ylabel(r"$\hat{F}_{01}$")
-    plt.legend(framealpha=0.0)
-
-
-
-    plt.subplot(133)
-    mus_pred = F_avg[:, 1,1] #/ F_avg[:, 0,1]
-    mus_sig = F_std[:, 1,1] #/ F_std[:, 0,1]
-
-    # trace of true fishers
-    mus_true = (((true_Fishers)))[..., 1, 1] #/ true_Fishers[:, 0,1]
-
-    plt.scatter(mus_true, mus_pred, alpha=0.45, label="data", s=2)
-    plt.plot(mus_true, mus_true, ls=':', c='k')
-    plt.xlabel(r"$F_{11}$")
-    plt.ylabel(r"$\hat{F}_{11}$")
-    plt.legend(framealpha=0.0)
-
-    plt.suptitle("Relative shape predictive")
-    plt.tight_layout()
-    plt.savefig("shapes", dpi=400)
-    plt.show()
+    # Shape comparison plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title=f"Shape comparison {title_suffix}",
+                        filename="shape_components_hist",
+                        matrix_label="F",
+                        abs_offdiag=False)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title=f"Shape predictive {title_suffix_short}",
+                      filename="shapes",
+                      matrix_label="F",
+                      abs_offdiag=False,
+                      do_regression=False)
 
 
 

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Lucas", email = "lucas.makinen@gmail.com"}
+    {name = "T. Lucas Makinen", email = "lucas.makinen@gmail.com"}
 ]
 keywords = ["machine-learning", "symbolic-regression", "neural-networks", "degeneracy"]
 classifiers = [
@@ -36,6 +36,7 @@ dependencies = [
     "optax>=0.2.4",
     "orbax-checkpoint>=0.11.0",
     "pyoperon>=0.4.0",
+    "esr @ git+https://github.com/DeaglanBartlett/ESR.git",
     "ipython>=8.26.0",
     "jupyter>=1.0.0",
     "jupyterlab>=4.2.0",
@@ -78,10 +79,11 @@ dev = [
     "mypy>=1.0.0",
 ]
 
+
 [project.urls]
-Homepage = "https://github.com/yourusername/degeneracy_distillery"
-Repository = "https://github.com/yourusername/degeneracy_distillery"
-Issues = "https://github.com/yourusername/degeneracy_distillery/issues"
+Homepage = "https://github.com/tlmakinen/degeneracy_distillery"
+Repository = "https://github.com/tlmakinen/degeneracy_distillery"
+Issues = "https://github.com/tlmakinen/degeneracy_distillery/issues"
 
 [tool.setuptools]
 package-dir = {"" = "."}

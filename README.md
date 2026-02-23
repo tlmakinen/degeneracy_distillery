@@ -41,6 +41,19 @@ from src.sr_utils import *
 
 See the `notebooks/` directory for example usage and analysis workflows.
 
+### Google Colab Installation
+
+For Google Colab, use:
+
+```python
+# Clone and install
+!git clone https://github.com/yourusername/degeneracy_distillery.git
+%cd degeneracy_distillery
+!pip install -e .
+```
+
+**Note:** The package will automatically install the `esr` package ([ESR by DeaglanBartlett](https://github.com/DeaglanBartlett/ESR)) for symbolic regression complexity metrics.
+
 ## Project Structure
 
 ```

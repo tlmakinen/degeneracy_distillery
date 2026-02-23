@@ -46,6 +46,8 @@ This method recreates the exact conda environment used during development, inclu
    ```bash
    pip install -e .
    ```
+   
+   This will automatically install all dependencies, including ESR from GitHub.
 
 ### Option 2: Using pip only (Quick Install)
 
@@ -122,6 +124,12 @@ The package requires `pyoperon>=0.4.0`, which is a symbolic regression library. 
   ```bash
   sudo apt-get install cmake libeigen3-dev
   ```
+
+### ESR Dependency
+
+The package requires the `esr` package ([ESR by DeaglanBartlett](https://github.com/DeaglanBartlett/ESR)) for computing symbolic regression complexity metrics (MDL criterion, Aifeyn complexity).
+
+**ESR is automatically installed** when you install `degeneracy-distillery` via pip, as it's listed in the dependencies. The installation process will clone it from GitHub and install it for you.
 
 ### JAX with GPU Support
 

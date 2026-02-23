@@ -99,7 +99,7 @@ esac
 
 # Verify installation
 echo "Verifying installation..."
-python -c "import sys; sys.path.insert(0, 'src'); from training_loop_flatten import *; print('✓ Package imported successfully')" || echo "⚠ Warning: Import test failed"
+python -c "from degeneracy_distillery.src import training_loop_flatten; print('✓ Package imported successfully')" || echo "⚠ Warning: Import test failed"
 
 echo ""
 echo "Note: ESR package will be automatically installed via pip"

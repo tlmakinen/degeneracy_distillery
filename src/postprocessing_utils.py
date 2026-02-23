@@ -21,11 +21,19 @@ from tqdm import tqdm
 from copy import deepcopy
 
 # Import preprocessing utilities
-from preprocessing_utils import (
-    flatten_with_numerical_jacobian,
-    batch_flatten_fisher,
-    weighted_std,
-)
+# Support both package import and direct script execution
+try:
+    from .preprocessing_utils import (
+        flatten_with_numerical_jacobian,
+        batch_flatten_fisher,
+        weighted_std,
+    )
+except ImportError:
+    from preprocessing_utils import (
+        flatten_with_numerical_jacobian,
+        batch_flatten_fisher,
+        weighted_std,
+    )
 
 import esr.generation.generator
 

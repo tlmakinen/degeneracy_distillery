@@ -31,13 +31,27 @@ pip install -e .
 
 ## Usage
 
-Import modules from the `src` package:
+### Option 1: Import as a Package (Recommended for Colab/External Use)
 
 ```python
-from src.training_loop_flatten import *
-from src.preprocessing_utils import *
-from src.sr_utils import *
+from degeneracy_distillery.src.training_loop_flatten import *
+from degeneracy_distillery.src.preprocessing_utils import *
+from degeneracy_distillery.src.sr_utils import *
 ```
+
+### Option 2: Direct Import (For Working in Repository)
+
+When working directly in the repository (e.g., from notebooks/):
+
+```python
+import sys
+sys.path.insert(0, '../src')  # or 'src' if at repo root
+from training_loop_flatten import *
+from preprocessing_utils import *
+from sr_utils import *
+```
+
+**Both methods work seamlessly!** The code automatically detects which import method to use.
 
 See the `notebooks/` directory for example usage and analysis workflows.
 

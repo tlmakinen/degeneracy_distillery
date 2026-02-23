@@ -32,7 +32,17 @@ The ESR package is automatically cloned from [DeaglanBartlett/ESR](https://githu
 
 ## Importing Modules
 
-After installation, import modules with:
+Both import methods work seamlessly!
+
+### Method 1: Package Import (Recommended)
+
+```python
+from degeneracy_distillery.src.training_loop_flatten import *
+from degeneracy_distillery.src.preprocessing_utils import *
+from degeneracy_distillery.src.sr_utils import *
+```
+
+### Method 2: Direct Import
 
 ```python
 import sys
@@ -43,12 +53,7 @@ from preprocessing_utils import *
 from sr_utils import *
 ```
 
-Or if installed as a package:
-
-```python
-from src.training_loop_flatten import *
-from src.preprocessing_utils import *
-```
+The code automatically uses the correct import method based on your setup.
 
 ## Troubleshooting
 

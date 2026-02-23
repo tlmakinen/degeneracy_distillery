@@ -21,8 +21,13 @@ import scipy
 import yaml,os
 import argparse
 
-from fishnets import *
-from flatten_net import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .flatten_net import *
+except ImportError:
+    from fishnets import *
+    from flatten_net import *
 
 
 # Function to load yaml configuration file

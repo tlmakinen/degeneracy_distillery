@@ -19,8 +19,13 @@ from scipy.stats import linregress
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from fishnets import *
-from training_loop_fishnets import train_fishnets, predicted_fishers, predicted_mle
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .training_loop_fishnets import train_fishnets, predicted_fishers, predicted_mle
+except ImportError:
+    from fishnets import *
+    from training_loop_fishnets import train_fishnets, predicted_fishers, predicted_mle
 
 # Function to load yaml configuration file
 def load_config(config_name, config_path="./"):

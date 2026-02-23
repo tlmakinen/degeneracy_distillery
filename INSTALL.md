@@ -90,7 +90,17 @@ For contributors who want to install with development tools:
 
 ## Verifying Installation
 
-After installation, verify that the package is correctly installed:
+After installation, verify that the package is correctly installed. **Both import methods work:**
+
+### Method 1: Package Import
+
+```python
+from degeneracy_distillery.src.training_loop_flatten import *
+from degeneracy_distillery.src.preprocessing_utils import *
+from degeneracy_distillery.src.sr_utils import *
+```
+
+### Method 2: Direct Import (from repository)
 
 ```python
 import sys
@@ -101,13 +111,7 @@ from preprocessing_utils import *
 from sr_utils import *
 ```
 
-Or if you're using the package as installed:
-
-```python
-from src import training_loop_flatten
-from src import preprocessing_utils
-from src import sr_utils
-```
+The code uses try-except blocks to automatically detect and use the correct import method.
 
 ## Special Notes
 

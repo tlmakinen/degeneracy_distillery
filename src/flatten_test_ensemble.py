@@ -19,8 +19,13 @@ import jax.random as jr
 import flax.linen as nn
 import scipy
 
-from fishnets import *
-from flatten_net import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .flatten_net import *
+except ImportError:
+    from fishnets import *
+    from flatten_net import *
 
 
 Array = Any

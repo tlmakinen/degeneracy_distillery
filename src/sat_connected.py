@@ -15,7 +15,12 @@ from sklearn.preprocessing import MinMaxScaler
 #import tensorflow_probability.substrates.jax as tfp
 
 import matplotlib.pyplot as plt
-from fishnets import *
+
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+except ImportError:
+    from fishnets import *
 
 # Function to load yaml configuration file
 def load_config(config_name, config_path="./"):

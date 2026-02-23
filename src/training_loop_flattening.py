@@ -19,8 +19,13 @@ import optax
 import flax.linen as nn
 import scipy
 
-from fishnets import *
-from flatten_net import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .flatten_net import *
+except ImportError:
+    from fishnets import *
+    from flatten_net import *
 import os,sys
 
 
@@ -45,8 +50,13 @@ from typing import Sequence, Any, Callable
 from tqdm import tqdm
 
 # Import external modules (assumed to be provided)
-from fishnets import *
-from flatten_net import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .flatten_net import *
+except ImportError:
+    from fishnets import *
+    from flatten_net import *
 
 # ---------------------- CUSTOM NETWORK DEFINITIONS -----------------------
 class custom_MLP(nn.Module):

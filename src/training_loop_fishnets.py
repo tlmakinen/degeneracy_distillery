@@ -16,7 +16,11 @@ from typing import Sequence
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from fishnets import MLP,resMLP, Fishnet_from_embedding, optimized_smooth_leaky
+# Support both package import and direct script execution
+try:
+    from .fishnets import MLP, resMLP, Fishnet_from_embedding, optimized_smooth_leaky
+except ImportError:
+    from fishnets import MLP, resMLP, Fishnet_from_embedding, optimized_smooth_leaky
 
 # --- Helper functions for prediction ---
 def predicted_fishers(model, w, data):

@@ -17,7 +17,11 @@ from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from fishnets import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+except ImportError:
+    from fishnets import *
 
 # Function to load yaml configuration file
 def load_config(config_name, config_path="./"):

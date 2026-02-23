@@ -20,8 +20,13 @@ import flax.linen as nn
 import scipy
 import yaml,os
 
-from fishnets import *
-from flatten_net import *
+# Support both package import and direct script execution
+try:
+    from .fishnets import *
+    from .flatten_net import *
+except ImportError:
+    from fishnets import *
+    from flatten_net import *
 
 def load_config(config_name, config_path="./"):
     with open(os.path.join(config_path, config_name)) as file:

@@ -462,8 +462,12 @@ def fit_flattening(F_network_ensemble, θs,
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
-    θs (theta values) as inputs along with various hyperparameters controlling the 
+    θs (parameter values) as inputs along with various hyperparameters controlling the 
     training procedure.
+
+    The user can optionally use an invertibl neural network (RealNVP) to learn the mapping
+    for downstream tasks, although the default residual MLP usually returns flatter coordinates
+    for the downstream symbolic regression fitting. 
     
     Args:
         F_network_ensemble: Ensemble of Fisher matrices, shape (n_ensemble, n_samples, n_params, n_params)
@@ -503,7 +507,7 @@ def fit_flattening(F_network_ensemble, θs,
         nn_inv: If True, use RealNVP (invertible normalizing flow) instead of MLP.
                 The RealNVP is initialized with hidden_dims=hidden_size and 
                 num_layers=n_layers. Can be combined with use_whitening=True for 
-                WhitenedRealNVP.
+                WhitenedRealNVP. 
         do_plot: Whether to generate coordinate visualization plots
     
     Returns:

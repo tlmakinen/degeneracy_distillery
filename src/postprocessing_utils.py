@@ -27,13 +27,7 @@ from preprocessing_utils import (
     weighted_std,
 )
 
-# Optional imports - fail gracefully if not available
-try:
-    import esr.generation.generator
-    ESR_AVAILABLE = True
-except ImportError:
-    ESR_AVAILABLE = False
-    print("Warning: esr package not available. Some SR functions will not work.")
+import esr.generation.generator
 
 
 # =============================================================================
@@ -341,9 +335,6 @@ def check_flattening(coordinates: List[str], X: np.ndarray, Fs: np.ndarray,
     Jpred : jnp.ndarray, optional
         Predicted Jacobian (if return_J=True)
     """
-    if not ESR_AVAILABLE:
-        raise ImportError("esr package required for check_flattening")
-    
     if A is None:
         A = jnp.eye(X.shape[1])
     
@@ -822,9 +813,6 @@ def get_component(eq: str,
     linear_indexes : list
         Indices of linear parameters
     """
-    if not ESR_AVAILABLE:
-        raise ImportError("esr package required for get_component")
-    
     basis_functions = [
         ["X", "b"],
         ["square", "exp", "inv", "sqrt", "log", "cos", "logAbs"],

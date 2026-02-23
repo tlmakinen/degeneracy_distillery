@@ -76,6 +76,8 @@ def train_fishnets(theta,
     Returns:
       ws             : A list of trained parameters for each ensemble network.
       ensemble_weights : A vector of weights for each ensemble member (computed from the best validation loss).
+      models         : A list of the ensemble models.
+      data_scaler    : The fitted data scaler (MinMaxScaler or StandardScaler).
     """
     # Ensure the output directory exists and is empty.
     print("saving to", outdir)
@@ -285,7 +287,7 @@ def train_fishnets(theta,
              ensemble_weights=ensemble_weights_arr)
     print("Training completed. Outputs saved to:", outname + ".npz")
 
-    return ws, ensemble_weights_arr
+    return ws, ensemble_weights_arr, models, data_scaler
 
 # -------------- EXAMPLE USAGE --------------
 if __name__ == '__main__':

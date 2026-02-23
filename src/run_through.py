@@ -425,6 +425,96 @@ def main():
 
 
 
+    # Fisher Matrix components
+    F_ensemble = ((ensemble_F_predictions)) 
+    true_Fishers = ((F_true_out))
+
+    weights = ((ensemble_weights))
+
+    # compute average
+    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
+    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
+
+    # Fisher Matrix plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title="Fisher Matrix",
+                        filename="fisher_components_hist",
+                        matrix_label="F",
+                        abs_offdiag=True)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title="Fisher Matrix predictive",
+                      filename="fisher_components",
+                      matrix_label="F",
+                      abs_offdiag=True,
+                      do_regression=True)
+
+
+
+
+    # Cholesky Factors
+    F_ensemble = jnp.linalg.cholesky(ensemble_F_predictions, upper=True)
+    true_Fishers = jnp.linalg.cholesky(F_true_out, upper=True)
+
+    weights = ((ensemble_weights))
+
+    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
+    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
+
+    # Cholesky Factors plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title="Cholesky Factors",
+                        filename="cholesky_factors_hist",
+                        matrix_label="L",
+                        abs_offdiag=True)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title="Cholesky Factors predictive",
+                      filename="cholesky_components",
+                      matrix_label="L",
+                      abs_offdiag=True,
+                      do_regression=False)
+
+
+
+    # Shape comparison
+    F_ensemble = ensemble_F_predictions
+    true_Fishers = F_true_out
+
+    # Apply shape normalization based on command line argument
+    if args.shape_norm == "correlation":
+        F_ensemble = jax.vmap(jax.vmap(normalize_to_correlation))(F_ensemble)
+        true_Fishers = jax.vmap(normalize_to_correlation)(true_Fishers)
+        title_suffix = r"(correlation-normalized: $D^{-1/2} F D^{-1/2}$)"
+        title_suffix_short = "(correlation-normalized)"
+    elif args.shape_norm == "trace":
+        F_ensemble = jax.vmap(jax.vmap(normalize_by_trace))(F_ensemble)
+        true_Fishers = jax.vmap(normalize_by_trace)(true_Fishers)
+        title_suffix = r"(trace-normalized: $F / \mathrm{tr}(F)$)"
+        title_suffix_short = "(trace-normalized)"
+
+    weights = ((ensemble_weights))
+
+    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
+    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
+
+    # Shape comparison plots
+    predictive_histogram(F_avg, F_std, true_Fishers,
+                        title=f"Shape comparison {title_suffix}",
+                        filename="shape_components_hist",
+                        matrix_label="F",
+                        abs_offdiag=False)
+    
+    predictive_scatter(F_avg, true_Fishers,
+                      title=f"Shape predictive {title_suffix_short}",
+                      filename="shapes",
+                      matrix_label="F",
+                      abs_offdiag=False,
+                      do_regression=False)
+
+
+# END OF MAIN
+
 def weighted_std(values, weights, axis=0):
     """
     Return the weighted average and standard deviation.
@@ -562,9 +652,9 @@ def predictive_scatter(F_avg, true_Fishers,
     plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{0}{0}}}$")
     plt.legend(framealpha=0.0)
     
-    if do_regression:
-        result = linregress(mus_true, mus_pred)
-        print(f"{matrix_label}_00 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    # if do_regression:
+        # result = linregress(mus_true, mus_pred)
+        # print(f"{matrix_label}_00 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
     
     # Component [0,1]
     plt.subplot(132)
@@ -577,9 +667,9 @@ def predictive_scatter(F_avg, true_Fishers,
     plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{0}{1}}}$")
     plt.legend(framealpha=0.0)
     
-    if do_regression:
-        result = linregress(mus_true, mus_pred)
-        print(f"{matrix_label}_01 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    # if do_regression:
+        # result = linregress(mus_true, mus_pred)
+        # print(f"{matrix_label}_01 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
     
     # Component [1,1]
     plt.subplot(133)
@@ -592,9 +682,9 @@ def predictive_scatter(F_avg, true_Fishers,
     plt.ylabel(rf"$\hat{{{matrix_label}}}_{{{1}{1}}}$")
     plt.legend(framealpha=0.0)
     
-    if do_regression:
-        result = linregress(mus_true, mus_pred)
-        print(f"{matrix_label}_11 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
+    # if do_regression:
+        # result = linregress(mus_true, mus_pred)
+        # print(f"{matrix_label}_11 regression: slope={result.slope:.4f}, intercept={result.intercept:.4f}")
     
     plt.suptitle(title)
     plt.tight_layout()
@@ -604,93 +694,7 @@ def predictive_scatter(F_avg, true_Fishers,
     print(f"Saved scatter plot to: {filename}")
     plt.show()
 
-    # Fisher Matrix components
-    F_ensemble = ((ensemble_F_predictions)) 
-    true_Fishers = ((F_true_out))
-
-    weights = ((ensemble_weights))
-
-    # compute average
-    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
-    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
-
-    # Fisher Matrix plots
-    predictive_histogram(F_avg, F_std, true_Fishers,
-                        title="Fisher Matrix",
-                        filename="fisher_components_hist",
-                        matrix_label="F",
-                        abs_offdiag=True)
     
-    predictive_scatter(F_avg, true_Fishers,
-                      title="Fisher Matrix predictive",
-                      filename="fisher_components",
-                      matrix_label="F",
-                      abs_offdiag=True,
-                      do_regression=True)
-
-
-
-
-    # Cholesky Factors
-    F_ensemble = jnp.linalg.cholesky(ensemble_F_predictions, upper=True)
-    true_Fishers = jnp.linalg.cholesky(F_true_out, upper=True)
-
-    weights = ((ensemble_weights))
-
-    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
-    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
-
-    # Cholesky Factors plots
-    predictive_histogram(F_avg, F_std, true_Fishers,
-                        title="Cholesky Factors",
-                        filename="cholesky_factors_hist",
-                        matrix_label="L",
-                        abs_offdiag=True)
-    
-    predictive_scatter(F_avg, true_Fishers,
-                      title="Cholesky Factors predictive",
-                      filename="cholesky_components",
-                      matrix_label="L",
-                      abs_offdiag=True,
-                      do_regression=False)
-
-
-
-    # Shape comparison
-    F_ensemble = ensemble_F_predictions
-    true_Fishers = F_true_out
-
-    # Apply shape normalization based on command line argument
-    if args.shape_norm == "correlation":
-        F_ensemble = jax.vmap(jax.vmap(normalize_to_correlation))(F_ensemble)
-        true_Fishers = jax.vmap(normalize_to_correlation)(true_Fishers)
-        title_suffix = r"(correlation-normalized: $D^{-1/2} F D^{-1/2}$)"
-        title_suffix_short = "(correlation-normalized)"
-    elif args.shape_norm == "trace":
-        F_ensemble = jax.vmap(jax.vmap(normalize_by_trace))(F_ensemble)
-        true_Fishers = jax.vmap(normalize_by_trace)(true_Fishers)
-        title_suffix = r"(trace-normalized: $F / \mathrm{tr}(F)$)"
-        title_suffix_short = "(trace-normalized)"
-
-    weights = ((ensemble_weights))
-
-    F_avg = (jnp.average(F_ensemble, axis=0, weights=weights))
-    F_std = weighted_std(F_ensemble, weights=weights, axis=0)
-
-    # Shape comparison plots
-    predictive_histogram(F_avg, F_std, true_Fishers,
-                        title=f"Shape comparison {title_suffix}",
-                        filename="shape_components_hist",
-                        matrix_label="F",
-                        abs_offdiag=False)
-    
-    predictive_scatter(F_avg, true_Fishers,
-                      title=f"Shape predictive {title_suffix_short}",
-                      filename="shapes",
-                      matrix_label="F",
-                      abs_offdiag=False,
-                      do_regression=False)
-
 
 
 

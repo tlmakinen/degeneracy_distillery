@@ -272,6 +272,16 @@ class RealNVPWrapper(nn.Module):
         
         # Return only the output for flattening
         return y
+    
+    def inverse(self, y):
+        """
+        Inverse transformation: η -> θ
+        Reverses the forward pass operations in reverse order.
+        """
+        y = self.real_nvp.inverse(y)
+        y -= 1.0
+        y = (y * (self.max_x - self.min_x)) + self.min_x
+        return y
 
 
 class WhitenedRealNVP(nn.Module):
@@ -319,6 +329,24 @@ class WhitenedRealNVP(nn.Module):
         if self.apply_inverse_whitening:
             y = self.W_inv @ y
         
+        return y
+    
+    def inverse(self, y):
+        """
+        Inverse transformation: η -> θ
+        Reverses the forward pass operations in reverse order.
+        First reverses the whitening, then the RealNVP, then the min-max scaling.
+        """
+        # Reverse inverse whitening transform (only if it was applied in forward)
+        if self.apply_inverse_whitening:
+            y = jnp.linalg.inv(self.W_inv) @ y
+        
+        # Reverse RealNVP transformation
+        y = self.real_nvp.inverse(y)
+        
+        # Reverse min-max scaling
+        y -= 1.0
+        y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
 # ---------------------- UTILITY FUNCTIONS -----------------------

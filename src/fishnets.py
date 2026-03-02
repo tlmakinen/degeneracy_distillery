@@ -123,6 +123,7 @@ def fill_diagonal(a, val):
     return a
 
 def construct_fisher_matrix_single(outputs):
+    outputs = jnp.exp(outputs)
     Q = fill_lower_tri(outputs)
     middle = jnp.diag(jnp.tril(Q) - nn.softplus(jnp.tril(Q)))
     padding = jnp.zeros(Q.shape)
@@ -130,6 +131,45 @@ def construct_fisher_matrix_single(outputs):
     L = Q - fill_diagonal(padding, middle)
 
     return jnp.einsum('...ij,...jk->...ik', L, jnp.transpose(L, (1, 0)))
+
+
+def construct_fisher_matrix_log_cholesky(outputs, n_p):
+    """
+    Construct Fisher matrix from properly parameterized Cholesky factors.
+    
+    Learns log of diagonal elements (for positivity constraint) and 
+    unconstrained off-diagonal elements.
+    
+    Args:
+        outputs: flat array of length n_p * (n_p + 1) / 2
+        n_p: dimension of the parameter space
+    
+    Returns:
+        Fisher matrix F = L @ L.T where L is lower triangular
+    """
+    # Split outputs into diagonal and off-diagonal components
+    n_diag = n_p
+    n_off_diag = (n_p * (n_p - 1)) // 2
+    
+    # First n_diag elements are log-diagonal (exponentiate for positivity)
+    log_diag = outputs[:n_diag]
+    diag_elements = jnp.exp(log_diag)
+    
+    # Remaining elements are off-diagonal (unconstrained)
+    off_diag = outputs[n_diag:]
+    
+    # Construct lower triangular matrix
+    L = jnp.zeros((n_p, n_p))
+    
+    # Fill diagonal
+    L = L.at[jnp.arange(n_p), jnp.arange(n_p)].set(diag_elements)
+    
+    # Fill off-diagonal (lower triangle only)
+    lower_idx = jnp.tril_indices(n_p, k=-1)
+    L = L.at[lower_idx].set(off_diag)
+    
+    # Return F = L @ L.T
+    return L @ L.T
 
 
 def construct_fisher_matrix_multiple(outputs):
@@ -199,7 +239,7 @@ class Fishnet_from_embedding(nn.Module):
         t = nn.Dense(self.n_p)(t)
         fisher_cholesky = nn.Dense((self.n_p * (self.n_p + 1) // 2))(fisher_cholesky)
 
-        F = construct_fisher_matrix_single((fisher_cholesky)) + priorCinv
+        F = construct_fisher_matrix_log_cholesky(fisher_cholesky, self.n_p) + priorCinv
         #t = jnp.einsum("ij,j->i", jnp.linalg.inv(F), t)
 
         return t, F

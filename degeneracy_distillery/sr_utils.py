@@ -81,7 +81,13 @@ from sklearn.model_selection import train_test_split
 from pyoperon.sklearn import SymbolicRegressor
 import sympy
 import inspect
-import esr.generation.generator
+
+# Try importing ESR (required for MDL calculations)
+try:
+    import esr.generation.generator
+    ESR_AVAILABLE = True
+except ImportError:
+    ESR_AVAILABLE = False
 
 
 # =============================================================================

@@ -28,6 +28,9 @@ conda activate degen
 # Install package
 pip install -e .
 
+# Optional: Install Jupyter for local notebook development
+pip install -e ".[jupyter]"
+
 # Install ESR (required)
 git clone https://github.com/DeaglanBartlett/ESR.git
 pip install -e ESR
@@ -38,9 +41,10 @@ pip install -e ESR
 ### Option 1: Import as a Package (Recommended for Colab/External Use)
 
 ```python
-from degeneracy_distillery.src.training_loop_flatten import *
-from degeneracy_distillery.src.preprocessing_utils import *
-from degeneracy_distillery.src.sr_utils import *
+import degeneracy_distillery
+from degeneracy_distillery.training_loop_flatten import *
+from degeneracy_distillery.preprocessing_utils import *
+from degeneracy_distillery.sr_utils import *
 ```
 
 ### Option 2: Direct Import (For Working in Repository)
@@ -68,23 +72,29 @@ For Google Colab, use:
 # Clone and install
 !git clone https://github.com/yourusername/degeneracy_distillery.git
 %cd degeneracy_distillery
+
+# Install the package (this installs all dependencies including pyoperon, jax, etc.)
 !pip install -e .
 
-# Install ESR (required)
+# Install ESR (required - must be installed separately)
 !git clone https://github.com/DeaglanBartlett/ESR.git
 !pip install -e ESR
 
 # Verify installation
 import degeneracy_distillery
 from degeneracy_distillery.training_loop_flatten import fit_flattening
+from degeneracy_distillery.sr_utils import fit_and_analyze_sr
 print(f"✓ Package version: {degeneracy_distillery.__version__}")
+print("✓ All imports successful!")
 ```
 
-**Important:** After installing with `!pip install -e .`, use package imports:
+**Troubleshooting:** If you get `ModuleNotFoundError` for `pyoperon` or `jax`, the pip install didn't complete successfully. Check the output for errors, then try:
 ```python
-from degeneracy_distillery.training_loop_flatten import fit_flattening
-from degeneracy_distillery.preprocessing_utils import load_and_process_data
+!pip install pyoperon jax jaxlib flax
+!pip install -e .  # Try again
 ```
+
+See `COLAB_SETUP.md` for detailed troubleshooting.
 
 ## Project Structure
 

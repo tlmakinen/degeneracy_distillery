@@ -96,6 +96,13 @@ For contributors who want to install with development tools:
 
    This includes additional tools like pytest, black, isort, flake8, and mypy.
 
+3. **Optional: Install Jupyter packages for local notebook development:**
+   ```bash
+   pip install -e ".[jupyter]"
+   ```
+
+   This installs ipython, jupyter, jupyterlab, and related packages. **Note:** These are optional because environments like Google Colab already have them pre-installed.
+
 ## Verifying Installation
 
 After installation, verify that the package is correctly installed. **Both import methods work:**

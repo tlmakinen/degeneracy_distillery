@@ -1,0 +1,29 @@
+# ============================================================================
+# COPY-PASTE COLAB INSTALLATION CELL
+# ============================================================================
+# Run this entire cell in Google Colab to install degeneracy-distillery
+# After running, you may need to restart the runtime (Runtime → Restart runtime)
+# ============================================================================
+
+# Clone and navigate
+!git clone https://github.com/yourusername/degeneracy_distillery.git
+%cd degeneracy_distillery
+
+# Install the package
+!pip install -e .
+
+# Install ESR (required for complexity metrics)
+!git clone https://github.com/DeaglanBartlett/ESR.git
+!pip install -e ESR
+
+print("\n" + "="*70)
+print("✓ Installation complete!")
+print("")
+print("Next step: Import the package")
+print("  import degeneracy_distillery")
+print("  from degeneracy_distillery.sr_utils import fit_and_analyze_sr")
+print("")
+print("If you get ModuleNotFoundError, restart the runtime:")
+print("  Runtime → Restart runtime")
+print("  Then run: %cd degeneracy_distillery")
+print("="*70)

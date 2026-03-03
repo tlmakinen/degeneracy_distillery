@@ -69,12 +69,21 @@ For Google Colab, use:
 !git clone https://github.com/yourusername/degeneracy_distillery.git
 %cd degeneracy_distillery
 !pip install -e .
+
+# Install ESR (required)
+!git clone https://github.com/DeaglanBartlett/ESR.git
+!pip install -e ESR
+
+# Verify installation
+import degeneracy_distillery
+from degeneracy_distillery.training_loop_flatten import fit_flattening
+print(f"✓ Package version: {degeneracy_distillery.__version__}")
 ```
 
-**Important:** After installing, you must also install the ESR package separately:
-```bash
-git clone https://github.com/DeaglanBartlett/ESR.git
-pip install -e ESR
+**Important:** After installing with `!pip install -e .`, use package imports:
+```python
+from degeneracy_distillery.training_loop_flatten import fit_flattening
+from degeneracy_distillery.preprocessing_utils import load_and_process_data
 ```
 
 ## Project Structure

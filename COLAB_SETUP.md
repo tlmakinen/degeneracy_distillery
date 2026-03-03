@@ -15,6 +15,10 @@ This guide explains how to install and use `degeneracy-distillery` in Google Col
 # Install ESR (required dependency)
 !git clone https://github.com/DeaglanBartlett/ESR.git
 !pip install -e ESR
+
+# Verify installation
+import degeneracy_distillery
+print(f"✓ Package version: {degeneracy_distillery.__version__}")
 ```
 
 ## What Works in Colab
@@ -69,12 +73,35 @@ The code automatically uses the correct import method based on your setup.
 
 ## Troubleshooting
 
-### Import Errors
+### Import Errors: "No module named 'degeneracy_distillery'"
 
-If you encounter import errors, make sure:
+If you encounter this error, check:
+
+1. **Did you run `!pip install -e .`?**
+   ```python
+   %cd degeneracy_distillery
+   !pip install -e .
+   ```
+
+2. **Check if installation succeeded:**
+   ```python
+   import degeneracy_distillery
+   print(degeneracy_distillery.__file__)  # Should show path to __init__.py
+   ```
+
+3. **Alternative: Use sys.path (no installation needed):**
+   ```python
+   import sys
+   sys.path.insert(0, 'degeneracy_distillery')
+   from training_loop_flatten import *
+   ```
+
+### Other Import Errors
+
+If you encounter other import errors, make sure:
 1. You're in the correct directory (`degeneracy_distillery`)
-2. The package installed successfully
-3. You've added the `src` path to `sys.path`
+2. The package installed successfully (check for errors during pip install)
+3. All dependencies are installed
 
 ### GPU Support
 

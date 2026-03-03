@@ -11,6 +11,10 @@ This guide explains how to install and use `degeneracy-distillery` in Google Col
 
 # Install the package
 !pip install -e .
+
+# Install ESR (required dependency)
+!git clone https://github.com/DeaglanBartlett/ESR.git
+!pip install -e ESR
 ```
 
 ## What Works in Colab
@@ -26,27 +30,35 @@ The package will install successfully in Colab with all functionality:
 
 ## Dependencies
 
-All dependencies, including the ESR package for symbolic regression complexity metrics (MDL criterion, Aifeyn complexity), are automatically installed when you run `!pip install -e .`
+Most dependencies are automatically installed when you run `!pip install -e .`
 
-The ESR package is automatically cloned from [DeaglanBartlett/ESR](https://github.com/DeaglanBartlett/ESR) and installed as part of the setup process.
+However, the **ESR package** ([DeaglanBartlett/ESR](https://github.com/DeaglanBartlett/ESR)) for symbolic regression complexity metrics (MDL criterion, Aifeyn complexity) **must be installed separately**:
+
+```python
+!git clone https://github.com/DeaglanBartlett/ESR.git
+!pip install -e ESR
+```
+
+This is required because pip cannot reliably clone git repositories during dependency resolution.
 
 ## Importing Modules
 
 Both import methods work seamlessly!
 
-### Method 1: Package Import (Recommended)
+### Method 1: Package Import (Recommended after installation)
 
 ```python
-from degeneracy_distillery.src.training_loop_flatten import *
-from degeneracy_distillery.src.preprocessing_utils import *
-from degeneracy_distillery.src.sr_utils import *
+import degeneracy_distillery
+from degeneracy_distillery.training_loop_flatten import *
+from degeneracy_distillery.preprocessing_utils import *
+from degeneracy_distillery.sr_utils import *
 ```
 
-### Method 2: Direct Import
+### Method 2: Direct Import (Alternative)
 
 ```python
 import sys
-sys.path.insert(0, 'src')
+sys.path.insert(0, 'degeneracy_distillery')
 
 from training_loop_flatten import *
 from preprocessing_utils import *

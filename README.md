@@ -21,12 +21,16 @@ For detailed installation instructions, see [INSTALL.md](INSTALL.md).
 git clone https://github.com/yourusername/degeneracy_distillery.git
 cd degeneracy_distillery
 
-# Create conda environment
-conda env create -f degen_env.yml
+# Create conda environment (use minimal for better compatibility)
+conda env create -f degen_env_minimal.yml
 conda activate degen
 
 # Install package
 pip install -e .
+
+# Install ESR (required)
+git clone https://github.com/DeaglanBartlett/ESR.git
+pip install -e ESR
 ```
 
 ## Usage
@@ -45,7 +49,8 @@ When working directly in the repository (e.g., from notebooks/):
 
 ```python
 import sys
-sys.path.insert(0, '../src')  # or 'src' if at repo root
+sys.path.insert(0, '../degeneracy_distillery')  # from notebooks/
+# or sys.path.insert(0, 'degeneracy_distillery') if at repo root
 from training_loop_flatten import *
 from preprocessing_utils import *
 from sr_utils import *
@@ -66,13 +71,17 @@ For Google Colab, use:
 !pip install -e .
 ```
 
-**Note:** The package will automatically install the `esr` package ([ESR by DeaglanBartlett](https://github.com/DeaglanBartlett/ESR)) for symbolic regression complexity metrics.
+**Important:** After installing, you must also install the ESR package separately:
+```bash
+git clone https://github.com/DeaglanBartlett/ESR.git
+pip install -e ESR
+```
 
 ## Project Structure
 
 ```
 degeneracy_distillery/
-├── src/                    # Main source code
+├── degeneracy_distillery/  # Main source code package
 │   ├── training_loop_*.py  # Training loops for various architectures
 │   ├── preprocessing_utils.py
 │   ├── postprocessing_utils.py
@@ -80,7 +89,8 @@ degeneracy_distillery/
 │   └── ...
 ├── notebooks/              # Jupyter notebooks with examples
 ├── data/                   # Data files
-└── degen_env.yml           # Conda environment specification
+├── degen_env_minimal.yml   # Conda environment (recommended)
+└── degen_env.yml           # Full environment export (may have conflicts)
 ```
 
 ## License

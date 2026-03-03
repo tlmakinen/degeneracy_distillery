@@ -1,8 +1,12 @@
+# Full exported conda environment
+# WARNING: This file may cause ClobberError on some systems due to platform-specific
+# build tools (cctools, ld64, clang, etc.). If you encounter conflicts, use
+# degen_env_minimal.yml instead, which is more portable.
+
 name: degen
 channels:
   - conda-forge
 dependencies:
-  - binutils=1.0.1=0
   - bzip2=1.0.8=h10d778d_5
   - c-ares=1.28.1=h10d778d_0
   - ca-certificates=2024.7.4=h8857fd0_0

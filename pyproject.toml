@@ -36,7 +36,6 @@ dependencies = [
     "optax>=0.2.4",
     "orbax-checkpoint>=0.11.0",
     "pyoperon>=0.4.0",
-    "esr @ git+https://github.com/DeaglanBartlett/ESR.git",
     "ipython>=8.26.0",
     "jupyter>=1.0.0",
     "jupyterlab>=4.2.0",
@@ -86,15 +85,10 @@ Repository = "https://github.com/tlmakinen/degeneracy_distillery"
 Issues = "https://github.com/tlmakinen/degeneracy_distillery/issues"
 
 [tool.setuptools]
-package-dir = {"" = "."}
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
-namespaces = false
+packages = ["degeneracy_distillery"]
 
 [tool.setuptools.package-data]
-src = ["*.yaml", "*.yml"]
+degeneracy_distillery = ["*.yaml", "*.yml"]
 
 [tool.black]
 line-length = 100
@@ -124,7 +118,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --cov=src --cov-report=html --cov-report=term-missing"
+addopts = "-v --cov=degeneracy_distillery --cov-report=html --cov-report=term-missing"
 
 [tool.mypy]
 python_version = "3.10"

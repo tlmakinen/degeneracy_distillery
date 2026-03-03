@@ -3,12 +3,13 @@ include README.md
 include INSTALL.md
 include LICENSE
 
-# Include environment specification
+# Include environment specifications
 include degen_env.yml
+include degen_env_minimal.yml
 
 # Include configuration files
-recursive-include src *.yaml
-recursive-include src *.yml
+recursive-include degeneracy_distillery *.yaml
+recursive-include degeneracy_distillery *.yml
 
 # Exclude development files
 exclude setup.sh

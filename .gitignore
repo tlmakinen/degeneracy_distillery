@@ -84,5 +84,8 @@ ex_*/
 *.jpg
 *.jpeg
 
+# External packages (installed separately)
+ESR/
+
 # Exclude specific files that are untracked
 .DS_Store

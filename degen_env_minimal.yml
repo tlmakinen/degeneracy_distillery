@@ -1,0 +1,56 @@
+name: degen
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - cmake
+  - eigen
+  - pybind11
+  - git
+  - pip:
+      # Note: ESR must be installed separately after environment creation:
+      #   git clone https://github.com/DeaglanBartlett/ESR.git
+      #   pip install -e ESR
+      - numpy>=1.26.0
+      - scipy>=1.16.0
+      - matplotlib>=3.9.0
+      - pandas>=2.2.0
+      - scikit-learn>=1.5.0
+      - jax>=0.4.38
+      - jaxlib>=0.4.38
+      - flax>=0.10.0
+      - optax>=0.2.4
+      - orbax-checkpoint>=0.11.0
+      - pyoperon>=0.4.0
+      - ipython>=8.26.0
+      - jupyter>=1.0.0
+      - jupyterlab>=4.2.0
+      - ipykernel>=6.29.0
+      - ipywidgets>=8.1.0
+      - notebook>=7.2.0
+      - tqdm>=4.66.0
+      - pyyaml>=6.0.0
+      - corner>=2.2.0
+      - cvxpy>=1.7.0
+      - statsmodels>=0.14.0
+      - astropy>=6.1.0
+      - sympy>=1.12.0
+      - requests>=2.32.0
+      - pydantic>=2.8.0
+      - rich>=14.0.0
+      - numdifftools>=0.9.41
+      - pylops>=2.6.0
+      - pyproximal>=0.11.0
+      - rmsd>=1.6.0
+      - chex>=0.1.89
+      - etils>=1.12.0
+      - treescope>=0.1.9
+      - treelib>=1.7.0
+      - networkx>=3.3
+      - joblib>=1.4.0
+      - psutil>=6.0.0
+      - pympler>=1.1
+      - beautifulsoup4>=4.12.0
+      - simplejson>=3.20.0

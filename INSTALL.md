@@ -32,10 +32,12 @@ This method recreates the exact conda environment used during development, inclu
    cd degeneracy_distillery
    ```
 
-2. **Create the conda environment from the exported environment file:**
+2. **Create the conda environment from the environment file:**
    ```bash
-   conda env create -f degen_env.yml
+   conda env create -f degen_env_minimal.yml
    ```
+   
+   **Note:** Use `degen_env_minimal.yml` for better cross-platform compatibility. The full `degen_env.yml` may have platform-specific conflicts.
 
 3. **Activate the environment:**
    ```bash
@@ -46,8 +48,14 @@ This method recreates the exact conda environment used during development, inclu
    ```bash
    pip install -e .
    ```
+
+5. **Install ESR (required dependency):**
+   ```bash
+   git clone https://github.com/DeaglanBartlett/ESR.git
+   pip install -e ESR
+   ```
    
-   This will automatically install all dependencies, including ESR from GitHub.
+   **Note:** ESR cannot be auto-installed by pip due to git clone limitations, so this is a separate step.
 
 ### Option 2: Using pip only (Quick Install)
 
@@ -92,19 +100,20 @@ For contributors who want to install with development tools:
 
 After installation, verify that the package is correctly installed. **Both import methods work:**
 
-### Method 1: Package Import
+### Method 1: Package Import (after pip install)
 
 ```python
-from degeneracy_distillery.src.training_loop_flatten import *
-from degeneracy_distillery.src.preprocessing_utils import *
-from degeneracy_distillery.src.sr_utils import *
+import degeneracy_distillery
+from degeneracy_distillery.training_loop_flatten import *
+from degeneracy_distillery.preprocessing_utils import *
+from degeneracy_distillery.sr_utils import *
 ```
 
-### Method 2: Direct Import (from repository)
+### Method 2: Direct Import (in repository)
 
 ```python
 import sys
-sys.path.insert(0, 'src')
+sys.path.insert(0, 'degeneracy_distillery')
 
 from training_loop_flatten import *
 from preprocessing_utils import *
@@ -131,9 +140,16 @@ The package requires `pyoperon>=0.4.0`, which is a symbolic regression library. 
 
 ### ESR Dependency
 
-The package requires the `esr` package ([ESR by DeaglanBartlett](https://github.com/DeaglanBartlett/ESR)) for computing symbolic regression complexity metrics (MDL criterion, Aifeyn complexity).
+The package **requires** the `esr` package ([ESR by DeaglanBartlett](https://github.com/DeaglanBartlett/ESR)) for computing symbolic regression complexity metrics (MDL criterion, Aifeyn complexity).
 
-**ESR is automatically installed** when you install `degeneracy-distillery` via pip, as it's listed in the dependencies. The installation process will clone it from GitHub and install it for you.
+**ESR must be installed separately** as a manual step because pip cannot reliably clone it during dependency resolution. After installing `degeneracy-distillery`, run:
+
+```bash
+git clone https://github.com/DeaglanBartlett/ESR.git
+pip install -e ESR
+```
+
+If you don't install ESR, you'll see a warning on import and functions like `compute_DL` will raise an error when called.
 
 ### JAX with GPU Support
 
@@ -150,6 +166,21 @@ pip install --upgrade "jax[cuda11_local]"
 See the [JAX installation guide](https://github.com/google/jax#installation) for more details.
 
 ## Troubleshooting
+
+### ClobberError or Package Conflicts
+
+If you encounter errors like:
+```
+ClobberError: This transaction has incompatible packages due to a shared path.
+  packages: conda-forge/osx-64::cctools-986-hd3558d4_0, conda-forge/osx-64::binutils-1.0.1-0
+```
+
+**Solution:** Use the minimal environment file instead:
+```bash
+conda env create -f degen_env_minimal.yml
+```
+
+The minimal environment avoids platform-specific build tool conflicts and is more portable across systems.
 
 ### Import Errors
 
@@ -171,8 +202,10 @@ If you encounter version conflicts, you can try creating a fresh environment:
 ```bash
 conda deactivate
 conda env remove -n degen
-conda env create -f degen_env.yml
-``` -->
+conda env create -f degen_env_minimal.yml
+```
+
+If you encounter ClobberError or package conflicts with `degen_env.yml`, use `degen_env_minimal.yml` instead. -->
 
 <!-- ## Updating the Package
 

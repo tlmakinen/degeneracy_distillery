@@ -26,8 +26,19 @@ read -p "Enter choice [1-2]: " choice
 case $choice in
     1)
         echo ""
-        echo "Creating conda environment from degen_env.yml..."
-        conda env create -f degen_env.yml
+        echo "Choose environment file:"
+        echo "  a) degen_env_minimal.yml (recommended, better compatibility)"
+        echo "  b) degen_env.yml (full export, may have platform-specific issues)"
+        read -p "Enter choice [a/b]: " env_choice
+        
+        env_file="degen_env_minimal.yml"
+        if [[ $env_choice =~ ^[Bb]$ ]]; then
+            env_file="degen_env.yml"
+        fi
+        
+        echo ""
+        echo "Creating conda environment from ${env_file}..."
+        conda env create -f ${env_file}
         
         echo ""
         echo "Environment created successfully!"
@@ -40,6 +51,17 @@ case $choice in
         echo ""
         echo "Installing package in editable mode..."
         pip install -e .
+        
+        echo ""
+        echo "Installing ESR package (required dependency)..."
+        if [ -d "ESR" ]; then
+            echo "ESR directory already exists. Updating..."
+            cd ESR && git pull && cd ..
+        else
+            git clone https://github.com/DeaglanBartlett/ESR.git
+        fi
+        pip install -e ESR
+        echo "✓ ESR installed successfully"
         
         echo ""
         echo "========================================"
@@ -82,6 +104,17 @@ case $choice in
         pip install -e .
         
         echo ""
+        echo "Installing ESR package (required dependency)..."
+        if [ -d "ESR" ]; then
+            echo "ESR directory already exists. Updating..."
+            cd ESR && git pull && cd ..
+        else
+            git clone https://github.com/DeaglanBartlett/ESR.git
+        fi
+        pip install -e ESR
+        echo "✓ ESR installed successfully"
+        
+        echo ""
         echo "========================================"
         echo "Installation complete!"
         echo "========================================"
@@ -98,10 +131,9 @@ case $choice in
 esac
 
 # Verify installation
-echo "Verifying installation..."
-python -c "from degeneracy_distillery.src import training_loop_flatten; print('✓ Package imported successfully')" || echo "⚠ Warning: Import test failed"
-
 echo ""
-echo "Note: ESR package will be automatically installed via pip"
+echo "Verifying installation..."
+python -c "import degeneracy_distillery; from degeneracy_distillery import training_loop_flatten; print('✓ Package imported successfully')" 2>&1 | grep -q "✓" && echo "✓ Installation verified" || echo "⚠ Warning: Import test had issues (this may be OK if dependencies are properly installed)"
+
 echo ""
 echo "For more information, see INSTALL.md"

@@ -80,7 +80,35 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from pyoperon.sklearn import SymbolicRegressor
 import sympy
+import inspect
 import esr.generation.generator
+
+
+# =============================================================================
+# PYOPERON VERSION COMPATIBILITY
+# =============================================================================
+
+def get_time_limit_param_name():
+    """
+    Determine the correct parameter name for time limit in PyOperon.
+    Different versions use either 'time_limit' or 'max_time'.
+    
+    Returns
+    -------
+    str
+        Either 'time_limit' or 'max_time'
+    """
+    sig = inspect.signature(SymbolicRegressor.__init__)
+    if 'time_limit' in sig.parameters:
+        return 'time_limit'
+    elif 'max_time' in sig.parameters:
+        return 'max_time'
+    else:
+        # Default to time_limit
+        return 'time_limit'
+
+# Cache the parameter name to avoid repeated inspection
+_TIME_PARAM_NAME = get_time_limit_param_name()
 
 
 # =============================================================================
@@ -473,25 +501,28 @@ def fit_symbolic_regression(
             print(f"{'='*60}")
             print(f"X train shape: {Xfit.shape}, y train shape: {yfit.shape}")
         
-        reg = SymbolicRegressor(
-            allowed_symbols=allowed_symbols,
-            offspring_generator='basic',
-            optimizer_iterations=optimizer_iterations,
-            max_length=max_length,
-            max_depth=max_depth,
-            initialization_method='btc',
-            n_threads=multiprocessing.cpu_count(),
-            objectives=objectives,
-            epsilon=epsilon,
-            random_state=random_state,
-            reinserter='keep-best',
-            max_evaluations=int(max_evaluations),
-            symbolic_mode=False,
-            time_limit=int(time_limit),
-            generations=int(generations),
-            add_model_scale_term=True,
-            add_model_intercept_term=True,
-        )
+        # Build kwargs with version-compatible time parameter name
+        reg_kwargs = {
+            'allowed_symbols': allowed_symbols,
+            'offspring_generator': 'basic',
+            'optimizer_iterations': optimizer_iterations,
+            'max_length': max_length,
+            'max_depth': max_depth,
+            'initialization_method': 'btc',
+            'n_threads': multiprocessing.cpu_count(),
+            'objectives': objectives,
+            'epsilon': epsilon,
+            'random_state': random_state,
+            'reinserter': 'keep-best',
+            'max_evaluations': int(max_evaluations),
+            'symbolic_mode': False,
+            _TIME_PARAM_NAME: int(time_limit),  # Compatible with both time_limit and max_time
+            'generations': int(generations),
+            'add_model_scale_term': True,
+            'add_model_intercept_term': True,
+        }
+        
+        reg = SymbolicRegressor(**reg_kwargs)
 
         if verbose:
             print('Fitting...')

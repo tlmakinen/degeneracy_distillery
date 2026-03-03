@@ -709,7 +709,7 @@ def analyze_equations(
             print(f"{mse_mask.sum()} equations below complexity threshold {max_complexity_thresh}")
 
         complexity = complexity[mse_mask]
-        eqs = list(np.array(data['model'])[mse_mask])
+        eqs = [str(eq) for eq in np.array(data['model'])[mse_mask]]
 
         # Compute metrics for all equations
         all_DL = np.ones(len(eqs)) * np.inf
@@ -754,8 +754,8 @@ def analyze_equations(
                 pareto_DL.append(all_DL[mask][ibest_model_at_complexity])
                 pareto_logL.append(all_logL[mask][ibest_model_at_complexity])
                 pareto_frobloss.append(all_frobloss[mask][ibest_model_at_complexity])
-                pareto_latex.append(np.array(all_latex)[mask][ibest_model_at_complexity])
-                pareto_eqs.append(np.array(eqs)[mask][ibest_model_at_complexity])
+                pareto_latex.append(str(np.array(all_latex)[mask][ibest_model_at_complexity]))
+                pareto_eqs.append(str(np.array(eqs)[mask][ibest_model_at_complexity]))
                 comps.append(comp)
 
         complexity = np.array(comps)
@@ -794,8 +794,8 @@ def analyze_equations(
             print(f'  {pareto_eqs[ibest_frob]}')
             print(f'  LaTeX: ${pareto_latex[ibest_frob]}$')
         
-        mdl_coordinates.append(pareto_eqs[ibest])
-        frob_coordinates.append(pareto_eqs[ibest_frob])
+        mdl_coordinates.append(str(pareto_eqs[ibest]))
+        frob_coordinates.append(str(pareto_eqs[ibest_frob]))
 
     analysis_data = {
         'latex': both_comp_latex,

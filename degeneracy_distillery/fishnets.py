@@ -153,7 +153,7 @@ def construct_fisher_matrix_log_cholesky(outputs, n_p):
     
     # First n_diag elements are log-diagonal (exponentiate for positivity)
     log_diag = outputs[:n_diag]
-    diag_elements = jnp.exp(log_diag)
+    diag_elements = jax.nn.softplus(log_diag) + 1e-6
     
     # Remaining elements are off-diagonal (unconstrained)
     off_diag = outputs[n_diag:]
@@ -224,10 +224,10 @@ class Fishnet_from_embedding(nn.Module):
     act_fisher: nn.activation = nn.gelu # make gelu default ?
     sharpness: float = 5.0
     threshold: float = 1.0
+    add_prior: bool = False
 
     @nn.compact
     def __call__(self, x):
-        priorCinv = jnp.eye(self.n_p)
         t = self.act(nn.Dense(self.hidden)(x))
         # fisher_cholesky = self.act_fisher(nn.Dense(self.hidden)(x))
         fisher_cholesky = nn.Dense(self.hidden)(x)
@@ -239,7 +239,10 @@ class Fishnet_from_embedding(nn.Module):
         t = nn.Dense(self.n_p)(t)
         fisher_cholesky = nn.Dense((self.n_p * (self.n_p + 1) // 2))(fisher_cholesky)
 
-        F = construct_fisher_matrix_log_cholesky(fisher_cholesky, self.n_p) + priorCinv
+        F = construct_fisher_matrix_log_cholesky(fisher_cholesky, self.n_p) 
+
+        if self.add_prior:
+           F += jnp.eye(self.n_p)
         #t = jnp.einsum("ij,j->i", jnp.linalg.inv(F), t)
 
         return t, F

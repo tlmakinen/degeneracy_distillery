@@ -2,33 +2,28 @@
 # DEGENERACY DISTILLERY - COLAB INSTALLATION
 # ============================================================================
 # Copy and paste this ENTIRE cell into Google Colab
-# This installs the package AND the required ESR dependency
 # ============================================================================
 
-# Clone the repository
+# 1. Install degeneracy_distillery
 !git clone https://github.com/yourusername/degeneracy_distillery.git
-%cd degeneracy_distillery
-
-# Install the package (installs pyoperon, jax, flax, and all dependencies)
+%cd /content/degeneracy_distillery
 !pip install -e .
 
-# ============================================================================
-# IMPORTANT: Install ESR (REQUIRED - not optional!)
-# ============================================================================
+# 2. Install ESR (REQUIRED!)
+%cd /content
 !git clone https://github.com/DeaglanBartlett/ESR.git
-!pip install -e ESR
+%cd /content/ESR
+!pip install -e .
 
 print("\n" + "="*70)
 print("✓ Installation complete!")
 print("✓ ESR (REQUIRED) installed successfully")
 print("")
-print("Next step: Import the package")
-print("  import degeneracy_distillery")
-print("  from degeneracy_distillery.sr_utils import fit_and_analyze_sr")
+print("⚠️  IMPORTANT: Restart the runtime now!")
+print("   → Runtime → Restart runtime")
 print("")
-print("If you get 'ModuleNotFoundError: No module named esr':")
-print("  → You didn't run the ESR installation commands above")
-print("If you get 'ModuleNotFoundError: No module named degeneracy_distillery':")
-print("  → Restart runtime (Runtime → Restart runtime)")
-print("  → Then run: %cd degeneracy_distillery")
+print("After restarting, navigate back and verify:")
+print("   %cd /content/degeneracy_distillery")
+print("   import degeneracy_distillery")
+print("   from degeneracy_distillery.sr_utils import fit_and_analyze_sr")
 print("="*70)

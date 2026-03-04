@@ -66,29 +66,32 @@ See the `notebooks/` directory for example usage and analysis workflows.
 
 ### Google Colab Installation
 
-For Google Colab, use:
+For Google Colab:
 
 ```python
-# Clone and install
+# 1. Install degeneracy_distillery
 !git clone https://github.com/yourusername/degeneracy_distillery.git
-%cd degeneracy_distillery
-
-# Install the package (this installs all dependencies including pyoperon, jax, etc.)
+%cd /content/degeneracy_distillery
 !pip install -e .
 
-# Install ESR (required - must be installed separately)
+# 2. Install ESR (REQUIRED!)
+%cd /content
 !git clone https://github.com/DeaglanBartlett/ESR.git
-!pip install -e ESR
-
-# Verify installation
-import degeneracy_distillery
-from degeneracy_distillery.training_loop_flatten import fit_flattening
-from degeneracy_distillery.sr_utils import fit_and_analyze_sr
-print(f"✓ Package version: {degeneracy_distillery.__version__}")
-print("✓ All imports successful!")
+%cd /content/ESR
+!pip install -e .
 ```
 
-See `COLAB_SETUP.md` for detailed troubleshooting and step-by-step instructions.
+**Then restart the runtime:** Runtime → Restart runtime
+
+After restarting, verify:
+```python
+%cd /content/degeneracy_distillery
+import degeneracy_distillery
+from degeneracy_distillery.sr_utils import fit_and_analyze_sr
+print(f"✓ Package version: {degeneracy_distillery.__version__}")
+```
+
+See `COLAB_SETUP.md` for detailed step-by-step instructions.
 
 ## Project Structure
 

@@ -2,7 +2,9 @@
 
 This guide explains how to install and use `degeneracy-distillery` in Google Colab.
 
-## ONE-STEP Installation
+## Installation (2 Steps)
+
+### Step 1: Install Packages
 
 **Copy and paste this entire cell into Google Colab:**
 
@@ -10,46 +12,58 @@ This guide explains how to install and use `degeneracy-distillery` in Google Col
 # ============================================================================
 # DEGENERACY DISTILLERY - COLAB INSTALLATION
 # ============================================================================
-# This installs the package AND the required ESR dependency
-# ============================================================================
 
-# Clone the repository
+# 1. Install degeneracy_distillery
 !git clone https://github.com/yourusername/degeneracy_distillery.git
-%cd degeneracy_distillery
-
-# Install the package (installs pyoperon, jax, flax, and all other dependencies)
+%cd /content/degeneracy_distillery
 !pip install -e .
 
-# ============================================================================
-# IMPORTANT: Install ESR (REQUIRED - not optional!)
-# ============================================================================
+# 2. Install ESR (REQUIRED!)
+%cd /content
 !git clone https://github.com/DeaglanBartlett/ESR.git
-!pip install -e ESR
+%cd /content/ESR
+!pip install -e .
 
 print("\n" + "="*70)
 print("✓ Installation complete!")
 print("✓ ESR (REQUIRED) installed")
-print("✓ Now you can import and use the package")
+print("")
+print("NEXT STEP: Restart the runtime!")
+print("  → Runtime → Restart runtime")
 print("="*70)
 ```
 
-**After running the above cell, verify the installation:**
+### Step 2: Restart Runtime
+
+**CRITICAL: You MUST restart the Colab runtime after installation**
+- Click: **Runtime → Restart runtime**
+- This clears Python's import cache and ensures all packages work correctly
+
+### Step 3: Verify Installation
+
+**After restarting, run this in a new cell:**
 
 ```python
+# Navigate back to working directory
+%cd /content/degeneracy_distillery
+
 # Verify installation
+import esr.generation.generator
+print("✓ ESR imported successfully!")
+
 import degeneracy_distillery
 from degeneracy_distillery.training_loop_flatten import fit_flattening
 from degeneracy_distillery.sr_utils import fit_and_analyze_sr
 
 print(f"✓ Package version: {degeneracy_distillery.__version__}")
 print("✓ All imports successful!")
-print("\nYou're ready to use the package!")
+print("\n🎉 You're ready to use the package!")
 ```
 
-**If you see `ModuleNotFoundError`:**
-- For `'degeneracy_distillery'`: Restart the runtime (Runtime → Restart runtime), then navigate back with `%cd degeneracy_distillery`
-- For `'esr'`: You missed the ESR installation step - scroll up and run the ESR installation commands
-- For `'pyoperon'`: The pip install failed - try `!pip install pyoperon` separately
+**If you still see `ModuleNotFoundError` after restarting:**
+- For `'esr'`: Check if you ran the ESR installation - `!pip show esr` should show it's installed
+- For `'degeneracy_distillery'`: Check if you ran the package installation - `!pip show degeneracy-distillery`
+- For `'pyoperon'`: Try installing separately: `!pip install pyoperon`
 
 ## What Works in Colab
 

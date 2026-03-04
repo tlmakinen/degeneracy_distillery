@@ -291,6 +291,16 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
     frobloss : float
         Frobenius norm flattening loss
     """
+    # Check if ESR is available
+    if not ESR_AVAILABLE:
+        raise ImportError(
+            "ESR is required for computing MDL and complexity metrics but not installed.\n"
+            "Install it with:\n"
+            "  !git clone https://github.com/DeaglanBartlett/ESR.git\n"
+            "  !pip install -e ESR\n"
+            "See COLAB_SETUP.md for full installation instructions."
+        )
+    
     basis_functions = [
         ["X", "b"],  # type0
         ["square", "exp", "inv", "sqrt", "log", "cos", "logAbs"],  # type1

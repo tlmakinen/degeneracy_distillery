@@ -35,7 +35,12 @@ except ImportError:
         weighted_std,
     )
 
-import esr.generation.generator
+# Try importing ESR (required for complexity calculations)
+try:
+    import esr.generation.generator
+    ESR_AVAILABLE = True
+except ImportError:
+    ESR_AVAILABLE = False
 
 
 # =============================================================================

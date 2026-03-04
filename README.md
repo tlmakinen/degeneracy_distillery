@@ -28,12 +28,12 @@ conda activate degen
 # Install package
 pip install -e .
 
-# Optional: Install Jupyter for local notebook development
-pip install -e ".[jupyter]"
-
-# Install ESR (required)
+# Install ESR (REQUIRED - must be done separately)
 git clone https://github.com/DeaglanBartlett/ESR.git
 pip install -e ESR
+
+# Optional: Install Jupyter for local notebook development
+pip install -e ".[jupyter]"
 ```
 
 ## Usage
@@ -88,13 +88,7 @@ print(f"✓ Package version: {degeneracy_distillery.__version__}")
 print("✓ All imports successful!")
 ```
 
-**Troubleshooting:** If you get `ModuleNotFoundError` for `pyoperon` or `jax`, the pip install didn't complete successfully. Check the output for errors, then try:
-```python
-!pip install pyoperon jax jaxlib flax
-!pip install -e .  # Try again
-```
-
-See `COLAB_SETUP.md` for detailed troubleshooting.
+See `COLAB_SETUP.md` for detailed troubleshooting and step-by-step instructions.
 
 ## Project Structure
 

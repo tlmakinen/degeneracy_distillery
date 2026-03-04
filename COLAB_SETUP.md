@@ -2,44 +2,54 @@
 
 This guide explains how to install and use `degeneracy-distillery` in Google Colab.
 
-## Installation Steps
+## ONE-STEP Installation
 
-### Step 1: Install the Package
-
-Run this in a Colab cell:
+**Copy and paste this entire cell into Google Colab:**
 
 ```python
+# ============================================================================
+# DEGENERACY DISTILLERY - COLAB INSTALLATION
+# ============================================================================
+# This installs the package AND the required ESR dependency
+# ============================================================================
+
 # Clone the repository
 !git clone https://github.com/yourusername/degeneracy_distillery.git
 %cd degeneracy_distillery
 
-# Install the package (this installs all dependencies including pyoperon, jax, flax, etc.)
+# Install the package (installs pyoperon, jax, flax, and all other dependencies)
 !pip install -e .
 
-# Install ESR (required dependency - must be installed separately)
+# ============================================================================
+# IMPORTANT: Install ESR (REQUIRED - not optional!)
+# ============================================================================
 !git clone https://github.com/DeaglanBartlett/ESR.git
 !pip install -e ESR
 
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("✓ Installation complete!")
+print("✓ ESR (REQUIRED) installed")
 print("✓ Now you can import and use the package")
-print("="*60)
+print("="*70)
 ```
 
-### Step 2: Verify Installation
-
-Run this in the same or a new cell:
+**After running the above cell, verify the installation:**
 
 ```python
 # Verify installation
 import degeneracy_distillery
 from degeneracy_distillery.training_loop_flatten import fit_flattening
 from degeneracy_distillery.sr_utils import fit_and_analyze_sr
+
 print(f"✓ Package version: {degeneracy_distillery.__version__}")
 print("✓ All imports successful!")
+print("\nYou're ready to use the package!")
 ```
 
-**If you see `ModuleNotFoundError`:** The package may have updated core Colab packages. Simply **restart the runtime** (Runtime → Restart runtime), navigate back (`%cd degeneracy_distillery`), and try the import again.
+**If you see `ModuleNotFoundError`:**
+- For `'degeneracy_distillery'`: Restart the runtime (Runtime → Restart runtime), then navigate back with `%cd degeneracy_distillery`
+- For `'esr'`: You missed the ESR installation step - scroll up and run the ESR installation commands
+- For `'pyoperon'`: The pip install failed - try `!pip install pyoperon` separately
 
 ## What Works in Colab
 
@@ -58,20 +68,27 @@ The package installs successfully in Colab with all functionality:
 
 **All core dependencies** (including `pyoperon`, `jax`, `flax`, etc.) are automatically installed when you run `!pip install -e .`
 
-However, the **ESR package** ([DeaglanBartlett/ESR](https://github.com/DeaglanBartlett/ESR)) for symbolic regression complexity metrics (MDL criterion, Aifeyn complexity) **must be installed separately**:
+### REQUIRED: ESR Package
+
+The **ESR package** ([DeaglanBartlett/ESR](https://github.com/DeaglanBartlett/ESR)) is **REQUIRED** for:
+- Symbolic regression complexity metrics
+- MDL (Minimum Description Length) criterion
+- Aifeyn complexity calculations
+
+**You MUST install it separately** (included in the installation cell above):
 
 ```python
 !git clone https://github.com/DeaglanBartlett/ESR.git
 !pip install -e ESR
 ```
 
-This is required because pip cannot reliably clone git repositories during dependency resolution.
+This must be installed separately because pip cannot reliably clone git repositories during dependency resolution.
 
-### Required Packages
-- **pyoperon** - Symbolic regression (auto-installed with `pip install -e .`)
-- **ESR** - Complexity metrics (must install separately as shown above)
-- **JAX/Flax** - Neural networks (auto-installed with `pip install -e .`)
-- **NumPy, SciPy, scikit-learn** - Scientific computing (auto-installed)
+### All Required Packages
+- ✅ **pyoperon** - Symbolic regression (auto-installed with `pip install -e .`)
+- ⚠️ **ESR** - Complexity metrics (**REQUIRED** - install separately as shown above)
+- ✅ **JAX/Flax** - Neural networks (auto-installed with `pip install -e .`)
+- ✅ **NumPy, SciPy, scikit-learn** - Scientific computing (auto-installed)
 
 ## Importing Modules
 

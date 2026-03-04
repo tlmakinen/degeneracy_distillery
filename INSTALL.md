@@ -49,13 +49,13 @@ This method recreates the exact conda environment used during development, inclu
    pip install -e .
    ```
 
-5. **Install ESR (required dependency):**
+5. **Install ESR (REQUIRED dependency):**
    ```bash
    git clone https://github.com/DeaglanBartlett/ESR.git
    pip install -e ESR
    ```
    
-   **Note:** ESR cannot be auto-installed by pip due to git clone limitations, so this is a separate step.
+   **Note:** ESR is REQUIRED for MDL calculations and complexity metrics. It cannot be auto-installed by pip due to git clone limitations, so this must be done as a separate step.
 
 ### Option 2: Using pip only (Quick Install)
 

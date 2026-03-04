@@ -10,7 +10,6 @@ import string
 import sys
 import sympy
 import scipy
-import esr.generation.generator
 
 import jax
 import jax.numpy as jnp

@@ -8,6 +8,7 @@ Main modules:
     - postprocessing_utils: Symbolic regression postprocessing
     - sr_utils: Symbolic regression utilities
     - fishnets: Neural network architectures
+    - plot_utils: Plotting utilities for Fisher matrices and visualizations
 """
 
 __version__ = "0.1.0"

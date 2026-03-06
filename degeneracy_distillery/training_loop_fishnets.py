@@ -52,6 +52,7 @@ def train_fishnets(theta,
                    lr: float = 5e-5,
                    acts: list = None,
                    scaler_type: str = 'minmax',
+                   embedding_net: nn.Module = None,
                    outdir: str = "fishnets-log"):
     """
     Trains an ensemble of fishnet networks.
@@ -74,6 +75,7 @@ def train_fishnets(theta,
       lr               : Learning rate for the optimizer
       acts             : List of activation functions for diversity.
       scaler_type      : Type of scaler to use for data normalization. Options: 'minmax' (MinMaxScaler) or 'standard' (StandardScaler). Default: 'minmax'.
+      embedding_net    : Optional nn.Module to use as the first layer in the ensemble models. If provided, it will be prepended to the sequential model.
       outdir           : Directory where outputs will be saved. If it does not exist, it is created;
                          if it exists, it is emptied before saving.
     
@@ -146,21 +148,38 @@ def train_fishnets(theta,
         all_n_hidden.append([hidden]*n_layers)  # three-layer network
 
     # Build ensemble: each network is a sequential composition of an MLP and a Fishnet_from_embedding.
-    models = [
-        nn.Sequential([
-            resMLP(all_n_hidden[i], act=acts[i]),
-            Fishnet_from_embedding(
-            n_p = n_params,
-            act=acts[i],
-            hidden=all_n_hidden[i][0],
-            act_fisher=nn.gelu,
-            sharpness=np.random.randn(1,)*0.7 + 5.0,
-            threshold=np.random.randn(1,)*0.7 + 1.0
-                )
-            # Fishnet_from_embedding(n_p=n_params, act=acts[i], hidden=all_n_hidden[i][0])
-        ])
-        for i in range(num_models)
-    ]
+    # If embedding_net is provided, prepend it to the sequential model.
+    if embedding_net is not None:
+        models = [
+            nn.Sequential([
+                embedding_net,
+                resMLP(all_n_hidden[i], act=acts[i]),
+                Fishnet_from_embedding(
+                n_p = n_params,
+                act=acts[i],
+                hidden=all_n_hidden[i][0],
+                act_fisher=nn.gelu,
+                sharpness=np.random.randn(1,)*0.7 + 5.0,
+                threshold=np.random.randn(1,)*0.7 + 1.0
+                    )
+            ])
+            for i in range(num_models)
+        ]
+    else:
+        models = [
+            nn.Sequential([
+                resMLP(all_n_hidden[i], act=acts[i]),
+                Fishnet_from_embedding(
+                n_p = n_params,
+                act=acts[i],
+                hidden=all_n_hidden[i][0],
+                act_fisher=nn.gelu,
+                sharpness=np.random.randn(1,)*0.7 + 5.0,
+                threshold=np.random.randn(1,)*0.7 + 1.0
+                    )
+            ])
+            for i in range(num_models)
+        ]
 
     data = jnp.squeeze(data)
     keys = jr.split(key, num=num_models)

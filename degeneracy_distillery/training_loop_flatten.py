@@ -28,10 +28,12 @@ try:
     from .fishnets import *
     from .flatten_net import *
     from .nn_inv import *
+    from .io_utils import FlexibleDict, create_results_dict
 except ImportError:
     from fishnets import *
     from flatten_net import *
     from nn_inv import *
+    from io_utils import FlexibleDict, create_results_dict
 
 from jax import lax
 
@@ -519,6 +521,13 @@ def fit_flattening(F_network_ensemble, θs,
     Returns:
         w: Trained network parameters
         ensemble_ws: List of trained parameters for each ensemble member
+        output_dict: FlexibleDict containing training results with flexible naming:
+                     - 'theta' (or 'X', 'params'): input parameters
+                     - 'eta' (or 'y', 'coords'): learned coordinates
+                     - 'Jacobians': Jacobian matrices
+                     - 'F_ensemble': Fisher matrices
+                     - 'eta_ensemble': Coordinate predictions per ensemble member
+                     - Additional metrics and metadata
     """
     # ---------------------- CONSTANTS & SETUP -----------------------
     n_params = θs.shape[-1]
@@ -873,10 +882,10 @@ def fit_flattening(F_network_ensemble, θs,
     if SCALE_THETA:
         outname += "_scaled"
     
-    # Build output dictionary
-    output_dict = dict(
-        theta=np.array(θs),
-        eta=np.array(ηs),
+    # Build output dictionary using FlexibleDict for flexible naming conventions
+    output_dict = create_results_dict(
+        theta=np.array(θs),              # Canonical: parameters (accessible as 'theta', 'X', 'params')
+        eta=np.array(ηs),                # Canonical: coordinates (accessible as 'eta', 'y', 'coords')
         Jacobians=np.array(Jbar),
         deltaJ=np.array(δJs),
         delta_invJ=np.array(δinvJ),
@@ -896,8 +905,10 @@ def fit_flattening(F_network_ensemble, θs,
         output_dict['W'] = np.array(W)  # Whitening matrix F_mean^{-1/2}
         output_dict['W_inv'] = np.array(W_inv)  # Inverse whitening F_mean^{1/2}
         output_dict['F_mean'] = np.array(F_mean)  # Mean Fisher (in normalized space)
-    
-    np.savez(outname, **output_dict)
+
+    # Save to npz file (converts FlexibleDict to regular dict for numpy)
+    np.savez(outname, **dict(output_dict))
+    print("Note: Load with io_utils.load_flattening_results(file) for alias support")
 
     # ---------------------- COORDINATE VISUALISATION -----------------------
     # visualise the first two components vs first two params
@@ -954,7 +965,7 @@ def fit_flattening(F_network_ensemble, θs,
         plt.close()
 
     print("EXPERIMENT COMPLETED & RESULTS SAVED TO:", outname + ".npz")
-    return w, ensemble_ws
+    return w, ensemble_ws, output_dict
 
 # ---------------------- EXECUTION (for testing) -----------------------
 if __name__ == '__main__':

@@ -19,8 +19,10 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 # Support both package import and direct script execution
 try:
     from .fishnets import MLP, resMLP, Fishnet_from_embedding, optimized_smooth_leaky
+    from .io_utils import FlexibleDict, create_results_dict
 except ImportError:
     from fishnets import MLP, resMLP, Fishnet_from_embedding, optimized_smooth_leaky
+    from io_utils import FlexibleDict, create_results_dict
 
 # --- Helper functions for prediction ---
 def predicted_fishers(model, w, data):
@@ -75,7 +77,7 @@ def train_fishnets(theta,
       lr               : Learning rate for the optimizer
       acts             : List of activation functions for diversity.
       scaler_type      : Type of scaler to use for data normalization. Options: 'minmax' (MinMaxScaler) or 'standard' (StandardScaler). Default: 'minmax'.
-      embedding_net    : Optional nn.Module to use as the first layer in the ensemble models. If provided, it will be prepended to the sequential model.
+      embedding_net    : Optional nn.Module to use as the first layer in the ensemble models. If provided, it will be prepended to the Sequential model.
       outdir           : Directory where outputs will be saved. If it does not exist, it is created;
                          if it exists, it is emptied before saving.
     
@@ -84,6 +86,13 @@ def train_fishnets(theta,
       ensemble_weights : A vector of weights for each ensemble member (computed from the best validation loss).
       models         : A list of the ensemble models.
       data_scaler    : The fitted data scaler (MinMaxScaler or StandardScaler).
+      outputs        : FlexibleDict containing test predictions with multiple naming conventions:
+                       - 'theta' (or 'X', 'params'): test parameters
+                       - 'Fs' (or 'F', 'fisher'): ensemble Fisher matrix predictions
+                         Shape: (num_models, n_test, n_params, n_params)
+                       - 'mle' (or 'theta_hat'): ensemble MLE predictions
+                       - 'x' (or 'data', 'obs'): test observations
+                       - 'ensemble_weights': weights for each model
     """
     # Ensure the output directory exists and is empty.
     print("saving to", outdir)
@@ -302,15 +311,23 @@ def train_fishnets(theta,
     ensemble_F_predictions = jnp.array([predicted_fishers(models[i], ws[i], data_test) for i in range(num_models)])
     ensemble_mle_predictions = jnp.array([predicted_mle(models[i], ws[i], data_test) for i in range(num_models)])
 
+    # Create FlexibleDict for outputs (supports multiple naming conventions)
+    outputs = create_results_dict(
+        theta=theta_test,              # Canonical: parameters (accessible as 'theta', 'X', 'params')
+        Fs=ensemble_F_predictions,     # Canonical: Fisher matrices ensemble (accessible as 'Fs', 'F', 'fisher')
+                                       # Shape: (num_models, n_test, n_params, n_params)
+        mle=ensemble_mle_predictions,  # Canonical: MLE predictions (accessible as 'mle', 'theta_hat')
+        ensemble_weights=ensemble_weights_arr,
+        x=data_test                    # Canonical: observations (accessible as 'x', 'data', 'obs')
+    )
+    
+    # Save to npz file (converts FlexibleDict to regular dict for numpy)
     outname = os.path.join(outdir, "fishnets_outputs")
-    np.savez(outname,
-             theta=theta_test,
-             F_network_ensemble=ensemble_F_predictions,
-             mle_network_ensemble=ensemble_mle_predictions,
-             ensemble_weights=ensemble_weights_arr)
+    np.savez(outname, **dict(outputs))
     print("Training completed. Outputs saved to:", outname + ".npz")
+    print("Note: Load with io_utils.load_fishnets_results(file) for alias support")
 
-    return ws, ensemble_weights_arr, models, data_scaler
+    return ws, ensemble_weights_arr, models, data_scaler, outputs
 
 # -------------- EXAMPLE USAGE --------------
 if __name__ == '__main__':
@@ -372,7 +389,8 @@ if __name__ == '__main__':
 
 
     # Call train_fishnets with hyperparameters as desired.
-    ws, ens_weights = train_fishnets(theta, data, theta_test, data_test,
+    ws, ens_weights, models, scaler, outputs = train_fishnets(
+                                     theta, data, theta_test, data_test,
                                      data_shape=n_d,
                                      hids_min=10,
                                      hids_max=300,
@@ -386,3 +404,12 @@ if __name__ == '__main__':
                                      patience=20,
                                      lr=5e-5,
                                      outdir="fishnets-log")
+    
+    # Demonstrate flexible access to outputs
+    print("\nFlexible output access examples:")
+    print("  Statistical notation: outputs['theta'].shape =", outputs['theta'].shape)
+    print("  ML notation: outputs['X'].shape =", outputs['X'].shape)
+    print("  Descriptive: outputs['params'].shape =", outputs['params'].shape)
+    print("  Fisher matrices: outputs['Fs'].shape =", outputs['Fs'].shape)
+    print("  Fisher (alias): outputs['F'].shape =", outputs['F'].shape)
+    print("  All access the same array:", np.array_equal(outputs['theta'], outputs['X']))

@@ -217,7 +217,11 @@ def train_fishnets(theta,
                 return mle, F
             mle, F = jax.vmap(fn)(x_batched, theta_batched)
             res = theta_batched - mle
-            return 0.5 * jnp.mean(jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) - jnp.log(jnp.linalg.det(F)), axis=0)
+            # Use slogdet for more numerical stability with log(det(F))
+            sign, logdet = jnp.linalg.slogdet(F)
+            # Clip logdet to prevent extreme values
+            logdet = jnp.clip(logdet, -50, 50)
+            return 0.5 * jnp.mean(jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) - logdet, axis=0)
 
         tx = optax.adam(learning_rate=lr)
         opt_state = tx.init(w)

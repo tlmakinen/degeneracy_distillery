@@ -153,7 +153,8 @@ def construct_fisher_matrix_log_cholesky(outputs, n_p):
     
     # First n_diag elements are log-diagonal (exponentiate for positivity)
     log_diag = outputs[:n_diag]
-    diag_elements = jax.nn.softplus(log_diag) + 1e-6
+    # Increased minimum value for better numerical stability
+    diag_elements = jax.nn.softplus(log_diag) + 1e-4
     
     # Remaining elements are off-diagonal (unconstrained)
     off_diag = outputs[n_diag:]

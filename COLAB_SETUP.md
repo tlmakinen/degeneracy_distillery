@@ -80,7 +80,7 @@ The package installs successfully in Colab with all functionality:
 
 ## Dependencies
 
-**All core dependencies** (including `pyoperon`, `jax`, `flax`, etc.) are automatically installed when you run `!pip install -e .`
+**All core dependencies** (including `pyoperon`, `jax`, `flax`, etc.) are automatically installed when you run `!pip install -e .` On Apple Silicon, use `!pip install -e ".[metal]"` for Metal GPU.
 
 ### REQUIRED: ESR Package
 

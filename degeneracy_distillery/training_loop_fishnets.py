@@ -150,11 +150,20 @@ def train_fishnets(theta,
 
     hids_range = np.arange(hids_min, hids_max)
     all_n_hidden = []
+    all_sharpness = []
+    all_threshold = []
     for n in range(num_models):
         key, rng = jr.split(key)
         hidden = int(jr.choice(key, hids_range, replace=True))
         print("Chosen hidden size for model", n+1, ":", hidden)
         all_n_hidden.append([hidden]*n_layers)  # three-layer network
+        
+        # Generate sharpness and threshold using jr.normal with proper key management
+        key, rng1, rng2 = jr.split(key, 3)
+        sharpness_val = jr.normal(rng1, shape=(1,)) * 0.7 + 5.0
+        threshold_val = jr.normal(rng2, shape=(1,)) * 0.7 + 1.0
+        all_sharpness.append(sharpness_val)
+        all_threshold.append(threshold_val)
 
     # Build ensemble: each network is a sequential composition of an MLP and a Fishnet_from_embedding.
     # If embedding_net is provided, prepend it to the sequential model.
@@ -168,8 +177,8 @@ def train_fishnets(theta,
                 act=acts[i],
                 hidden=all_n_hidden[i][0],
                 act_fisher=nn.gelu,
-                sharpness=np.random.randn(1,)*0.7 + 5.0,
-                threshold=np.random.randn(1,)*0.7 + 1.0
+                sharpness=all_sharpness[i],
+                threshold=all_threshold[i]
                     )
             ])
             for i in range(num_models)
@@ -183,8 +192,8 @@ def train_fishnets(theta,
                 act=acts[i],
                 hidden=all_n_hidden[i][0],
                 act_fisher=nn.gelu,
-                sharpness=np.random.randn(1,)*0.7 + 5.0,
-                threshold=np.random.randn(1,)*0.7 + 1.0
+                sharpness=all_sharpness[i],
+                threshold=all_threshold[i]
                     )
             ])
             for i in range(num_models)

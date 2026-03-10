@@ -404,6 +404,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
                   dy: np.ndarray, y_reference: Optional[np.ndarray] = None,
                   theta_fid: Optional[np.ndarray] = None, 
                   use_var: bool = False, smallest: bool = False,
+                  apply_varimax: bool = False, varimax_method: str = "varimax",
                   tol: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Rotate coordinates to align with reference and apply PCA-based rotation.
@@ -413,6 +414,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     2. Kabsch alignment to reference
     3. Fisher-based eigenvalue decomposition
     4. Optional rotation to align with eigenvector
+    5. Optional Varimax/Quartimax rotation for sparsity
     
     Parameters
     ----------
@@ -432,6 +434,10 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
         Use variance-based covariance
     smallest : bool
         Align to smallest eigenvalue direction
+    apply_varimax : bool
+        Apply Varimax/Quartimax rotation for sparsity maximization
+    varimax_method : str
+        Method for ortho_rotation: "varimax" or "quartimax"
     tol : float
         Tolerance for eigenvalue cutoff
         
@@ -517,6 +523,12 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     y = np.einsum("ij,bj->bi", rotmat, y)
     A = np.eye(y.shape[-1])
     
+    # Apply Varimax rotation for sparsity if requested
+    if apply_varimax:
+        R_varimax, y_varimax_T = ortho_rotation(y, method=varimax_method)
+        y = y_varimax_T.T  # ortho_rotation returns transposed
+        rotmat = R_varimax @ rotmat  # compose rotations
+    
     # Rotate Jacobian
     dy_sr = jnp.einsum("ij,bjk->bik", rotmat, dy)
 
@@ -531,6 +543,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                best_model_idx: int,
                                n_d: float = 1.0,
                                use_var: bool = False,
+                               apply_varimax: bool = False,
+                               varimax_method: str = "varimax",
                                verbose: bool = True) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
@@ -561,6 +575,12 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     use_var : bool
         If True, use variance-based covariance normalization in rotation.
         Default is False.
+    apply_varimax : bool
+        Apply Varimax/Quartimax rotation for sparsity maximization.
+        Default is False.
+    varimax_method : str
+        Method for ortho_rotation: "varimax" or "quartimax".
+        Default is "varimax".
     verbose : bool
         Whether to print progress information
         
@@ -611,6 +631,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
             y, theta=X, Fs=Favg, dy=dy, 
             y_reference=y_reference,
             use_var=use_var,
+            apply_varimax=apply_varimax,
+            varimax_method=varimax_method,
         )
         
         if verbose:
@@ -701,6 +723,8 @@ def load_and_process_data(datapath: str, filename: str,
                           n_d: float = 1.0,
                           y_reference_index: int = None,
                           use_var: bool = False,
+                          apply_varimax: bool = False,
+                          varimax_method: str = "varimax",
                           verbose: bool = True) -> Dict[str, Any]:
     """
     Load and process flattening data file.
@@ -724,6 +748,12 @@ def load_and_process_data(datapath: str, filename: str,
     use_var : bool
         If True, use variance-based covariance normalization in rotation.
         Passed to process_ensemble_rotation. Default is False.
+    apply_varimax : bool
+        Apply Varimax/Quartimax rotation for sparsity maximization.
+        Passed to process_ensemble_rotation. Default is False.
+    varimax_method : str
+        Method for ortho_rotation: "varimax" or "quartimax".
+        Passed to process_ensemble_rotation. Default is "varimax".
     verbose : bool
         Whether to print progress
         
@@ -769,7 +799,9 @@ def load_and_process_data(datapath: str, filename: str,
             best_model_idx=best_model_idx,
             n_d=n_d,
             verbose=verbose,
-            use_var=use_var
+            use_var=use_var,
+            apply_varimax=apply_varimax,
+            varimax_method=varimax_method
         )
         # Merge results
         result.update(ensemble_result)

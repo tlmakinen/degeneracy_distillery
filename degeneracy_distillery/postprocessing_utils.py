@@ -1038,12 +1038,23 @@ def get_pruned_expressions_final(A: np.ndarray,
                                   rational: bool = False,
                                   threshold: float = 1e-2,
                                   verbose: bool = True,
-                                  update: bool = False) -> Tuple[List[str], List[List[float]]]:
+                                  update: bool = False,
+                                  importance_based: bool = True,
+                                  perturbation: float = 1e-4) -> Tuple[List[str], List[List[float]]]:
     """
     Generate final pruned expressions with loss-based coefficient removal.
     
-    This function iteratively removes coefficients that don't significantly
-    affect the flattening quality.
+    This function removes coefficients that don't significantly affect the 
+    flattening quality. Two modes available:
+    
+    1. importance_based=True (default, recommended):
+       - Computes importance scores for all coefficients first
+       - Removes in order of importance (least to most important)
+       - Permutation-independent and more principled
+       
+    2. importance_based=False (legacy):
+       - Sequential removal in index order
+       - Permutation-dependent but slightly faster
     
     Parameters
     ----------
@@ -1078,7 +1089,11 @@ def get_pruned_expressions_final(A: np.ndarray,
     verbose : bool
         Print progress
     update : bool
-        Update flattening score as we progress
+        Update flattening score as we progress (only used in legacy mode)
+    importance_based : bool
+        Use importance-based ordering (recommended for better results)
+    perturbation : float
+        Finite difference step size for computing importance scores
         
     Returns
     -------
@@ -1092,7 +1107,9 @@ def get_pruned_expressions_final(A: np.ndarray,
     if check_flattening_fn is None:
         check_flattening_fn = make_check_flattening_fn(X, Fs)
     
-    # Get reference expressions
+    A = A.reshape((n_params, n_params))
+    
+    # Get reference expressions and score
     new_expr, consts = get_pruned_expressions(
         A=A, param_dicts=param_dicts, all_pars=all_pars,
         linear_pars=linear_pars, all_expressions=all_expressions,
@@ -1100,47 +1117,162 @@ def get_pruned_expressions_final(A: np.ndarray,
         remove_floats=False, decimal=3, rational=rational, threshold=0.0
     )
     
-    flats, _ = check_flattening_fn(new_expr)
+    flats, _ = check_flattening_fn(new_expr, A=jnp.array(A))
     eye = jnp.eye(n_params)
     flat_score_reference = jax.vmap(norm)(flats - eye).mean()
     
-    linear_pars_export = deepcopy(linear_pars)
-    
-    iterator = tqdm(enumerate(linear_pars)) if verbose else enumerate(linear_pars)
-    
-    for i, pararr in iterator:
-        linear_pars2 = deepcopy(linear_pars)
-        if verbose:
-            print(f"Looking at component {i}")
+    if importance_based:
+        # === IMPORTANCE-BASED PRUNING (PERMUTATION-INDEPENDENT) ===
         
-        for j in range(len(pararr)):
-            try:
-                linear_pars2[i][j] = 0.0
+        if verbose:
+            print(f"Initial flattening score: {flat_score_reference:.6f}")
+            print("Computing importance scores for all coefficients...")
+        
+        # Flatten linear_pars for easier indexing
+        linear_pars_flat, _ = get_linear_par_index(linear_pars)
+        
+        # Compute importance score for each coefficient
+        importance_scores = []
+        coeff_indices = []  # Track (i, j) tuples
+        
+        for i, pararr in enumerate(linear_pars):
+            for j in range(len(pararr)):
+                coeff_val = linear_pars[i][j]
                 
+                # Skip if already near zero
+                if np.abs(coeff_val) < 1e-12:
+                    importance_scores.append(0.0)
+                    coeff_indices.append((i, j))
+                    continue
+                
+                # Compute finite difference: perturb coefficient slightly
+                linear_pars_perturbed = deepcopy(linear_pars)
+                linear_pars_perturbed[i][j] = coeff_val + perturbation
+                
+                try:
+                    prop_expr, _ = get_pruned_expressions(
+                        A=A, param_dicts=param_dicts, all_pars=all_pars,
+                        linear_pars=linear_pars_perturbed, all_expressions=all_expressions,
+                        linear_labels=linear_labels, n_params=n_params,
+                        remove_floats=False, decimal=3, rational=rational, threshold=0.0
+                    )
+                    
+                    flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
+                    flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
+                    
+                    # Importance = |gradient| * |coefficient value|
+                    grad_approx = (flat_score_temp - flat_score_reference) / perturbation
+                    importance = np.abs(grad_approx) * np.abs(coeff_val)
+                    importance_scores.append(float(importance))
+                    
+                except Exception as e:
+                    # If perturbation causes error, mark as high importance (don't remove)
+                    importance_scores.append(float('inf'))
+                
+                coeff_indices.append((i, j))
+        
+        if verbose:
+            finite_scores = [s for s in importance_scores if s != float('inf')]
+            if finite_scores:
+                print(f"Importance scores - min: {np.min(finite_scores):.6e}, "
+                      f"max: {np.max(finite_scores):.6e}, "
+                      f"median: {np.median(finite_scores):.6e}")
+        
+        # Sort coefficients by importance (ascending = least important first)
+        sorted_order = np.argsort(importance_scores)
+        
+        # Try removing coefficients in order of increasing importance
+        linear_pars_export = deepcopy(linear_pars)
+        n_removed = 0
+        n_total = len(importance_scores)
+        
+        iterator = tqdm(sorted_order, desc="Pruning coefficients") if verbose else sorted_order
+        
+        for sort_idx in iterator:
+            i, j = coeff_indices[sort_idx]
+            
+            # Skip if already zero
+            if np.abs(linear_pars_export[i][j]) < 1e-12:
+                continue
+            
+            # Try zeroing this coefficient
+            linear_pars_temp = deepcopy(linear_pars_export)
+            linear_pars_temp[i][j] = 0.0
+            
+            try:
                 prop_expr, _ = get_pruned_expressions(
                     A=A, param_dicts=param_dicts, all_pars=all_pars,
-                    linear_pars=linear_pars2, all_expressions=all_expressions,
+                    linear_pars=linear_pars_temp, all_expressions=all_expressions,
                     linear_labels=linear_labels, n_params=n_params,
                     remove_floats=False, decimal=3, rational=rational, threshold=0.0
                 )
                 
-                flats_j, _ = check_flattening_fn(prop_expr)
-                flat_score_j = jax.vmap(norm)(flats_j - eye).mean()
-                delta = (flat_score_j - flat_score_reference) / flat_score_reference
-                
-                if verbose:
-                    print(f'  delta: {delta:.6f}')
+                flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
+                flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
+                delta = (flat_score_temp - flat_score_reference) / flat_score_reference
                 
                 if delta < threshold:
+                    # Accept removal
                     linear_pars_export[i][j] = 0.0
-                    if update:
-                        flat_score_reference = flat_score_j # update best flattening score
+                    n_removed += 1
+                    
+                    if verbose and hasattr(iterator, 'set_postfix'):
+                        iterator.set_postfix({'removed': n_removed, 'delta': f'{delta:.6f}'})
+                elif verbose:
+                    if hasattr(iterator, 'write'):
+                        iterator.write(f"Coeff ({i},{j}) - importance {importance_scores[sort_idx]:.6e}: "
+                                      f"delta {delta:.6f} exceeds threshold, keeping")
                     
             except Exception as e:
                 if verbose:
-                    print(f'  zeroed component -> skip!')
+                    msg = f"Zeroing coeff ({i},{j}) caused error - keeping it"
+                    if hasattr(iterator, 'write'):
+                        iterator.write(msg)
+                    else:
+                        print(msg)
+        
+        if verbose:
+            print(f"\nPruning summary: removed {n_removed}/{n_total} coefficients")
+    
+    else:
+        # === LEGACY SEQUENTIAL PRUNING (PERMUTATION-DEPENDENT) ===
+        
+        linear_pars_export = deepcopy(linear_pars)
+        iterator = tqdm(enumerate(linear_pars)) if verbose else enumerate(linear_pars)
+        
+        for i, pararr in iterator:
+            linear_pars2 = deepcopy(linear_pars)
+            if verbose:
+                print(f"Looking at component {i}")
             
-            linear_pars2 = deepcopy(linear_pars_export)
+            for j in range(len(pararr)):
+                try:
+                    linear_pars2[i][j] = 0.0
+                    
+                    prop_expr, _ = get_pruned_expressions(
+                        A=A, param_dicts=param_dicts, all_pars=all_pars,
+                        linear_pars=linear_pars2, all_expressions=all_expressions,
+                        linear_labels=linear_labels, n_params=n_params,
+                        remove_floats=False, decimal=3, rational=rational, threshold=0.0
+                    )
+                    
+                    flats_j, _ = check_flattening_fn(prop_expr)
+                    flat_score_j = jax.vmap(norm)(flats_j - eye).mean()
+                    delta = (flat_score_j - flat_score_reference) / flat_score_reference
+                    
+                    if verbose:
+                        print(f'  delta: {delta:.6f}')
+                    
+                    if delta < threshold:
+                        linear_pars_export[i][j] = 0.0
+                        if update:
+                            flat_score_reference = flat_score_j
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f'  zeroed component -> skip!')
+                
+                linear_pars2 = deepcopy(linear_pars_export)
     
     # Final pruned expressions
     new_expr, consts = get_pruned_expressions(

@@ -211,6 +211,78 @@ def ortho_rotation(components: np.ndarray, method: str = "quartimax",
     return rotation_matrix.T, np.dot(components, rotation_matrix).T
 
 
+def maximize_jacobian_sparsity(dy: np.ndarray, method: str = "varimax",
+                                 aggregate: str = "norm",
+                                 tol: float = 1e-6, max_iter: int = 100) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Find rotation that maximizes sparsity in Jacobian structure.
+    
+    This identifies which y components have simple dependencies on X parameters,
+    making nonlinear functions easier to discover in SR.
+    
+    Parameters
+    ----------
+    dy : np.ndarray
+        Jacobian matrix of shape (n_samples, n_outputs, n_params)
+    method : str
+        Rotation method: "varimax" or "quartimax"
+    aggregate : str
+        How to aggregate Jacobian across parameters:
+        - "norm": Use gradient norms ||dy_i/dX||
+        - "flatten": Use flattened Jacobian structure
+        - "variance": Use gradient variance across samples
+    tol : float
+        Convergence tolerance
+    max_iter : int
+        Maximum iterations
+        
+    Returns
+    -------
+    rotation_matrix : np.ndarray
+        Rotation matrix of shape (n_outputs, n_outputs)
+    gradient_structure : np.ndarray
+        Transformed gradient structure used for rotation
+        
+    Notes
+    -----
+    Sparse Jacobians indicate that y_i depends on few X_j parameters,
+    making it easier for SR to identify functional forms like y_i = f(X_j, X_k).
+    """
+    n_samples, n_outputs, n_params = dy.shape
+    
+    if aggregate == "norm":
+        # Use gradient norms: ||∂y_i/∂X||_2 for each sample
+        # This captures which outputs have large sensitivities
+        grad_norms = np.linalg.norm(dy, axis=2)  # (n_samples, n_outputs)
+        components = grad_norms
+        
+    elif aggregate == "flatten":
+        # Use mean absolute Jacobian across samples
+        # Shape: (n_outputs, n_params) -> average sensitivity pattern
+        dy_mean = np.mean(np.abs(dy), axis=0)  # (n_outputs, n_params)
+        
+        # Reshape to apply Varimax: want to find y rotations that make dependency sparse
+        # Treat each parameter as a "sample" and each output as a "component"
+        components = dy_mean.T  # (n_params, n_outputs)
+        
+    elif aggregate == "variance":
+        # Use gradient variance across samples
+        # High variance indicates parameter-dependent (nonlinear) behavior
+        grad_var = np.var(dy, axis=0)  # (n_outputs, n_params)
+        
+        # Similar to flatten: treat parameters as samples
+        components = grad_var.T  # (n_params, n_outputs)
+        
+    else:
+        raise ValueError(f"Unknown aggregate method: {aggregate}")
+    
+    # Apply orthogonal rotation to maximize sparsity
+    rotation_matrix, rotated = ortho_rotation(components, method=method, 
+                                               tol=tol, max_iter=max_iter)
+    
+    return rotation_matrix, rotated
+
+
 # =============================================================================
 # DATA TRANSFORMATION FUNCTIONS
 # =============================================================================
@@ -402,19 +474,22 @@ def get_eigenvalues(M: jnp.ndarray) -> jnp.ndarray:
 
 def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray, 
                   dy: np.ndarray, y_reference: Optional[np.ndarray] = None,
+                  dy_reference: Optional[np.ndarray] = None,
                   theta_fid: Optional[np.ndarray] = None, 
                   use_var: bool = False, smallest: bool = False,
                   apply_varimax: bool = False, varimax_method: str = "varimax",
+                  jacobian_sparsity: str = "norm",
                   tol: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Rotate coordinates to align with reference and apply PCA-based rotation.
     
     This function performs:
-    1. Centering of y
-    2. Kabsch alignment to reference
+    1. Centering of y and y_reference
+    2. Optional Jacobian-sparsity rotation on y_reference to define sparse basis
+       (maximizes sparsity in dy_reference to isolate nonlinear dependencies)
     3. Fisher-based eigenvalue decomposition
-    4. Optional rotation to align with eigenvector
-    5. Optional Varimax/Quartimax rotation for sparsity
+    4. Align Jacobian-sparse y_reference to Fisher eigenvector
+    5. Kabsch alignment of y to the transformed y_reference
     
     Parameters
     ----------
@@ -428,6 +503,9 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
         Jacobians of shape (n_samples, n_outputs, n_params)
     y_reference : np.ndarray, optional
         Reference outputs for Kabsch alignment
+    dy_reference : np.ndarray, optional
+        Reference Jacobian of shape (n_samples, n_outputs, n_params).
+        Required if apply_varimax=True for Jacobian-based sparsity rotation.
     theta_fid : np.ndarray, optional
         Fiducial parameter values
     use_var : bool
@@ -435,9 +513,18 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     smallest : bool
         Align to smallest eigenvalue direction
     apply_varimax : bool
-        Apply Varimax/Quartimax rotation for sparsity maximization
+        Apply Jacobian-sparsity rotation for sparsity maximization.
+        If True, Jacobian-based sparsity rotation is applied to y_reference to define 
+        a sparse basis that isolates nonlinear components. Then y_reference is aligned 
+        to the Fisher eigenvector, and y is aligned to the transformed y_reference via 
+        Kabsch. This helps SR identify which y_i depend on which X_j.
     varimax_method : str
         Method for ortho_rotation: "varimax" or "quartimax"
+    jacobian_sparsity : str
+        Method for aggregating Jacobian in sparsity rotation:
+        - "norm": Use gradient norms ||dy_i/dX||
+        - "flatten": Use full flattened Jacobian structure
+        - "variance": Use gradient variance (indicates nonlinearity)
     tol : float
         Tolerance for eigenvalue cutoff
         
@@ -463,8 +550,27 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     # zero-out reference point
     y_reference -= y_reference.mean(0)
 
+    # Apply Jacobian-sparsity rotation to y_reference only
+    varimax_rotmat = np.eye(y.shape[-1])
     
-    # Find fiducial point
+    if apply_varimax:
+        if dy_reference is None:
+            raise ValueError("dy_reference must be provided when apply_varimax=True for Jacobian sparsity")
+        
+        # Use Jacobian-based sparsity rotation on y_reference
+        R_sparse, grad_structure = maximize_jacobian_sparsity(
+            dy_reference, 
+            method=varimax_method,
+            aggregate=jacobian_sparsity
+        )
+        
+        # Apply rotation to y_reference
+        y_reference = np.einsum("ij,bj->bi", R_sparse, y_reference)
+        varimax_rotmat = R_sparse
+        
+        print(f"Applied Jacobian-sparsity rotation to y_reference (aggregate={jacobian_sparsity})")
+    
+    # Find fiducial point (now in Varimax-transformed space if enabled)
     if theta_fid is None:
         theta_fid = theta.mean(0)
     
@@ -523,13 +629,12 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     y = np.einsum("ij,bj->bi", rotmat, y)
     A = np.eye(y.shape[-1])
     
-    # Apply Varimax rotation for sparsity if requested
-    if apply_varimax:
-        R_varimax, y_varimax_T = ortho_rotation(y, method=varimax_method)
-        y = y_varimax_T.T  # ortho_rotation returns transposed
-        rotmat = R_varimax @ rotmat  # compose rotations
+    # Compose rotations: rotmat aligns y to the Varimax-transformed y_reference
+    # The full transformation from original y to final y is: rotmat @ varimax_rotmat
+    # where varimax_rotmat was applied to define the sparse basis via y_reference
+    rotmat = rotmat @ varimax_rotmat
     
-    # Rotate Jacobian
+    # Rotate Jacobian with the full composed rotation
     dy_sr = jnp.einsum("ij,bjk->bik", rotmat, dy)
 
     y -= y_reference.min(0)
@@ -545,6 +650,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                use_var: bool = False,
                                apply_varimax: bool = False,
                                varimax_method: str = "varimax",
+                               jacobian_sparsity: str = "norm",
                                verbose: bool = True) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
@@ -576,11 +682,14 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         If True, use variance-based covariance normalization in rotation.
         Default is False.
     apply_varimax : bool
-        Apply Varimax/Quartimax rotation for sparsity maximization.
+        Apply Jacobian-sparsity rotation for sparsity maximization.
         Default is False.
     varimax_method : str
         Method for ortho_rotation: "varimax" or "quartimax".
         Default is "varimax".
+    jacobian_sparsity : str
+        Method for aggregating Jacobian in sparsity rotation:
+        "norm", "flatten", or "variance". Default is "norm".
     verbose : bool
         Whether to print progress information
         
@@ -609,6 +718,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     
     # Get reference for Kabsch alignment
     y_reference = datafile['eta_ensemble'][best_model_idx][randidx]
+    dy_reference = datafile['Jbar_ensemble'][best_model_idx][randidx]
     
     ys = []
     dys = []
@@ -630,9 +740,11 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         y_rot, dy_orig, dy_sr_rot, rotmat, A = rotate_coords(
             y, theta=X, Fs=Favg, dy=dy, 
             y_reference=y_reference,
+            dy_reference=dy_reference,
             use_var=use_var,
             apply_varimax=apply_varimax,
             varimax_method=varimax_method,
+            jacobian_sparsity=jacobian_sparsity,
         )
         
         if verbose:
@@ -725,6 +837,7 @@ def load_and_process_data(datapath: str, filename: str,
                           use_var: bool = False,
                           apply_varimax: bool = False,
                           varimax_method: str = "varimax",
+                          jacobian_sparsity: str = "norm",
                           verbose: bool = True) -> Dict[str, Any]:
     """
     Load and process flattening data file.
@@ -749,11 +862,15 @@ def load_and_process_data(datapath: str, filename: str,
         If True, use variance-based covariance normalization in rotation.
         Passed to process_ensemble_rotation. Default is False.
     apply_varimax : bool
-        Apply Varimax/Quartimax rotation for sparsity maximization.
+        Apply Jacobian-sparsity rotation for sparsity maximization.
         Passed to process_ensemble_rotation. Default is False.
     varimax_method : str
         Method for ortho_rotation: "varimax" or "quartimax".
         Passed to process_ensemble_rotation. Default is "varimax".
+    jacobian_sparsity : str
+        Method for aggregating Jacobian in sparsity rotation:
+        "norm", "flatten", or "variance". Passed to process_ensemble_rotation.
+        Default is "norm".
     verbose : bool
         Whether to print progress
         
@@ -801,7 +918,8 @@ def load_and_process_data(datapath: str, filename: str,
             verbose=verbose,
             use_var=use_var,
             apply_varimax=apply_varimax,
-            varimax_method=varimax_method
+            varimax_method=varimax_method,
+            jacobian_sparsity=jacobian_sparsity
         )
         # Merge results
         result.update(ensemble_result)

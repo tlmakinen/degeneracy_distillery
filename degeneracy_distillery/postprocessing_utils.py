@@ -1040,21 +1040,28 @@ def get_pruned_expressions_final(A: np.ndarray,
                                   verbose: bool = True,
                                   update: bool = False,
                                   importance_based: bool = True,
-                                  perturbation: float = 1e-4) -> Tuple[List[str], List[List[float]]]:
+                                  perturbation: float = 1e-4,
+                                  batch_removal: bool = False,
+                                  batch_size: int = 5) -> Tuple[List[str], List[List[float]]]:
     """
     Generate final pruned expressions with loss-based coefficient removal.
     
     This function removes coefficients that don't significantly affect the 
-    flattening quality. Two modes available:
+    flattening quality. Three modes available:
     
-    1. importance_based=True (default, recommended):
+    1. importance_based=True, batch_removal=True (fastest):
+       - Computes importance scores for all coefficients first
+       - Attempts to remove multiple low-importance terms at once
+       - Falls back to individual removal if batch fails
+       
+    2. importance_based=True, batch_removal=False (default, reliable):
        - Computes importance scores for all coefficients first
        - Removes in order of importance (least to most important)
        - Permutation-independent and more principled
        
-    2. importance_based=False (legacy):
+    3. importance_based=False (legacy):
        - Sequential removal in index order
-       - Permutation-dependent but slightly faster
+       - Permutation-dependent but slightly faster for importance computation
     
     Parameters
     ----------
@@ -1094,6 +1101,10 @@ def get_pruned_expressions_final(A: np.ndarray,
         Use importance-based ordering (recommended for better results)
     perturbation : float
         Finite difference step size for computing importance scores
+    batch_removal : bool
+        Attempt to remove multiple low-importance coefficients simultaneously
+    batch_size : int
+        Number of coefficients to attempt removing in each batch
         
     Returns
     -------
@@ -1125,8 +1136,8 @@ def get_pruned_expressions_final(A: np.ndarray,
         # === IMPORTANCE-BASED PRUNING (PERMUTATION-INDEPENDENT) ===
         
         if verbose:
-            print(f"Initial flattening score: {flat_score_reference:.6f}")
-            print("Computing importance scores for all coefficients...")
+            print(f"initial flattening score: {flat_score_reference:.6f}")
+            print("computing importance scores for all coefficients...")
         
         # Flatten linear_pars for easier indexing
         linear_pars_flat, _ = get_linear_par_index(linear_pars)
@@ -1186,53 +1197,152 @@ def get_pruned_expressions_final(A: np.ndarray,
         n_removed = 0
         n_total = len(importance_scores)
         
-        iterator = tqdm(sorted_order, desc="Pruning coefficients") if verbose else sorted_order
+        if batch_removal:
+            # === BATCH REMOVAL MODE ===
+            # Try removing multiple low-importance coefficients at once
+            
+            if verbose:
+                print(f"using batch removal with batch_size={batch_size}")
+            
+            batch_start = 0
+            pbar = tqdm(total=n_total, desc="batch pruning") if verbose else None
+            
+            while batch_start < n_total:
+                # Get next batch of candidates
+                batch_end = min(batch_start + batch_size, n_total)
+                batch_indices = sorted_order[batch_start:batch_end]
+                
+                # Filter out already-zero coefficients
+                active_batch = []
+                for sort_idx in batch_indices:
+                    i, j = coeff_indices[sort_idx]
+                    if np.abs(linear_pars_export[i][j]) >= 1e-12:
+                        active_batch.append((sort_idx, i, j))
+                
+                if len(active_batch) == 0:
+                    batch_start = batch_end
+                    if pbar:
+                        pbar.update(len(batch_indices))
+                    continue
+                
+                # Try removing entire batch at once
+                linear_pars_batch = deepcopy(linear_pars_export)
+                for sort_idx, i, j in active_batch:
+                    linear_pars_batch[i][j] = 0.0
+                
+                try:
+                    prop_expr, _ = get_pruned_expressions(
+                        A=A, param_dicts=param_dicts, all_pars=all_pars,
+                        linear_pars=linear_pars_batch, all_expressions=all_expressions,
+                        linear_labels=linear_labels, n_params=n_params,
+                        remove_floats=False, decimal=3, rational=rational, threshold=0.0
+                    )
+                    
+                    flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
+                    flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
+                    delta = (flat_score_temp - flat_score_reference) / flat_score_reference
+                    
+                    if delta < threshold:
+                        # Accept entire batch removal
+                        linear_pars_export = linear_pars_batch
+                        n_removed += len(active_batch)
+                        
+                        if verbose:
+                            print(f"batch {batch_start}-{batch_end}: removed {len(active_batch)} coeffs (delta: {delta:.6f})")
+                        if pbar:
+                            pbar.update(len(batch_indices))
+                        
+                        batch_start = batch_end
+                        continue
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"batch {batch_start}-{batch_end} caused error, trying individually")
+                
+                # Batch failed - try removing individually
+                for sort_idx, i, j in active_batch:
+                    linear_pars_temp = deepcopy(linear_pars_export)
+                    linear_pars_temp[i][j] = 0.0
+                    
+                    try:
+                        prop_expr, _ = get_pruned_expressions(
+                            A=A, param_dicts=param_dicts, all_pars=all_pars,
+                            linear_pars=linear_pars_temp, all_expressions=all_expressions,
+                            linear_labels=linear_labels, n_params=n_params,
+                            remove_floats=False, decimal=3, rational=rational, threshold=0.0
+                        )
+                        
+                        flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
+                        flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
+                        delta = (flat_score_temp - flat_score_reference) / flat_score_reference
+                        
+                        if delta < threshold:
+                            linear_pars_export[i][j] = 0.0
+                            n_removed += 1
+                            if verbose:
+                                print(f"  individual: removed coeff ({i},{j}), delta: {delta:.6f}")
+                        
+                    except Exception as e:
+                        if verbose:
+                            print(f"  zeroing coeff ({i},{j}) caused error - keeping it")
+                
+                if pbar:
+                    pbar.update(len(batch_indices))
+                batch_start = batch_end
+            
+            if pbar:
+                pbar.close()
         
-        for sort_idx in iterator:
-            i, j = coeff_indices[sort_idx]
+        else:
+            # === INDIVIDUAL REMOVAL MODE ===
             
-            # Skip if already zero
-            if np.abs(linear_pars_export[i][j]) < 1e-12:
-                continue
+            iterator = tqdm(sorted_order, desc="pruning coefficients") if verbose else sorted_order
             
-            # Try zeroing this coefficient
-            linear_pars_temp = deepcopy(linear_pars_export)
-            linear_pars_temp[i][j] = 0.0
-            
-            try:
-                prop_expr, _ = get_pruned_expressions(
-                    A=A, param_dicts=param_dicts, all_pars=all_pars,
-                    linear_pars=linear_pars_temp, all_expressions=all_expressions,
-                    linear_labels=linear_labels, n_params=n_params,
-                    remove_floats=False, decimal=3, rational=rational, threshold=0.0
-                )
+            for sort_idx in iterator:
+                i, j = coeff_indices[sort_idx]
                 
-                flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
-                flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
-                delta = (flat_score_temp - flat_score_reference) / flat_score_reference
+                # Skip if already zero
+                if np.abs(linear_pars_export[i][j]) < 1e-12:
+                    continue
                 
-                if delta < threshold:
-                    # Accept removal
-                    linear_pars_export[i][j] = 0.0
-                    n_removed += 1
+                # Try zeroing this coefficient
+                linear_pars_temp = deepcopy(linear_pars_export)
+                linear_pars_temp[i][j] = 0.0
+                
+                try:
+                    prop_expr, _ = get_pruned_expressions(
+                        A=A, param_dicts=param_dicts, all_pars=all_pars,
+                        linear_pars=linear_pars_temp, all_expressions=all_expressions,
+                        linear_labels=linear_labels, n_params=n_params,
+                        remove_floats=False, decimal=3, rational=rational, threshold=0.0
+                    )
                     
-                    if verbose and hasattr(iterator, 'set_postfix'):
-                        iterator.set_postfix({'removed': n_removed, 'delta': f'{delta:.6f}'})
-                elif verbose:
-                    if hasattr(iterator, 'write'):
-                        iterator.write(f"Coeff ({i},{j}) - importance {importance_scores[sort_idx]:.6e}: "
-                                      f"delta {delta:.6f} exceeds threshold, keeping")
+                    flats_temp, _ = check_flattening_fn(prop_expr, A=jnp.array(A))
+                    flat_score_temp = jax.vmap(norm)(flats_temp - eye).mean()
+                    delta = (flat_score_temp - flat_score_reference) / flat_score_reference
                     
-            except Exception as e:
-                if verbose:
-                    msg = f"Zeroing coeff ({i},{j}) caused error - keeping it"
-                    if hasattr(iterator, 'write'):
-                        iterator.write(msg)
-                    else:
-                        print(msg)
+                    if delta < threshold:
+                        # Accept removal
+                        linear_pars_export[i][j] = 0.0
+                        n_removed += 1
+                        
+                        if verbose and hasattr(iterator, 'set_postfix'):
+                            iterator.set_postfix({'removed': n_removed, 'delta': f'{delta:.6f}'})
+                    elif verbose:
+                        if hasattr(iterator, 'write'):
+                            iterator.write(f"coeff ({i},{j}) - importance {importance_scores[sort_idx]:.6e}: "
+                                          f"delta {delta:.6f} exceeds threshold, keeping")
+                        
+                except Exception as e:
+                    if verbose:
+                        msg = f"zeroing coeff ({i},{j}) caused error - keeping it"
+                        if hasattr(iterator, 'write'):
+                            iterator.write(msg)
+                        else:
+                            print(msg)
         
         if verbose:
-            print(f"\nPruning summary: removed {n_removed}/{n_total} coefficients")
+            print(f"\npruning summary: removed {n_removed}/{n_total} coefficients")
     
     else:
         # === LEGACY SEQUENTIAL PRUNING (PERMUTATION-DEPENDENT) ===
@@ -1288,7 +1398,7 @@ def get_pruned_expressions_final(A: np.ndarray,
 
 if __name__ == "__main__":
     # Run basic tests
-    print("Testing postprocessing utilities...")
+    print("testing postprocessing utilities...")
     
     # Test smooth_l1_loss
     test_x = jnp.array([0.5, -0.5, 1.0, -1.0])
@@ -1304,13 +1414,13 @@ if __name__ == "__main__":
     
     # Test split_by_punctuation
     tokens = split_by_punctuation("1.0 + 2.0 * X1")
-    assert "+" in tokens and "*" in tokens, "Should split by operators"
+    assert "+" in tokens and "*" in tokens, "should split by operators"
     print("  split_by_punctuation: OK")
     
     # Test replace_floats
     expr, vals = replace_floats("1.5 + 2.3 * X1")
-    assert "b0" in expr and "b1" in expr, "Should replace floats with parameters"
-    assert len(vals) == 2, "Should extract two float values"
+    assert "b0" in expr and "b1" in expr, "should replace floats with parameters"
+    assert len(vals) == 2, "should extract two float values"
     print("  replace_floats: OK")
     
-    print("\nAll tests passed!")
+    print("\nall tests passed!")

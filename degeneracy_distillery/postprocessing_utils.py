@@ -1396,6 +1396,201 @@ def get_pruned_expressions_final(A: np.ndarray,
     return new_expr, consts
 
 
+def postprocess_eqs(coordinates: List[str],
+                    X: np.ndarray,
+                    Fs: np.ndarray,
+                    n_params: int,
+                    A_rotation: Optional[np.ndarray] = None,
+                    threshold: float = 0.05,
+                    importance_based: bool = True,
+                    batch_removal: bool = False,
+                    batch_size: int = 5,
+                    remove_floats: bool = False,
+                    decimal: int = 3,
+                    rational: bool = False,
+                    verbose: bool = True,
+                    perturbation: float = 1e-4,
+                    check_flattening_fn: Optional[Callable] = None,
+                    module: str = "jax") -> Tuple[List[str], List[List[float]]]:
+    """
+    High-level wrapper for postprocessing symbolic expressions.
+    
+    This function provides a simplified interface that:
+    1. Parses symbolic expression strings into components
+    2. Extracts linear and nonlinear parameters
+    3. Applies importance-based pruning with optional rotation
+    4. Returns simplified expressions
+    
+    Parameters
+    ----------
+    coordinates : List[str]
+        List of symbolic expression strings (one per coordinate)
+    X : np.ndarray
+        Input data of shape (n_samples, n_params)
+    Fs : np.ndarray
+        Fisher matrices of shape (n_samples, n_params, n_params)
+    n_params : int
+        Number of parameters
+    A_rotation : np.ndarray, optional
+        Rotation matrix for coordinate transformation. If None, uses identity
+        (no rotation). Shape should be (n_params, n_params).
+    threshold : float, default=0.05
+        Relative loss threshold for removing coefficients. Higher values
+        lead to more aggressive pruning.
+    importance_based : bool, default=True
+        Use importance-based ordering (recommended). If False, uses legacy
+        sequential pruning which is permutation-dependent.
+    batch_removal : bool, default=False
+        Attempt to remove multiple low-importance coefficients simultaneously
+        for faster pruning. Recommended for large problems.
+    batch_size : int, default=5
+        Number of coefficients to attempt removing in each batch
+    remove_floats : bool, default=False
+        Replace numeric floats with parameter names (b0, b1, etc.)
+    decimal : int, default=3
+        Number of decimal places for rounding
+    rational : bool, default=False
+        Use rational simplification in sympy
+    verbose : bool, default=True
+        Print progress and diagnostics
+    perturbation : float, default=1e-4
+        Finite difference step size for computing importance scores
+    check_flattening_fn : Callable, optional
+        Custom function to check flattening quality. If None, creates
+        one automatically from X and Fs.
+    module : str, default="jax"
+        Module for lambdify ("jax" or "numpy")
+        
+    Returns
+    -------
+    pruned_expressions : List[str]
+        Pruned and simplified symbolic expressions
+    constants : List[List[float]]
+        Constants in the pruned expressions
+        
+    Examples
+    --------
+    >>> # Basic usage with default settings
+    >>> pruned_exprs, consts = postprocess_eqs(
+    ...     coordinates=mdl_coordinates,
+    ...     X=X_test,
+    ...     Fs=Fs_test,
+    ...     n_params=6
+    ... )
+    
+    >>> # Aggressive pruning with batch removal for speed
+    >>> pruned_exprs, consts = postprocess_eqs(
+    ...     coordinates=mdl_coordinates,
+    ...     X=X_test,
+    ...     Fs=Fs_test,
+    ...     n_params=6,
+    ...     threshold=0.1,
+    ...     batch_removal=True,
+    ...     batch_size=10
+    ... )
+    
+    >>> # With coordinate rotation
+    >>> pruned_exprs, consts = postprocess_eqs(
+    ...     coordinates=mdl_coordinates,
+    ...     X=X_test,
+    ...     Fs=Fs_test,
+    ...     n_params=6,
+    ...     A_rotation=optimized_rotation_matrix
+    ... )
+    """
+    if not ESR_AVAILABLE:
+        raise ImportError(
+            "ESR package is required for postprocessing. "
+            "Please install it to use this function."
+        )
+    
+    if len(coordinates) != n_params:
+        raise ValueError(
+            f"Number of coordinates ({len(coordinates)}) must match "
+            f"n_params ({n_params})"
+        )
+    
+    # Default to identity rotation if not provided
+    if A_rotation is None:
+        A_rotation = np.eye(n_params)
+    else:
+        A_rotation = np.array(A_rotation).reshape((n_params, n_params))
+    
+    if verbose:
+        print(f"Parsing {n_params} symbolic expressions...")
+    
+    # Parse all components
+    all_pars = []
+    all_linear_pars = []
+    all_fns = []
+    all_linear_inds = []
+    all_param_dicts = []
+    all_xs = []
+    all_bs = []
+    all_expr = []
+    all_linear_labels = []
+    
+    for i in range(n_params):
+        try:
+            lab, expr, prs, linear_prs, _x, _b, eq_fn, param_dict, linear_inds = get_component(
+                coordinates[i], i, X=X, module=module
+            )
+            
+            all_pars.append(prs)
+            all_linear_pars.append(linear_prs)
+            all_fns.append(eq_fn)
+            all_xs.append(_x)
+            all_bs.append(_b)
+            all_linear_inds.append(linear_inds)
+            all_param_dicts.append(param_dict)
+            all_expr.append(expr)
+            all_linear_labels.append([_b[l] for l in linear_inds])
+            
+        except Exception as e:
+            raise ValueError(
+                f"Failed to parse coordinate {i}: {coordinates[i]}\n"
+                f"Error: {str(e)}"
+            )
+    
+    if verbose:
+        total_linear = sum(len(lp) for lp in all_linear_pars)
+        total_params = sum(len(p) for p in all_pars)
+        print(f"Found {total_params} total parameters ({total_linear} linear)")
+        print(f"\nStarting pruning with threshold={threshold}...")
+        if batch_removal:
+            print(f"Using batch removal with batch_size={batch_size}")
+    
+    # Call the main pruning function
+    pruned_expressions, constants = get_pruned_expressions_final(
+        A=A_rotation,
+        param_dicts=all_param_dicts,
+        all_pars=all_pars,
+        linear_pars=all_linear_pars,
+        all_expressions=all_expr,
+        linear_labels=all_linear_labels,
+        X=X,
+        Fs=Fs,
+        n_params=n_params,
+        check_flattening_fn=check_flattening_fn,
+        remove_floats=remove_floats,
+        decimal=decimal,
+        rational=rational,
+        threshold=threshold,
+        verbose=verbose,
+        importance_based=importance_based,
+        perturbation=perturbation,
+        batch_removal=batch_removal,
+        batch_size=batch_size
+    )
+    
+    if verbose:
+        print("\nPostprocessing complete!")
+        print(f"Input expressions: {len(coordinates)}")
+        print(f"Output expressions: {len(pruned_expressions)}")
+    
+    return pruned_expressions, constants
+
+
 if __name__ == "__main__":
     # Run basic tests
     print("testing postprocessing utilities...")

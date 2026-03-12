@@ -1396,11 +1396,343 @@ def get_pruned_expressions_final(A: np.ndarray,
     return new_expr, consts
 
 
+def optimize_sparse_rotation(M: np.ndarray,
+                             lambda_ortho: float = 1.0,
+                             alpha: float = 1.0,
+                             maxiter: int = 1000,
+                             verbose: bool = True,
+                             use_jax: bool = True,
+                             enforce_orthogonal: bool = True) -> np.ndarray:
+    """
+    Find orthogonal rotation matrix A that makes A @ M sparse.
+    
+    This is useful for finding better coordinate representations by rotating
+    the coefficient matrix to maximize sparsity.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Coefficient matrix of shape (n_params, n_coefficients)
+    lambda_ortho : float, default=1.0
+        Weight for orthogonality constraint (higher = stricter orthogonality)
+    alpha : float, default=1.0
+        Scaling factor for log-cosh sparsity loss (higher = closer to L1)
+    maxiter : int, default=1000
+        Maximum optimization iterations
+    verbose : bool, default=True
+        Print optimization progress
+    use_jax : bool, default=True
+        Use JAX for optimization (recommended for better gradients)
+    enforce_orthogonal : bool, default=True
+        Project to orthogonal manifold at each step (recommended)
+        
+    Returns
+    -------
+    A_opt : np.ndarray
+        Optimized rotation matrix of shape (n_params, n_params)
+        
+    Notes
+    -----
+    Two modes available:
+    
+    1. enforce_orthogonal=True (recommended):
+       - Parameterizes A via QR decomposition
+       - A is always exactly orthogonal
+       - Optimization happens in tangent space
+       
+    2. enforce_orthogonal=False (soft constraint):
+       - Uses penalty term lambda_ortho * ||A^T A - I||^2
+       - A may drift from orthogonality
+       - Simpler but less reliable
+    """
+    n_dim = M.shape[0]
+    
+    if use_jax:
+        import jax.numpy as jnp
+        from jax import grad, jit
+        
+        if enforce_orthogonal:
+            # Optimize in space of orthogonal matrices via QR parameterization
+            @jit
+            def loss_fn(A_flat):
+                A = A_flat.reshape((n_dim, n_dim))
+                A = get_Q_jax(A)  # Project to orthogonal manifold
+                
+                transformed_M = A @ jnp.array(M)
+                
+                # Sparsity via log-cosh (smooth L1)
+                sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
+                
+                # Also penalize row-wise L1 (encourages full rows to be sparse)
+                row_sparsity = jnp.abs(transformed_M).sum(axis=1).mean()
+                
+                return sparsity_loss + 0.5 * row_sparsity
+            
+        else:
+            # Soft orthogonality constraint
+            @jit
+            def loss_fn(A_flat):
+                A = A_flat.reshape((n_dim, n_dim))
+                transformed_M = A @ jnp.array(M)
+                
+                sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
+                row_sparsity = jnp.abs(transformed_M).sum(axis=1).mean()
+                
+                # Orthogonality penalty
+                I = jnp.eye(n_dim)
+                ortho_loss = jnp.linalg.norm(A.T @ A - I, ord='fro')**2
+                
+                return sparsity_loss + 0.5 * row_sparsity + lambda_ortho * ortho_loss
+        
+        grad_fn = jit(grad(loss_fn))
+        
+        # Initialize with random orthogonal matrix
+        A_init = get_Q_jax(jnp.array(np.random.randn(n_dim, n_dim) * (2.0 / n_dim**2)))
+        A_flat = A_init.flatten()
+        
+        # Simple gradient descent with momentum
+        learning_rate = 0.01
+        momentum = 0.9
+        velocity = jnp.zeros_like(A_flat)
+        
+        best_loss = float('inf')
+        best_A = A_flat
+        patience = 50
+        no_improve = 0
+        
+        if verbose:
+            print(f"Optimizing rotation matrix (JAX, {'orthogonal' if enforce_orthogonal else 'soft constraint'})...")
+        
+        for i in range(maxiter):
+            g = grad_fn(A_flat)
+            velocity = momentum * velocity - learning_rate * g
+            A_flat = A_flat + velocity
+            
+            current_loss = float(loss_fn(A_flat))
+            
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_A = A_flat
+                no_improve = 0
+            else:
+                no_improve += 1
+            
+            if no_improve > patience:
+                if verbose:
+                    print(f"Early stopping at iteration {i}")
+                break
+            
+            if verbose and i % 100 == 0:
+                print(f"Iter {i}: loss = {current_loss:.6f}")
+        
+        A_opt = np.array(best_A).reshape((n_dim, n_dim))
+        if enforce_orthogonal:
+            A_opt = np.array(get_Q_jax(jnp.array(A_opt)))
+        
+    else:
+        # NumPy/SciPy version
+        from scipy.optimize import minimize
+        
+        def loss_fn_numpy(A_flat):
+            A = A_flat.reshape((n_dim, n_dim))
+            if enforce_orthogonal:
+                A = np.array(get_Q(A))
+            
+            transformed_M = A @ M
+            sparsity_loss = np.sum(np.log(np.cosh(alpha * transformed_M))) / alpha
+            row_sparsity = np.abs(transformed_M).sum(axis=1).mean()
+            
+            if enforce_orthogonal:
+                return sparsity_loss + 0.5 * row_sparsity
+            else:
+                I = np.eye(n_dim)
+                ortho_loss = np.linalg.norm(A.T @ A - I, ord='fro')**2
+                return sparsity_loss + 0.5 * row_sparsity + lambda_ortho * ortho_loss
+        
+        A_init = get_Q(np.random.randn(n_dim, n_dim) * (2.0 / n_dim**2))
+        
+        result = minimize(
+            fun=loss_fn_numpy,
+            x0=A_init.flatten(),
+            method='L-BFGS-B',
+            options={'disp': verbose, 'maxiter': maxiter}
+        )
+        
+        A_opt = result.x.reshape((n_dim, n_dim))
+        if enforce_orthogonal:
+            A_opt = get_Q(A_opt)
+    
+    # Final diagnostics
+    if verbose:
+        M_sparse = A_opt @ M
+        from scipy.stats import kurtosis
+        
+        ortho_check = A_opt.T @ A_opt
+        ortho_error = np.linalg.norm(ortho_check - np.eye(n_dim), ord='fro')
+        
+        kurt_original = np.mean(kurtosis(M, axis=1, nan_policy='omit'))
+        kurt_rotated = np.mean(kurtosis(M_sparse, axis=1, nan_policy='omit'))
+        
+        sparsity_original = np.mean(np.abs(M) < 0.01)
+        sparsity_rotated = np.mean(np.abs(M_sparse) < 0.01)
+        
+        print(f"\nRotation optimization complete:")
+        print(f"  Orthogonality error: {ortho_error:.6e}")
+        print(f"  Kurtosis (original): {kurt_original:.2f}")
+        print(f"  Kurtosis (rotated):  {kurt_rotated:.2f} (higher = sparser)")
+        print(f"  Sparsity (original): {sparsity_original:.2%}")
+        print(f"  Sparsity (rotated):  {sparsity_rotated:.2%}")
+    
+    return A_opt
+
+
+def optimize_rotation_with_flattening(all_pars: List[np.ndarray],
+                                      all_fns: List[Callable],
+                                      linear_pars: List[List[float]],
+                                      linear_indexes: List[List[int]],
+                                      X: np.ndarray,
+                                      Fs: np.ndarray,
+                                      n_params: int,
+                                      lambda_sparse: float = 1.0,
+                                      lambda_flat: float = 10.0,
+                                      alpha: float = 1.0,
+                                      maxiter: int = 500,
+                                      verbose: bool = True) -> np.ndarray:
+    """
+    Optimize rotation matrix considering BOTH sparsity and flattening quality.
+    
+    This is the recommended approach as it finds A that:
+    1. Makes A @ M sparse (fewer terms in expressions)
+    2. Ensures Fisher matrices remain well-flattened
+    
+    Parameters
+    ----------
+    all_pars : List[np.ndarray]
+        Parameter arrays for each component
+    all_fns : List[Callable]
+        Callable functions for each component
+    linear_pars : List[List[float]]
+        Linear parameters
+    linear_indexes : List[List[int]]
+        Indices of linear parameters
+    X : np.ndarray
+        Input data
+    Fs : np.ndarray
+        Fisher matrices
+    n_params : int
+        Number of parameters
+    lambda_sparse : float, default=1.0
+        Weight for sparsity term
+    lambda_flat : float, default=10.0
+        Weight for flattening quality
+    alpha : float, default=1.0
+        Scaling for log-cosh sparsity
+    maxiter : int, default=500
+        Maximum iterations
+    verbose : bool, default=True
+        Print progress
+        
+    Returns
+    -------
+    A_opt : np.ndarray
+        Optimized rotation matrix
+    """
+    M = construct_M(linear_pars, n_params)
+    
+    # Use the existing lossfn_jac_jax but add sparsity term
+    def combined_loss(A_flat):
+        A = A_flat.reshape((n_params, n_params))
+        
+        # Part 1: Flattening quality (from lossfn_jac_jax)
+        flat_loss = lossfn_jac_jax(
+            A=A,
+            all_pars=all_pars,
+            all_fns=all_fns,
+            linear_pars=linear_pars,
+            linear_indexes=linear_indexes,
+            X=X,
+            Fs=Fs,
+            n_params=n_params,
+            alpha=0.5,  # Lower alpha for flattening loss
+            lambda_flat=lambda_flat,
+            smoothl1=True
+        )
+        
+        # Part 2: Sparsity of rotated coefficients
+        A_ortho = get_Q_jax(A)
+        transformed_M = A_ortho @ jnp.array(M)
+        sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
+        
+        return flat_loss + lambda_sparse * sparsity_loss
+    
+    # Initialize
+    A_init = jnp.eye(n_params)
+    
+    if verbose:
+        print("Optimizing rotation with both sparsity and flattening constraints...")
+        print(f"  lambda_sparse={lambda_sparse}, lambda_flat={lambda_flat}")
+    
+    # Use JAX optimizer
+    from jax import grad, jit
+    
+    grad_fn = jit(grad(combined_loss))
+    
+    A_flat = A_init.flatten()
+    learning_rate = 0.01
+    momentum = 0.9
+    velocity = jnp.zeros_like(A_flat)
+    
+    best_loss = float('inf')
+    best_A = A_flat
+    patience = 50
+    no_improve = 0
+    
+    for i in range(maxiter):
+        g = grad_fn(A_flat)
+        velocity = momentum * velocity - learning_rate * g
+        A_flat = A_flat + velocity
+        
+        current_loss = float(combined_loss(A_flat))
+        
+        if current_loss < best_loss:
+            best_loss = current_loss
+            best_A = A_flat
+            no_improve = 0
+        else:
+            no_improve += 1
+        
+        if no_improve > patience:
+            if verbose:
+                print(f"Early stopping at iteration {i}")
+            break
+        
+        if verbose and i % 50 == 0:
+            print(f"Iter {i}: loss = {current_loss:.6f}")
+    
+    A_opt = np.array(best_A).reshape((n_params, n_params))
+    A_opt = np.array(get_Q_jax(jnp.array(A_opt)))
+    
+    if verbose:
+        M_sparse = A_opt @ M
+        from scipy.stats import kurtosis
+        
+        kurt_original = np.mean(kurtosis(M, axis=1, nan_policy='omit'))
+        kurt_rotated = np.mean(kurtosis(M_sparse, axis=1, nan_policy='omit'))
+        
+        print(f"\nOptimization complete:")
+        print(f"  Final loss: {best_loss:.6f}")
+        print(f"  Kurtosis improvement: {kurt_original:.2f} → {kurt_rotated:.2f}")
+    
+    return A_opt
+
+
 def postprocess_eqs(coordinates: List[str],
                     X: np.ndarray,
                     Fs: np.ndarray,
                     n_params: int,
                     A_rotation: Optional[np.ndarray] = None,
+                    optimize_rotation: str = "none",
+                    rotation_params: Optional[Dict] = None,
                     threshold: float = 0.05,
                     importance_based: bool = True,
                     batch_removal: bool = False,
@@ -1411,13 +1743,13 @@ def postprocess_eqs(coordinates: List[str],
                     verbose: bool = True,
                     perturbation: float = 1e-4,
                     check_flattening_fn: Optional[Callable] = None,
-                    module: str = "jax") -> Tuple[List[str], List[List[float]]]:
+                    module: str = "jax") -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
     """
     High-level wrapper for postprocessing symbolic expressions.
     
     This function provides a simplified interface that:
     1. Parses symbolic expression strings into components
-    2. Extracts linear and nonlinear parameters
+    2. (Optional) Optimizes rotation for sparsity and/or flattening
     3. Applies importance-based pruning with optional rotation
     4. Returns simplified expressions
     
@@ -1432,8 +1764,17 @@ def postprocess_eqs(coordinates: List[str],
     n_params : int
         Number of parameters
     A_rotation : np.ndarray, optional
-        Rotation matrix for coordinate transformation. If None, uses identity
-        (no rotation). Shape should be (n_params, n_params).
+        Pre-computed rotation matrix. If provided, optimize_rotation is ignored.
+        Shape should be (n_params, n_params).
+    optimize_rotation : str, default="none"
+        How to optimize rotation matrix:
+        - "none": Use identity or provided A_rotation
+        - "sparse": Optimize for sparsity only (fast)
+        - "full": Optimize for both sparsity and flattening (recommended but slower)
+    rotation_params : Dict, optional
+        Parameters for rotation optimization. Keys depend on optimize_rotation:
+        - For "sparse": lambda_ortho, alpha, maxiter, use_jax, enforce_orthogonal
+        - For "full": lambda_sparse, lambda_flat, alpha, maxiter
     threshold : float, default=0.05
         Relative loss threshold for removing coefficients. Higher values
         lead to more aggressive pruning.
@@ -1467,35 +1808,48 @@ def postprocess_eqs(coordinates: List[str],
         Pruned and simplified symbolic expressions
     constants : List[List[float]]
         Constants in the pruned expressions
+    A_rotation : np.ndarray or None
+        The rotation matrix used (either provided or optimized)
         
     Examples
     --------
-    >>> # Basic usage with default settings
-    >>> pruned_exprs, consts = postprocess_eqs(
+    >>> # Basic usage with default settings (no rotation)
+    >>> pruned_exprs, consts, _ = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
     ...     X=X_test,
     ...     Fs=Fs_test,
     ...     n_params=6
     ... )
     
-    >>> # Aggressive pruning with batch removal for speed
-    >>> pruned_exprs, consts = postprocess_eqs(
+    >>> # With automatic rotation optimization for sparsity
+    >>> pruned_exprs, consts, A_opt = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
     ...     X=X_test,
     ...     Fs=Fs_test,
     ...     n_params=6,
-    ...     threshold=0.1,
-    ...     batch_removal=True,
-    ...     batch_size=10
+    ...     optimize_rotation="sparse",
+    ...     threshold=0.1
     ... )
     
-    >>> # With coordinate rotation
-    >>> pruned_exprs, consts = postprocess_eqs(
+    >>> # With full optimization (sparsity + flattening)
+    >>> pruned_exprs, consts, A_opt = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
     ...     X=X_test,
     ...     Fs=Fs_test,
     ...     n_params=6,
-    ...     A_rotation=optimized_rotation_matrix
+    ...     optimize_rotation="full",
+    ...     rotation_params={"lambda_sparse": 1.0, "lambda_flat": 10.0},
+    ...     threshold=0.1,
+    ...     batch_removal=True
+    ... )
+    
+    >>> # With pre-computed rotation
+    >>> pruned_exprs, consts, _ = postprocess_eqs(
+    ...     coordinates=mdl_coordinates,
+    ...     X=X_test,
+    ...     Fs=Fs_test,
+    ...     n_params=6,
+    ...     A_rotation=my_rotation_matrix
     ... )
     """
     if not ESR_AVAILABLE:
@@ -1509,12 +1863,6 @@ def postprocess_eqs(coordinates: List[str],
             f"Number of coordinates ({len(coordinates)}) must match "
             f"n_params ({n_params})"
         )
-    
-    # Default to identity rotation if not provided
-    if A_rotation is None:
-        A_rotation = np.eye(n_params)
-    else:
-        A_rotation = np.array(A_rotation).reshape((n_params, n_params))
     
     if verbose:
         print(f"Parsing {n_params} symbolic expressions...")
@@ -1556,6 +1904,63 @@ def postprocess_eqs(coordinates: List[str],
         total_linear = sum(len(lp) for lp in all_linear_pars)
         total_params = sum(len(p) for p in all_pars)
         print(f"Found {total_params} total parameters ({total_linear} linear)")
+    
+    # Determine rotation matrix
+    if A_rotation is None and optimize_rotation != "none":
+        # Optimize rotation
+        if verbose:
+            print(f"\nOptimizing rotation matrix (mode: {optimize_rotation})...")
+        
+        rotation_params = rotation_params or {}
+        
+        if optimize_rotation == "sparse":
+            # Sparsity-only optimization
+            M = construct_M(all_linear_pars, n_params)
+            default_params = {
+                'lambda_ortho': 1.0,
+                'alpha': 1.0,
+                'maxiter': 1000,
+                'verbose': verbose,
+                'use_jax': True,
+                'enforce_orthogonal': True
+            }
+            default_params.update(rotation_params)
+            A_rotation = optimize_sparse_rotation(M, **default_params)
+            
+        elif optimize_rotation == "full":
+            # Joint sparsity + flattening optimization
+            default_params = {
+                'lambda_sparse': 1.0,
+                'lambda_flat': 10.0,
+                'alpha': 1.0,
+                'maxiter': 500,
+                'verbose': verbose
+            }
+            default_params.update(rotation_params)
+            A_rotation = optimize_rotation_with_flattening(
+                all_pars=all_pars,
+                all_fns=all_fns,
+                linear_pars=all_linear_pars,
+                linear_indexes=all_linear_inds,
+                X=X,
+                Fs=Fs,
+                n_params=n_params,
+                **default_params
+            )
+        else:
+            raise ValueError(
+                f"Unknown optimize_rotation mode: {optimize_rotation}. "
+                f"Must be 'none', 'sparse', or 'full'"
+            )
+    
+    elif A_rotation is None:
+        # Default to identity
+        A_rotation = np.eye(n_params)
+    else:
+        # Use provided rotation
+        A_rotation = np.array(A_rotation).reshape((n_params, n_params))
+    
+    if verbose:
         print(f"\nStarting pruning with threshold={threshold}...")
         if batch_removal:
             print(f"Using batch removal with batch_size={batch_size}")
@@ -1588,7 +1993,7 @@ def postprocess_eqs(coordinates: List[str],
         print(f"Input expressions: {len(coordinates)}")
         print(f"Output expressions: {len(pruned_expressions)}")
     
-    return pruned_expressions, constants
+    return pruned_expressions, constants, A_rotation
 
 
 if __name__ == "__main__":

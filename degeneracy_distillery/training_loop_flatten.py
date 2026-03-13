@@ -698,8 +698,10 @@ def fit_flattening(F_network_ensemble, θs,
             w, loss_val, opt_state, detFeta, key, theta_true, F_fishnets = inputs
             theta_samples = theta_true[i]
             F_samples = F_fishnets[i]
-            # Add noise to Fisher matrices
-            F_samples += jr.normal(key, shape=F_samples.shape)*noise*F_samples
+            # Add noise to Fisher matrices via Cholesky decomposition
+            L = jax.scipy.linalg.cholesky(F_samples, lower=True)
+            L_noisy = L + jr.normal(key, shape=L.shape)*noise*L
+            F_samples = L_noisy @ L_noisy.T
 
             (loss_val, detFeta), grads = loss_grad_fn(w, theta_samples, F_samples)
             updates, opt_state = tx.update(grads, opt_state)

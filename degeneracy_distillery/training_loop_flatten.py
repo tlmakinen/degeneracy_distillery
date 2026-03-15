@@ -701,7 +701,8 @@ def fit_flattening(F_network_ensemble, θs,
             # Add noise to Fisher matrices via Cholesky decomposition
             L = jax.scipy.linalg.cholesky(F_samples, lower=True)
             L_noisy = L + jr.normal(key, shape=L.shape)*noise*L
-            F_samples = L_noisy @ L_noisy.T
+            # F_samples = L_noisy @ L_noisy.T
+            F_samples = jnp.einsum('bij,bkj->bik', L_noisy, L_noisy) 
 
             (loss_val, detFeta), grads = loss_grad_fn(w, theta_samples, F_samples)
             updates, opt_state = tx.update(grads, opt_state)

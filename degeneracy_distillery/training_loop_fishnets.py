@@ -249,7 +249,7 @@ def train_fishnets(theta,
         losses = jnp.zeros(epochs)
         val_losses = jnp.zeros(epochs)
         loss_val = 0.0
-        n_train = 10000  # fixed number of training samples (could be parameterized)
+        n_train = (theta.reshape(-1, n_params).shape[0] // train_batch) * train_batch
         lower = 0
         upper = n_train // train_batch
         counter = 0
@@ -260,8 +260,8 @@ def train_fishnets(theta,
 
         for j in pbar:
             key, rng = jr.split(key)
-            # Shuffle training data
-            randidx = jr.permutation(key, jnp.arange(theta.reshape(-1, n_params).shape[0]), independent=True)
+            # Shuffle training data, truncate to batch-aligned count
+            randidx = jr.permutation(key, jnp.arange(theta.reshape(-1, n_params).shape[0]), independent=True)[:n_train]
             _data = data.reshape(-1, data_shape)[randidx].reshape(-1, train_batch, data_shape)
             _theta = theta.reshape(-1, n_params)[randidx].reshape(-1, train_batch, n_params)
             inits = (w, loss_val, opt_state, _data, _theta)

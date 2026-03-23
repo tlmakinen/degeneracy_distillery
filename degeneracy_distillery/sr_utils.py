@@ -118,6 +118,50 @@ _TIME_PARAM_NAME = get_time_limit_param_name()
 
 
 # =============================================================================
+# SAFE LAMBDIFY HELPER
+# =============================================================================
+
+def safe_lambdify(args, expr, preferred_modules=None):
+    """Wrapper around sympy.lambdify with fallback module handling.
+
+    Tries multiple module backends in sequence to handle expressions that
+    sympy can't convert with certain backends (e.g., JAX).
+
+    Parameters
+    ----------
+    args : list
+        Symbols to use as function arguments
+    expr : sympy.Expr
+        Expression to compile
+    preferred_modules : list or str, optional
+        First module backend to try. Default: ["jax"]
+
+    Returns
+    -------
+    callable
+        Compiled function from sympy.lambdify
+
+    Raises
+    ------
+    Exception
+        If all module backends fail, re-raises the last exception.
+    """
+    if preferred_modules is None:
+        preferred_modules = ["jax"]
+
+    attempts = [preferred_modules, ["numpy"], "numpy"]
+    last_exc = None
+
+    for modules in attempts:
+        try:
+            return sympy.lambdify(args, expr, modules=modules)
+        except Exception as e:
+            last_exc = e
+
+    raise last_exc
+
+
+# =============================================================================
 # STRING PARSING UTILITIES
 # =============================================================================
 
@@ -351,7 +395,7 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
     all_x = ' '.join([f'X{i}' for i in range(1, X.shape[1] + 1)])
     all_x = list(sympy.symbols(all_x, real=True))
     all_b = list(sympy.symbols(param_list, real=True))
-    eq_jax = sympy.lambdify(all_b + all_x, expr, modules=["jax"])
+    eq_jax = safe_lambdify(all_b + all_x, expr)
 
     # Define loss function (negative log-likelihood)
     def myloss(p):

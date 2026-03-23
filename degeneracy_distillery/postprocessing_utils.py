@@ -28,12 +28,14 @@ try:
         batch_flatten_fisher,
         weighted_std,
     )
+    from .sr_utils import safe_lambdify
 except ImportError:
     from preprocessing_utils import (
         flatten_with_numerical_jacobian,
         batch_flatten_fisher,
         weighted_std,
     )
+    from sr_utils import safe_lambdify
 
 # Try importing ESR (required for complexity calculations)
 try:
@@ -383,7 +385,7 @@ def check_flattening(coordinates: List[str], X: np.ndarray, Fs: np.ndarray,
         all_x = ' '.join([f'X{i}' for i in range(1, X.shape[1] + 1)])
         all_x = list(sympy.symbols(all_x, real=True))
         all_b = list(sympy.symbols(param_list, real=True))
-        eq_jax = sympy.lambdify(all_b + all_x, expr, modules=["jax"])
+        eq_jax = safe_lambdify(all_b + all_x, expr)
         
         def get_jac_row(p):
             myeq = lambda *args: eq_jax(*p, *args)
@@ -861,7 +863,7 @@ def get_component(eq: str,
     all_x = ' '.join([f'X{i}' for i in range(1, X.shape[1] + 1)])
     all_x = list(sympy.symbols(all_x, real=True))
     all_b = list(sympy.symbols(param_list, real=True))
-    eq_fn = sympy.lambdify(all_b + all_x, expr, modules=[module])
+    eq_fn = safe_lambdify(all_b + all_x, expr, preferred_modules=[module])
     
     linear_b = list(sympy.symbols(linear_par_names, real=True))
     
@@ -1396,6 +1398,224 @@ def get_pruned_expressions_final(A: np.ndarray,
     return new_expr, consts
 
 
+def prune_all_constants(expressions: List[str],
+                        X: np.ndarray,
+                        Fs: np.ndarray,
+                        n_params: int,
+                        check_flattening_fn: Optional[Callable] = None,
+                        threshold: float = 0.05,
+                        perturbation: float = 1e-4,
+                        A: Optional[np.ndarray] = None,
+                        verbose: bool = True) -> Tuple[List[str], List[List[float]], List[Dict]]:
+    """
+    Prune ALL constants in symbolic expressions (including nonlinear ones).
+    
+    Unlike get_pruned_expressions_final which only handles linear coefficients,
+    this function operates on the final expression strings and can remove any
+    numeric constant - including those inside exp(), log(), cos(), etc.
+    
+    For a constant c in the expression, zeroing it means substituting c=0 and
+    simplifying via sympy. For example:
+        exp(a*X1 + b*X3 + c*X5) with c=0  ->  exp(a*X1 + b*X3)
+    
+    Parameters
+    ----------
+    expressions : List[str]
+        Symbolic expression strings (one per coordinate)
+    X : np.ndarray
+        Input data of shape (n_samples, n_params)
+    Fs : np.ndarray
+        Fisher matrices of shape (n_samples, n_params, n_params)
+    n_params : int
+        Number of parameters
+    check_flattening_fn : Callable, optional
+        Function to check flattening quality. If None, creates from X, Fs.
+    threshold : float, default=0.05
+        Relative loss increase tolerance for removing a constant
+    perturbation : float, default=1e-4
+        Finite difference step for importance scoring
+    A : np.ndarray, optional
+        Rotation matrix passed to check_flattening_fn. Defaults to identity.
+    verbose : bool, default=True
+        Print progress
+        
+    Returns
+    -------
+    pruned_expressions : List[str]
+        Simplified expressions with unimportant constants removed
+    pruned_constants : List[List[float]]
+        Remaining constants in each expression
+    importance_info : List[Dict]
+        Per-constant importance scores for diagnostics. Each dict has keys:
+        'expr_idx', 'const_idx', 'value', 'importance', 'removed'
+    """
+    if check_flattening_fn is None:
+        check_flattening_fn = make_check_flattening_fn(X, Fs)
+    
+    if A is None:
+        A = np.eye(n_params)
+    A_jnp = jnp.array(A)
+    
+    eye = jnp.eye(n_params)
+    
+    # Get reference flattening score
+    flats_ref, _ = check_flattening_fn(expressions, A=A_jnp)
+    flat_score_ref = float(jax.vmap(norm)(flats_ref - eye).mean())
+    
+    if verbose:
+        print(f"Pruning all constants (including nonlinear)")
+        print(f"Reference flattening score: {flat_score_ref:.6f}")
+    
+    # Catalog all constants across all expressions
+    all_const_info = []
+    for expr_idx, expr_str in enumerate(expressions):
+        _, values = replace_floats(str(expr_str))
+        for const_idx, val in enumerate(values):
+            all_const_info.append({
+                'expr_idx': expr_idx,
+                'const_idx': const_idx,
+                'value': val,
+                'importance': 0.0,
+                'removed': False
+            })
+    
+    if verbose:
+        print(f"Found {len(all_const_info)} total constants across {len(expressions)} expressions")
+    
+    if len(all_const_info) == 0:
+        return list(expressions), [[] for _ in expressions], []
+    
+    # Phase 1: Compute importance scores for all constants
+    if verbose:
+        print("Computing importance scores...")
+    
+    importance_iter = tqdm(all_const_info, desc="Scoring") if verbose else all_const_info
+    
+    for info in importance_iter:
+        expr_idx = info['expr_idx']
+        const_idx = info['const_idx']
+        val = info['value']
+        
+        if abs(val) < 1e-12:
+            info['importance'] = 0.0
+            continue
+        
+        # Build modified expressions with this constant perturbed
+        modified_exprs = list(expressions)
+        expr_str = str(expressions[expr_idx])
+        
+        # Replace floats, perturb one, reconstruct
+        template, values = replace_floats(expr_str)
+        values_perturbed = list(values)
+        values_perturbed[const_idx] = val + perturbation
+        
+        # Substitute perturbed values back into template
+        perturbed_str = template
+        for k in range(len(values_perturbed)):
+            perturbed_str = perturbed_str.replace(f'b{k}', f'({values_perturbed[k]})', 1)
+        
+        modified_exprs[expr_idx] = str(sympy.simplify(perturbed_str))
+        
+        try:
+            flats_p, _ = check_flattening_fn(modified_exprs, A=A_jnp)
+            flat_score_p = float(jax.vmap(norm)(flats_p - eye).mean())
+            
+            grad_approx = (flat_score_p - flat_score_ref) / perturbation
+            info['importance'] = abs(grad_approx) * abs(val)
+        except Exception:
+            info['importance'] = float('inf')
+    
+    # Phase 2: Sort by importance and attempt removal (least important first)
+    sorted_info = sorted(all_const_info, key=lambda x: x['importance'])
+    
+    if verbose:
+        finite_scores = [c['importance'] for c in sorted_info if c['importance'] != float('inf')]
+        if finite_scores:
+            print(f"Importance scores - min: {np.min(finite_scores):.6e}, "
+                  f"max: {np.max(finite_scores):.6e}, "
+                  f"median: {np.median(finite_scores):.6e}")
+    
+    current_exprs = list(expressions)
+    n_removed = 0
+    
+    removal_iter = tqdm(sorted_info, desc="Pruning") if verbose else sorted_info
+    
+    for info in removal_iter:
+        expr_idx = info['expr_idx']
+        val = info['value']
+        
+        if abs(val) < 1e-12:
+            continue
+        
+        # Build candidate expression with this constant set to 0
+        expr_str = str(current_exprs[expr_idx])
+        template, values = replace_floats(expr_str)
+        
+        # Find which constant index in the CURRENT expression matches
+        # (indices may shift as expressions get simplified)
+        if info['const_idx'] >= len(values):
+            continue
+        
+        # Match by value proximity since indices can shift after simplification
+        best_match = None
+        best_dist = float('inf')
+        for k, v in enumerate(values):
+            dist = abs(v - val)
+            if dist < best_dist:
+                best_dist = dist
+                best_match = k
+        
+        if best_match is None or best_dist > abs(val) * 0.1 + 1e-8:
+            continue
+        
+        # Zero this constant and simplify
+        values_zeroed = list(values)
+        values_zeroed[best_match] = 0.0
+        
+        zeroed_str = template
+        for k in range(len(values_zeroed)):
+            zeroed_str = zeroed_str.replace(f'b{k}', f'({values_zeroed[k]})', 1)
+        
+        try:
+            simplified = str(sympy.simplify(zeroed_str))
+            
+            # Check if simplification is valid
+            candidate_exprs = list(current_exprs)
+            candidate_exprs[expr_idx] = simplified
+            
+            flats_c, _ = check_flattening_fn(candidate_exprs, A=A_jnp)
+            flat_score_c = float(jax.vmap(norm)(flats_c - eye).mean())
+            delta = (flat_score_c - flat_score_ref) / flat_score_ref
+            
+            if delta < threshold:
+                current_exprs[expr_idx] = simplified
+                info['removed'] = True
+                n_removed += 1
+                
+                if verbose and hasattr(removal_iter, 'set_postfix'):
+                    removal_iter.set_postfix({
+                        'removed': n_removed,
+                        'expr': expr_idx,
+                        'val': f'{val:.4f}',
+                        'delta': f'{delta:.6f}'
+                    })
+                    
+        except Exception as e:
+            if verbose and hasattr(removal_iter, 'write'):
+                removal_iter.write(f"Error zeroing const {val:.4f} in expr {expr_idx}: {e}")
+    
+    if verbose:
+        print(f"\nConstant pruning summary: removed {n_removed}/{len(all_const_info)} constants")
+    
+    # Extract final constants
+    pruned_constants = []
+    for expr_str in current_exprs:
+        _, vals = replace_floats(str(expr_str))
+        pruned_constants.append(vals)
+    
+    return current_exprs, pruned_constants, all_const_info
+
+
 def optimize_sparse_rotation(M: np.ndarray,
                              lambda_ortho: float = 1.0,
                              alpha: float = 1.0,
@@ -1737,6 +1957,8 @@ def postprocess_eqs(coordinates: List[str],
                     importance_based: bool = True,
                     batch_removal: bool = False,
                     batch_size: int = 5,
+                    prune_constants: bool = False,
+                    constant_threshold: Optional[float] = None,
                     remove_floats: bool = False,
                     decimal: int = 3,
                     rational: bool = False,
@@ -1750,8 +1972,9 @@ def postprocess_eqs(coordinates: List[str],
     This function provides a simplified interface that:
     1. Parses symbolic expression strings into components
     2. (Optional) Optimizes rotation for sparsity and/or flattening
-    3. Applies importance-based pruning with optional rotation
-    4. Returns simplified expressions
+    3. Applies importance-based pruning of linear coefficients
+    4. (Optional) Prunes ALL constants including nonlinear ones (e.g. inside exp/log)
+    5. Returns simplified expressions
     
     Parameters
     ----------
@@ -1776,16 +1999,21 @@ def postprocess_eqs(coordinates: List[str],
         - For "sparse": lambda_ortho, alpha, maxiter, use_jax, enforce_orthogonal
         - For "full": lambda_sparse, lambda_flat, alpha, maxiter
     threshold : float, default=0.05
-        Relative loss threshold for removing coefficients. Higher values
-        lead to more aggressive pruning.
+        Relative loss threshold for removing linear coefficients.
     importance_based : bool, default=True
         Use importance-based ordering (recommended). If False, uses legacy
         sequential pruning which is permutation-dependent.
     batch_removal : bool, default=False
-        Attempt to remove multiple low-importance coefficients simultaneously
-        for faster pruning. Recommended for large problems.
+        Attempt to remove multiple low-importance coefficients simultaneously.
     batch_size : int, default=5
-        Number of coefficients to attempt removing in each batch
+        Number of coefficients to attempt removing in each batch.
+    prune_constants : bool, default=False
+        If True, run a second pass that prunes ALL constants in the output
+        expressions, including nonlinear ones (e.g. inside exp, log, cos).
+        This is the key option for simplifying expressions like
+        exp(X1 + b*X3 + c*X5) down to exp(X1 + b*X3).
+    constant_threshold : float, optional
+        Threshold for constant pruning. If None, uses same value as threshold.
     remove_floats : bool, default=False
         Replace numeric floats with parameter names (b0, b1, etc.)
     decimal : int, default=3
@@ -1813,43 +2041,29 @@ def postprocess_eqs(coordinates: List[str],
         
     Examples
     --------
-    >>> # Basic usage with default settings (no rotation)
+    >>> # Basic usage (linear pruning only)
     >>> pruned_exprs, consts, _ = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
-    ...     X=X_test,
-    ...     Fs=Fs_test,
-    ...     n_params=6
+    ...     X=X_test, Fs=Fs_test, n_params=6
     ... )
     
-    >>> # With automatic rotation optimization for sparsity
-    >>> pruned_exprs, consts, A_opt = postprocess_eqs(
+    >>> # With nonlinear constant pruning (recommended for complex expressions)
+    >>> pruned_exprs, consts, _ = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
-    ...     X=X_test,
-    ...     Fs=Fs_test,
-    ...     n_params=6,
-    ...     optimize_rotation="sparse",
-    ...     threshold=0.1
+    ...     X=X_test, Fs=Fs_test, n_params=6,
+    ...     prune_constants=True,
+    ...     threshold=0.05
     ... )
     
-    >>> # With full optimization (sparsity + flattening)
+    >>> # Full pipeline: rotation + linear pruning + constant pruning
     >>> pruned_exprs, consts, A_opt = postprocess_eqs(
     ...     coordinates=mdl_coordinates,
-    ...     X=X_test,
-    ...     Fs=Fs_test,
-    ...     n_params=6,
+    ...     X=X_test, Fs=Fs_test, n_params=6,
     ...     optimize_rotation="full",
-    ...     rotation_params={"lambda_sparse": 1.0, "lambda_flat": 10.0},
     ...     threshold=0.1,
+    ...     prune_constants=True,
+    ...     constant_threshold=0.05,
     ...     batch_removal=True
-    ... )
-    
-    >>> # With pre-computed rotation
-    >>> pruned_exprs, consts, _ = postprocess_eqs(
-    ...     coordinates=mdl_coordinates,
-    ...     X=X_test,
-    ...     Fs=Fs_test,
-    ...     n_params=6,
-    ...     A_rotation=my_rotation_matrix
     ... )
     """
     if not ESR_AVAILABLE:
@@ -1987,6 +2201,25 @@ def postprocess_eqs(coordinates: List[str],
         batch_removal=batch_removal,
         batch_size=batch_size
     )
+    
+    # Optional second pass: prune ALL constants (including nonlinear)
+    if prune_constants:
+        if verbose:
+            print("\n--- Second pass: pruning all constants (including nonlinear) ---")
+        
+        c_threshold = constant_threshold if constant_threshold is not None else threshold
+        
+        pruned_expressions, constants, _ = prune_all_constants(
+            expressions=pruned_expressions,
+            X=X,
+            Fs=Fs,
+            n_params=n_params,
+            check_flattening_fn=check_flattening_fn,
+            threshold=c_threshold,
+            perturbation=perturbation,
+            A=A_rotation,
+            verbose=verbose
+        )
     
     if verbose:
         print("\nPostprocessing complete!")

@@ -2,6 +2,30 @@
 
 A research package for analyzing degeneracy in neural networks and performing symbolic regression analysis using network flattening techniques.
 
+
+### distill in three steps from simulations or labelled data
+
+**gist:** simulate $(\theta, x)$, learn local Fisher geometry with a network, flatten it, then fit **closed-form** expressions for identifiable vs. degenerate directions.
+
+```@python
+# Step 1 — Fisher networks (ensemble)
+θ, x ← sample_prior_and_simulate(nsims)                    # your simulator
+W ← train_fishnets(θ, x)                                   # predicts θ̂ and F(θ|x) per datum
+
+# Step 2 — flatten Fisher geometry (normalizing flow / whitening)
+F_ens ← predicted_Fisher_ensemble(W, x_test)                 # shape: (n_models, n, p, p)
+η, J ← fit_flattening(F_ens, θ_test, ensemble_weights)      # η ≈ flattened coords; J = ∂η/∂θ
+
+# Step 3 — symbolic regression (+ optional postprocess)
+X, y, F_sr ← preprocess_for_SR(η, J, F_ens)                # align / subsample / rotate
+exprs ← fit_symbolic_regression(X, y, F_sr)                # e.g. PyOperon + MDL
+exprs ← postprocess(exprs)                                 # prune / rotate for sparsity
+
+return exprs   # e.g. “η₂ = θ₂ + θ₁²”, “η₁ = θ₂/θ₁”, …
+```
+
+
+
 ## Features
 
 - Neural network flattening and degeneracy analysis

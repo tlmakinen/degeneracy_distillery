@@ -19,7 +19,7 @@ import optax
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from typing import Sequence, Any, Callable
+from typing import Sequence, Any, Callable, Optional
 from tqdm import tqdm
 
 # Import external modules (assumed to be provided)
@@ -466,7 +466,13 @@ def fit_flattening(F_network_ensemble, θs,
                    norm_method: str = "median_max_eig",
                    use_whitening: bool = True,
                    nn_inv: bool = False,
-                   do_plot: bool = True):
+                   do_plot: bool = True,
+                   loss_reweight_lambda: float = 100.0,
+                   loss_reweight_epsilon: float = 1e-7,
+                   grad_clip_norm: Optional[float] = None,
+                   lr_schedule_phase1: Optional[Any] = None,
+                   lr_schedule_phase2: Optional[Any] = None,
+                   lr_schedule_finetune: Optional[Any] = None):
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
@@ -489,10 +495,10 @@ def fit_flattening(F_network_ensemble, θs,
         finetune_epochs: Epochs for ensemble fine-tuning
         min_epochs: Minimum epochs before early stopping
         patience: Patience for early stopping
-        lr_phase1: Learning rate for phase 1
-        lr_schedule_initial: Initial learning rate for phase 2 schedule
-        lr_decay: Decay rate for learning rate schedule
-        lr_finetune: Learning rate for fine-tuning
+        lr_phase1: Learning rate for phase 1 when lr_schedule_phase1 is None (default).
+        lr_schedule_initial: Initial value for phase 2 exponential decay when lr_schedule_phase2 is None.
+        lr_decay: Decay rate for the default phase 2 exponential schedule (ignored if lr_schedule_phase2 is set).
+        lr_finetune: Learning rate for per-ensemble-member fine-tuning when lr_schedule_finetune is None.
         l1_alpha: L1 regularization coefficient (currently disabled)
         noise: Noise level added to Fisher matrices during training
         seed: Random seed
@@ -517,6 +523,20 @@ def fit_flattening(F_network_ensemble, θs,
                 num_layers=n_layers. Can be combined with use_whitening=True for 
                 WhitenedRealNVP. 
         do_plot: Whether to generate coordinate visualization plots
+        loss_reweight_lambda: λ in the per-sample reweighting r = λ·loss / (loss + exp(-α·loss));
+            larger values change how aggressively large residuals are up-weighted. Default matches
+            former hardcoded λ=100.
+        loss_reweight_epsilon: ϵ in the same reweighting (α derived from λ, ϵ). Default matches
+            former hardcoded ϵ=1e-7.
+        grad_clip_norm: If set, apply global norm clipping to gradients before Adam. Default None:
+            no clipping (legacy behavior).
+        lr_schedule_phase1: Optional Optax learning rate schedule (or scalar) for phase 1. None means
+            constant lr_phase1 (legacy behavior).
+        lr_schedule_phase2: Optional schedule for phase 2. None means exponential_decay with
+            lr_schedule_initial, lr_decay, and transition_steps derived from epochs_phase2 and batch layout
+            (legacy behavior).
+        lr_schedule_finetune: Optional schedule for ensemble fine-tuning. None means constant lr_finetune
+            (legacy behavior).
     
     Returns:
         w: Trained network parameters
@@ -630,8 +650,12 @@ def fit_flattening(F_network_ensemble, θs,
     def norm(A):
         return jnp.sqrt(jnp.einsum('ij,ij->', A, A))
 
-    def get_α(λ=100., ϵ=1e-7):
-        return -jnp.log(ϵ*(λ - 1.) + ϵ**2. / (1. + ϵ)) / ϵ
+    _loss_lam = loss_reweight_lambda
+    _loss_eps = loss_reweight_epsilon
+    _loss_alpha = float(
+        -np.log(_loss_eps * (_loss_lam - 1.0) + _loss_eps**2.0 / (1.0 + _loss_eps))
+        / _loss_eps
+    )
 
     @jax.jit
     def l1_reg(x, alpha=l1_alpha):
@@ -641,10 +665,6 @@ def fit_flattening(F_network_ensemble, θs,
 
     @jax.jit
     def info_loss(w, theta_batched, F_batched):
-        λ = 100.
-        ϵ = 1e-7
-        α = get_α(λ, ϵ)
-
         def fn(theta, F):
             mymodel = lambda d: model.apply(w, d)
 
@@ -654,7 +674,7 @@ def fit_flattening(F_network_ensemble, θs,
             Q = Jeta_inv.T @ F @ Jeta_inv # <--- FLIP TRANSPOSE ??
 
             loss = norm(Q - jnp.eye(n_params)) + norm(jnp.linalg.inv(Q) - jnp.eye(n_params))
-            r = λ * loss / (loss + jnp.exp(-α * loss))
+            r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
             loss *= r
             
             l1_loss = 0.0 # l1_reg(J_eta)
@@ -687,10 +707,18 @@ def fit_flattening(F_network_ensemble, θs,
                       opt_type = None):
         best_w = w
         best_loss = jnp.inf
-        if opt_type is None:
-            tx = optax.adam(learning_rate=lr)
+        base_opt = (
+            optax.adam(learning_rate=lr)
+            if opt_type is None
+            else opt_type(learning_rate=lr)
+        )
+        if grad_clip_norm is not None:
+            tx = optax.chain(
+                optax.clip_by_global_norm(grad_clip_norm),
+                base_opt,
+            )
         else:
-            tx = opt_type(learning_rate=lr)
+            tx = base_opt
         opt_state = tx.init(w)
         loss_grad_fn = jax.value_and_grad(info_loss, has_aux=True)
 
@@ -764,18 +792,24 @@ def fit_flattening(F_network_ensemble, θs,
     print("TRAINING FLATTENER NET")
     key, rng = jr.split(key)
     w = model.init(key, jnp.ones((n_params,)))
-    w, all_loss, all_dets = training_loop(key, w, theta_true, F_fishnets, 
-                                          lr=lr_phase1, opt_type=optax.adam)
+    lr1 = lr_schedule_phase1 if lr_schedule_phase1 is not None else lr_phase1
+    w, all_loss, all_dets = training_loop(key, w, theta_true, F_fishnets,
+                                          lr=lr1, opt_type=optax.adam)
     
     # ---------------------- PHASE 2: FINE-TUNING -----------------------
     print("FINE-TUNING FLATTENER NET")
-    total_steps = epochs_phase2*(F_fishnets.shape[0]) + epochs_phase2
-    lr_schedule = optax.schedules.exponential_decay(init_value=lr_schedule_initial,
-                                                    transition_begin=0,
-                                                    transition_steps=total_steps,
-                                                    decay_rate=lr_decay)
+    if lr_schedule_phase2 is not None:
+        lr2 = lr_schedule_phase2
+    else:
+        total_steps = epochs_phase2 * (F_fishnets.shape[0]) + epochs_phase2
+        lr2 = optax.schedules.exponential_decay(
+            init_value=lr_schedule_initial,
+            transition_begin=0,
+            transition_steps=total_steps,
+            decay_rate=lr_decay,
+        )
     w, all_loss, all_dets = training_loop(key, w, theta_true, F_fishnets,
-                                          lr=lr_schedule,
+                                          lr=lr2,
                                           opt_type=optax.adam,
                                           epochs=epochs_phase2)
     
@@ -804,8 +838,9 @@ def fit_flattening(F_network_ensemble, θs,
             _w = model.init(key, jnp.ones((n_params,)))
         else:
             _w = w
-        _w, all_loss, all_dets = training_loop(key, _w, theta_true, f, 
-                                            lr=lr_finetune,
+        lr_ft = lr_schedule_finetune if lr_schedule_finetune is not None else lr_finetune
+        _w, all_loss, all_dets = training_loop(key, _w, theta_true, f,
+                                            lr=lr_ft,
                                             epochs=finetune_epochs,
                                             patience=20,
                                             opt_type=optax.adam)

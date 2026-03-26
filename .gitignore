@@ -78,6 +78,7 @@ dmypy.json
 data/
 plots/
 sr_results/
+results/
 example_*/
 ex_*/
 *.pdf
@@ -90,3 +91,4 @@ ESR/
 
 # Exclude specific files that are untracked
 .DS_Store
+

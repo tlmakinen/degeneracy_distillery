@@ -469,6 +469,8 @@ def fit_flattening(F_network_ensemble, θs,
                    do_plot: bool = True,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
+                   loss_log_epsilon: float = 1e-12,
+                   q_inv_jitter: float = 1e-8,
                    grad_clip_norm: Optional[float] = None,
                    lr_schedule_phase1: Optional[Any] = None,
                    lr_schedule_phase2: Optional[Any] = None,
@@ -528,6 +530,11 @@ def fit_flattening(F_network_ensemble, θs,
             former hardcoded λ=100.
         loss_reweight_epsilon: ϵ in the same reweighting (α derived from λ, ϵ). Default matches
             former hardcoded ϵ=1e-7.
+        loss_log_epsilon: Small positive offset so log(loss) stays finite when loss→0 or is
+            contaminated by numerical noise (weird ensemble members / batches).
+        q_inv_jitter: Added to Q as ε·I before jnp.linalg.inv(Q) in the loss, so singular or
+            nearly singular Q (e.g. rank-deficient predicted Fisher) does not produce NaN grads.
+            Set to 0 to restore the previous strict behavior (may NaN).
         grad_clip_norm: If set, apply global norm clipping to gradients before Adam. Default None:
             no clipping (legacy behavior).
         lr_schedule_phase1: Optional Optax learning rate schedule (or scalar) for phase 1. None means
@@ -656,6 +663,8 @@ def fit_flattening(F_network_ensemble, θs,
         -np.log(_loss_eps * (_loss_lam - 1.0) + _loss_eps**2.0 / (1.0 + _loss_eps))
         / _loss_eps
     )
+    _log_eps = loss_log_epsilon
+    _q_jitter = q_inv_jitter
 
     @jax.jit
     def l1_reg(x, alpha=l1_alpha):
@@ -673,16 +682,26 @@ def fit_flattening(F_network_ensemble, θs,
             Jeta_inv = jnp.linalg.pinv(J_eta)
             Q = Jeta_inv.T @ F @ Jeta_inv # <--- FLIP TRANSPOSE ??
 
-            loss = norm(Q - jnp.eye(n_params)) + norm(jnp.linalg.inv(Q) - jnp.eye(n_params))
+            eye = jnp.eye(n_params)
+            Q_reg = Q + _q_jitter * eye
+            inv_term = jnp.linalg.inv(Q_reg)
+            loss = norm(Q - eye) + norm(inv_term - eye)
+            loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
             r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
             loss *= r
-            
+
+            log_loss = jnp.log(loss + _log_eps)
+            log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
+
             l1_loss = 0.0 # l1_reg(J_eta)
 
-            return jnp.log(loss), jnp.linalg.det(Q), l1_loss
+            det_q = jnp.linalg.det(Q)
+            det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-        loss, Q, l1_loss = jax.vmap(fn)(theta_batched, F_batched)
-        return (jnp.mean(loss)) + l1_loss.mean(), jnp.mean(Q)
+            return log_loss, det_q, l1_loss
+
+        log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
+        return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
 
     # ---------------------- PREPARE TRAINING DATA -----------------------
     # Shuffle data before batching to ensure proper train/val split randomization

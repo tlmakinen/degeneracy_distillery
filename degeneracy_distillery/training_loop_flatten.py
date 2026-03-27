@@ -316,6 +316,83 @@ class WhitenedMLP(nn.Module):
         return x
 
 
+class ReversePathMLP(nn.Module):
+    """
+    Maps η → θ̂ with the same residual MLP pattern as custom_MLP, but without θ min–max
+    on the input (η lives in coordinate space).
+    """
+
+    features: Sequence[int]
+    act: Callable = stable_sin_swish
+
+    @nn.compact
+    def __call__(self, y):
+        x = y
+        x = nn.Dense(self.features[-1])(x)
+        x = self.act(nn.Dense(self.features[0])(x))
+        for feat in self.features[1:-1]:
+            z = self.act(nn.Dense(feat)(x))
+            z = nn.Dense(feat)(z)
+            x = self.act(x + z)
+        x = nn.Dense(self.features[-1])(x)
+        return x
+
+
+class ForwardBackwardMLP(nn.Module):
+    """
+    Forward map θ→η via ``custom_MLP``; learned inverse η→θ̂ via ``ReversePathMLP``.
+    ``__call__`` is the forward map (for Jacobians / Fisher loss).
+    """
+
+    features: Sequence[int]
+    max_x: jnp.ndarray
+    min_x: jnp.ndarray
+    act: Callable = stable_sin_swish
+
+    def setup(self):
+        self.forward_net = custom_MLP(
+            features=self.features,
+            max_x=self.max_x,
+            min_x=self.min_x,
+            act=self.act,
+        )
+        self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
+
+    def __call__(self, x):
+        return self.forward_net(x)
+
+    def inverse_path(self, y):
+        return self.reverse_net(y)
+
+
+class WhitenedForwardBackwardMLP(nn.Module):
+    """Whitened forward (``WhitenedMLP``) plus learned ``ReversePathMLP`` on η."""
+
+    features: Sequence[int]
+    max_x: jnp.ndarray
+    min_x: jnp.ndarray
+    W_inv: jnp.ndarray
+    act: Callable = stable_sin_swish
+    apply_inverse_whitening: bool = True
+
+    def setup(self):
+        self.forward_net = WhitenedMLP(
+            features=self.features,
+            max_x=self.max_x,
+            min_x=self.min_x,
+            W_inv=self.W_inv,
+            act=self.act,
+            apply_inverse_whitening=self.apply_inverse_whitening,
+        )
+        self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
+
+    def __call__(self, x):
+        return self.forward_net(x)
+
+    def inverse_path(self, y):
+        return self.reverse_net(y)
+
+
 class RealNVPWrapper(nn.Module):
     """
     Wrapper for RealNVP that applies input scaling and returns only the output
@@ -467,6 +544,9 @@ def fit_flattening(F_network_ensemble, θs,
                    norm_method: str = "median_max_eig",
                    use_whitening: bool = True,
                    nn_inv: bool = False,
+                   forward_backward_mlp: bool = False,
+                   forward_backward_invertibility_weight: float = 1.0,
+                   flattener_activation: Literal["sin_swish", "softplus"] = "sin_swish",
                    do_plot: bool = True,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
@@ -530,7 +610,16 @@ def fit_flattening(F_network_ensemble, θs,
         nn_inv: If True, use RealNVP (invertible normalizing flow) instead of MLP.
                 The RealNVP is initialized with hidden_dims=hidden_size and 
                 num_layers=n_layers. Can be combined with use_whitening=True for 
-                WhitenedRealNVP. 
+                WhitenedRealNVP. Incompatible with ``forward_backward_mlp``.
+        forward_backward_mlp: If True, use a forward ``custom_MLP`` (or ``WhitenedMLP``)
+            plus a separate ``ReversePathMLP`` η→θ̂ and add a mean-square cycle penalty
+            ``‖θ - inverse(forward(θ))‖²`` (scaled by ``forward_backward_invertibility_weight``)
+            to the training loss. Mutually exclusive with ``nn_inv``.
+        forward_backward_invertibility_weight: Multiplier on the cycle-consistency term
+            when ``forward_backward_mlp`` is True.
+        flattener_activation: Nonlinearity for all flattener hidden units: ``sin_swish``
+            (default, ``sin(swish(x))``) or ``softplus`` (``flax.linen.nn.softplus``), including
+            RealNVP coupling nets when ``nn_inv`` is True.
         do_plot: Whether to generate coordinate visualization plots
         loss_reweight_lambda: λ in the per-sample reweighting r = λ·loss / (loss + exp(-α·loss));
             larger values change how aggressively large residuals are up-weighted. Default matches
@@ -640,8 +729,41 @@ def fit_flattening(F_network_ensemble, θs,
     max_x = θs.max(0) + 1e-3
     min_x = θs.min(0) - 1e-3
 
+    if nn_inv and forward_backward_mlp:
+        raise ValueError("nn_inv and forward_backward_mlp cannot both be True.")
+
+    if flattener_activation not in ("sin_swish", "softplus"):
+        raise ValueError(
+            "flattener_activation must be 'sin_swish' or 'softplus', "
+            f"got {flattener_activation!r}"
+        )
+    _flattener_act = (
+        stable_sin_swish if flattener_activation == "sin_swish" else nn.softplus
+    )
+    print(f"Flattener activation: {flattener_activation}")
+
+    _feat = [hidden_size] * n_layers + [n_params]
+
     # ---------------------- DEFINE THE MODEL -----------------------
-    if nn_inv and use_whitening:
+    if forward_backward_mlp and use_whitening:
+        print("USING WHITENED forward–backward MLP (forward WhitenedMLP + ReversePathMLP)")
+        model = WhitenedForwardBackwardMLP(
+            features=_feat,
+            max_x=max_x,
+            min_x=min_x,
+            W_inv=W_inv,
+            act=_flattener_act,
+            apply_inverse_whitening=True,
+        )
+    elif forward_backward_mlp:
+        print("USING forward–backward MLP (custom_MLP + ReversePathMLP)")
+        model = ForwardBackwardMLP(
+            features=_feat,
+            max_x=max_x,
+            min_x=min_x,
+            act=_flattener_act,
+        )
+    elif nn_inv and use_whitening:
         print("USING WHITENED RealNVP (invertible normalizing flow with inverse whitening layer)")
         model = WhitenedRealNVP(
             num_layers=n_layers,
@@ -650,7 +772,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             W_inv=W_inv,
-            act=stable_sin_swish,
+            act=_flattener_act,
             apply_inverse_whitening=True
         )
     elif nn_inv:
@@ -661,25 +783,25 @@ def fit_flattening(F_network_ensemble, θs,
             input_dim=n_params,
             max_x=max_x,
             min_x=min_x,
-            act=stable_sin_swish
+            act=_flattener_act
         )
     elif use_whitening:
         print("USING WHITENED MLP (with inverse whitening layer)")
         model = WhitenedMLP(
-            features=[hidden_size]*n_layers + [n_params],
+            features=_feat,
             max_x=max_x,
             min_x=min_x,
             W_inv=W_inv,
-            act=stable_sin_swish,
+            act=_flattener_act,
             apply_inverse_whitening=True
         )
     else:
         print("USING CUSTOM MLP (no whitening)")
         model = custom_MLP(
-            features=[hidden_size]*n_layers + [n_params],
+            features=_feat,
             max_x=max_x,
             min_x=min_x,
-            act=stable_sin_swish
+            act=_flattener_act
         )
 
     # ---------------------- LOSS & HELPER FUNCTIONS -----------------------
@@ -695,6 +817,7 @@ def fit_flattening(F_network_ensemble, θs,
     )
     _log_eps = loss_log_epsilon
     _q_jitter = q_inv_jitter
+    _inv_pen_w = forward_backward_invertibility_weight
 
     @jax.jit
     def l1_reg(x, alpha=l1_alpha):
@@ -702,36 +825,73 @@ def fit_flattening(F_network_ensemble, θs,
 
     theta_star = jnp.array([1.0, 1.0])
 
-    @jax.jit
-    def info_loss(w, theta_batched, F_batched):
-        def fn(theta, F):
-            mymodel = lambda d: model.apply(w, d)
+    if forward_backward_mlp:
 
+        @jax.jit
+        def info_loss(w, theta_batched, F_batched):
+            def fn(theta, F):
+                mymodel = lambda d: model.apply(w, d)
+                eta = mymodel(theta)
+                theta_rec = model.apply(w, eta, method="inverse_path")
+                inv_pen = jnp.mean((theta - theta_rec) ** 2)
 
-            J_eta = jax.jacrev(mymodel)(theta).squeeze()
-            Jeta_inv = jnp.linalg.pinv(J_eta)
-            Q = Jeta_inv.T @ F @ Jeta_inv # <--- FLIP TRANSPOSE ??
+                J_eta = jax.jacrev(mymodel)(theta).squeeze()
+                Jeta_inv = jnp.linalg.pinv(J_eta)
+                Q = Jeta_inv.T @ F @ Jeta_inv
 
-            eye = jnp.eye(n_params)
-            Q_reg = Q + _q_jitter * eye
-            inv_term = jnp.linalg.inv(Q_reg)
-            loss = norm(Q - eye) + norm(inv_term - eye)
-            loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
-            r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
-            loss *= r
+                eye = jnp.eye(n_params)
+                Q_reg = Q + _q_jitter * eye
+                inv_term = jnp.linalg.inv(Q_reg)
+                loss = norm(Q - eye) + norm(inv_term - eye)
+                loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
+                loss *= r
+                loss = loss + _inv_pen_w * inv_pen
 
-            log_loss = jnp.log(loss + _log_eps)
-            log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
+                log_loss = jnp.log(loss + _log_eps)
+                log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
-            l1_loss = 0.0 # l1_reg(J_eta)
+                l1_loss = 0.0
 
-            det_q = jnp.linalg.det(Q)
-            det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
+                det_q = jnp.linalg.det(Q)
+                det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-            return log_loss, det_q, l1_loss
+                return log_loss, det_q, l1_loss
 
-        log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
-        return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
+            log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
+            return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
+
+    else:
+
+        @jax.jit
+        def info_loss(w, theta_batched, F_batched):
+            def fn(theta, F):
+                mymodel = lambda d: model.apply(w, d)
+
+                J_eta = jax.jacrev(mymodel)(theta).squeeze()
+                Jeta_inv = jnp.linalg.pinv(J_eta)
+                Q = Jeta_inv.T @ F @ Jeta_inv
+
+                eye = jnp.eye(n_params)
+                Q_reg = Q + _q_jitter * eye
+                inv_term = jnp.linalg.inv(Q_reg)
+                loss = norm(Q - eye) + norm(inv_term - eye)
+                loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
+                loss *= r
+
+                log_loss = jnp.log(loss + _log_eps)
+                log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+                l1_loss = 0.0
+
+                det_q = jnp.linalg.det(Q)
+                det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
+
+                return log_loss, det_q, l1_loss
+
+            log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
+            return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
 
     # ---------------------- PREPARE TRAINING DATA -----------------------
     # Shuffle data before batching to ensure proper train/val split randomization
@@ -985,8 +1145,13 @@ def fit_flattening(F_network_ensemble, θs,
         Jbar_ensemble=np.array(dys),
         use_whitening=use_whitening,
         nn_inv=nn_inv,
+        forward_backward_mlp=np.array(forward_backward_mlp),
+        forward_backward_invertibility_weight=np.array(
+            forward_backward_invertibility_weight
+        ),
         fisher_to_flatten=np.array(_fisher_mode),
         best_ensemble_member_index=np.array(best_idx),
+        flattener_activation=np.array(flattener_activation),
     )
     
     # Add whitening matrices if used
@@ -1084,9 +1249,27 @@ if __name__ == '__main__':
         help="Disable Fisher whitening (not recommended for large dynamic range)"
     )
     parser.add_argument(
+        "--flattener-activation",
+        type=str,
+        default="sin_swish",
+        choices=["sin_swish", "softplus"],
+        help="Hidden activation for the flattener (MLP / RealNVP). Default: sin_swish.",
+    )
+    parser.add_argument(
         "--nn-inv",
         action="store_true",
         help="Use RealNVP (invertible normalizing flow) instead of MLP"
+    )
+    parser.add_argument(
+        "--forward-backward-mlp",
+        action="store_true",
+        help="Train paired forward MLP + reverse MLP with cycle-consistency penalty (no RealNVP).",
+    )
+    parser.add_argument(
+        "--forward-backward-invertibility-weight",
+        type=float,
+        default=1.0,
+        help="Weight on ‖θ - reverse(forward(θ))‖² when --forward-backward-mlp is set.",
     )
     parser.add_argument(
         "--fisher-to-flatten",
@@ -1109,6 +1292,8 @@ if __name__ == '__main__':
         help="Manual normalization factor (overrides --norm-method if provided)"
     )
     args = parser.parse_args()
+    if args.nn_inv and args.forward_backward_mlp:
+        parser.error("--nn-inv and --forward-backward-mlp are mutually exclusive.")
 
     # ---------------------- LOAD DATA FROM FILE -----------------------
     fname = args.input
@@ -1145,5 +1330,10 @@ if __name__ == '__main__':
                    SCALE_THETA=False,
                    use_whitening=not args.no_whitening,
                    nn_inv=args.nn_inv,
+                   forward_backward_mlp=args.forward_backward_mlp,
+                   forward_backward_invertibility_weight=(
+                       args.forward_backward_invertibility_weight
+                   ),
+                   flattener_activation=args.flattener_activation,
                    do_plot=not args.no_plot,
                    Fisher_to_flatten=args.fisher_to_flatten)

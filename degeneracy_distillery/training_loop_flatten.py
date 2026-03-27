@@ -19,7 +19,7 @@ import optax
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from typing import Sequence, Any, Callable, Optional
+from typing import Sequence, Any, Callable, Optional, Literal
 from tqdm import tqdm
 
 # Import external modules (assumed to be provided)
@@ -461,6 +461,7 @@ def fit_flattening(F_network_ensemble, θs,
                    output_prefix: str = "flattened_coords_sr",
                    SCALE_THETA: bool = False,
                    do_average: bool = True,
+                   Fisher_to_flatten: Literal["average", "best"] = "average",
                    F_avg: Any = None,
                    norm_factor: Any = None,
                    norm_method: str = "median_max_eig",
@@ -506,8 +507,14 @@ def fit_flattening(F_network_ensemble, θs,
         seed: Random seed
         output_prefix: Prefix for output filename
         SCALE_THETA: Whether to scale theta (legacy parameter)
-        do_average: Whether to average ensemble (legacy parameter)
-        F_avg: Pre-computed averaged Fisher (if provided, skips averaging)
+        do_average: Legacy: if False, flatten using the best member (equivalent to
+            ``Fisher_to_flatten="best"``). Ignored when ``Fisher_to_flatten="best"``.
+        Fisher_to_flatten: How to form the target Fisher per sample from the ensemble:
+            ``"average"`` — weighted average using ``ensemble_weights`` (fishnets-style);
+            ``"best"`` — Fisher from the member with largest weight (lowest val loss in fishnets).
+            Whitening ``W`` uses the same choice (global mean over ensemble vs mean over samples
+            of that member only).
+        F_avg: Pre-computed Fisher targets (if provided, skips ensemble aggregation)
         norm_factor: Normalization factor for Fishers. If None (default), computed
                      automatically using robust_norm_factor with norm_method.
         norm_method: Method for computing norm_factor if not provided:
@@ -561,12 +568,29 @@ def fit_flattening(F_network_ensemble, θs,
 
     key = jr.PRNGKey(seed)
 
+    if Fisher_to_flatten not in ("average", "best"):
+        raise ValueError(
+            f"Fisher_to_flatten must be 'average' or 'best', got {Fisher_to_flatten!r}"
+        )
+    _fisher_mode: Literal["average", "best"] = (
+        "best" if (Fisher_to_flatten == "best" or not do_average) else "average"
+    )
+    best_idx = int(jnp.argmax(jnp.asarray(ensemble_weights)))
+
     if F_avg is None:
-      print("AVERAGING FISHERS")
-      # Compute weighted average of network Fisher matrices:
-      F_fishnets = jnp.average(F_network_ensemble, axis=0, weights=ensemble_weights)
+        if _fisher_mode == "average":
+            print("AVERAGING FISHERS (weighted ensemble)")
+            F_fishnets = jnp.average(
+                F_network_ensemble, axis=0, weights=ensemble_weights
+            )
+        else:
+            print(
+                f"USING BEST FISHER ENSEMBLE MEMBER (index {best_idx}, "
+                "argmax ensemble_weights)"
+            )
+            F_fishnets = F_network_ensemble[best_idx]
     else:
-      F_fishnets = F_avg
+        F_fishnets = F_avg
 
     # ---------------------- ROBUST NORMALIZATION -----------------------
     if norm_factor is None:
@@ -583,11 +607,17 @@ def fit_flattening(F_network_ensemble, θs,
     
     if use_whitening:
         print("COMPUTING WHITENING TRANSFORM")
-        # Compute whitening from the (normalized) ensemble
+        # Compute whitening from the (normalized) ensemble (or best member only)
         F_ensemble_normalized = F_network_ensemble / norm_factor
-        W, W_inv, F_mean = compute_whitening_transform(
-            F_ensemble_normalized, ensemble_weights
-        )
+        if _fisher_mode == "average":
+            W, W_inv, F_mean = compute_whitening_transform(
+                F_ensemble_normalized, ensemble_weights
+            )
+        else:
+            W, W_inv, F_mean = compute_whitening_transform(
+                F_ensemble_normalized[best_idx : best_idx + 1],
+                jnp.ones((1,), dtype=ensemble_weights.dtype),
+            )
         
         # F_fishnets should be the weighted average (n_samples, n_params, n_params)
         # NOT the full ensemble. The WhitenedMLP's W_inv layer handles the whitening
@@ -954,7 +984,9 @@ def fit_flattening(F_network_ensemble, θs,
         eta_ensemble=np.array(ys),
         Jbar_ensemble=np.array(dys),
         use_whitening=use_whitening,
-        nn_inv=nn_inv
+        nn_inv=nn_inv,
+        fisher_to_flatten=np.array(_fisher_mode),
+        best_ensemble_member_index=np.array(best_idx),
     )
     
     # Add whitening matrices if used
@@ -1057,6 +1089,13 @@ if __name__ == '__main__':
         help="Use RealNVP (invertible normalizing flow) instead of MLP"
     )
     parser.add_argument(
+        "--fisher-to-flatten",
+        type=str,
+        default="average",
+        choices=["average", "best"],
+        help="Target Fisher: weighted ensemble average, or single best member (argmax weight).",
+    )
+    parser.add_argument(
         "--norm-method",
         type=str,
         default="median_max_eig",
@@ -1106,4 +1145,5 @@ if __name__ == '__main__':
                    SCALE_THETA=False,
                    use_whitening=not args.no_whitening,
                    nn_inv=args.nn_inv,
-                   do_plot=not args.no_plot)
+                   do_plot=not args.no_plot,
+                   Fisher_to_flatten=args.fisher_to_flatten)

@@ -651,7 +651,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                apply_varimax: bool = False,
                                varimax_method: str = "varimax",
                                jacobian_sparsity: str = "norm",
-                               verbose: bool = True) -> Dict[str, Any]:
+                               verbose: bool = True,
+                               ensemble_indices: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
     
@@ -675,7 +676,11 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     Favg : np.ndarray
         Averaged Fisher matrix for rotation computation
     best_model_idx : int
-        Index of the best model to use as reference
+        Index of the best model to use as reference (original ensemble index into ``datafile``)
+    ensemble_indices : np.ndarray, optional
+        Original member indices to include, shape ``(n_keep,)``. If None, uses all members.
+        Weights are taken from ``datafile['ensemble_weights'][ensemble_indices]`` and
+        renormalized to sum to 1.
     n_d : float
         Normalization factor (e.g., number of data points)
     use_var : bool
@@ -713,8 +718,14 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         - 'mask': Boolean mask for valid samples
         - 'Jbar': Copy of weighted average Jacobian
     """
-    ensemble_weights_raw = datafile['ensemble_weights']
-    num_nets = len(ensemble_weights_raw)
+    ensemble_weights_raw = np.asarray(datafile['ensemble_weights'])
+    if ensemble_indices is None:
+        member_idx = np.arange(ensemble_weights_raw.shape[0], dtype=int)
+    else:
+        member_idx = np.asarray(ensemble_indices, dtype=int)
+    w_sub = ensemble_weights_raw[member_idx]
+    w_sub = w_sub / np.maximum(w_sub.sum(), 1e-12)
+    num_nets = member_idx.shape[0]
     
     # Get reference for Kabsch alignment
     y_reference = datafile['eta_ensemble'][best_model_idx][randidx]
@@ -727,14 +738,14 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     ensemble_weights = []
     rotmats = []
     
-    for i in range(num_nets):
+    for k, i in enumerate(member_idx):
         y = datafile["eta_ensemble"][i][randidx]
         dy = datafile["Jbar_ensemble"][i][randidx]
         _F = datafile["F_ensemble"][i][randidx]
         X = datafile['theta'][randidx]
         
         if verbose:
-            print(f"Network {i}: y.min() = {y.min():.6f}, weight = {ensemble_weights_raw[i]:.1f}")
+            print(f"Network {i} (subset {k}/{num_nets}): y.min() = {y.min():.6f}, weight = {w_sub[k]:.4f}")
         
         # Rotate to align with reference
         y_rot, dy_orig, dy_sr_rot, rotmat, A = rotate_coords(
@@ -754,7 +765,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         dys_sr.append(dy_sr_rot)
         dys.append(dy_orig)
         rotmats.append(rotmat)
-        ensemble_weights.append(ensemble_weights_raw[i])
+        ensemble_weights.append(w_sub[k])
         Fs.append(_F)
     
     # Convert to arrays and apply n_d normalization
@@ -800,8 +811,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     
     Fs_avg = np.average(Fs, axis=0, weights=ensemble_weights)
     
-    # Apply randidx and mask to eta_ensemble
-    eta_ensemble_masked = datafile['eta_ensemble'][:, randidx, :][:, mask, :]
+    # Apply randidx and mask to eta_ensemble (only kept members)
+    eta_ensemble_masked = datafile['eta_ensemble'][member_idx][:, randidx, :][:, mask, :]
     
     return {
         'y': y,
@@ -879,23 +890,81 @@ def load_and_process_data(datapath: str, filename: str,
     data : Dict[str, Any]
         Processed data dictionary. If process_ensemble=True, includes
         all outputs from process_ensemble_rotation.
+
+    Notes
+    -----
+    If ``eta_ensemble`` is present, any **ensemble member** whose slice
+    ``eta_ensemble[i, randidx, :]`` contains **no** finite values (all NaN/Inf
+    on the selected samples) is dropped from averaging and rotation.
+    ``ensemble_weights`` are renormalized over the remaining members.
+    Sample rows along parameter space are **not** removed for partial NaNs.
     """
     np.random.seed(seed)
     
     datafile = np.load(datapath + filename)
     
-    X = datafile["theta"]
-    ensemble_weights = datafile["ensemble_weights"]
-    best_model_idx = int(np.argmax(ensemble_weights)) if y_reference_index is None else y_reference_index
+    ensemble_weights_full = np.asarray(datafile["ensemble_weights"])
+    best_model_idx = (
+        int(np.argmax(ensemble_weights_full))
+        if y_reference_index is None
+        else int(y_reference_index)
+    )
     
     if verbose:
         print(f"best model {best_model_idx}")
     
-    randidx = np.arange(num_samps)
+    n_total = int(datafile["theta"].shape[0])
+    randidx = np.arange(min(num_samps, n_total))
+
+    ensemble_indices_pass: Optional[np.ndarray] = None
+    ensemble_weights = ensemble_weights_full
+
+    if "eta_ensemble" in datafile.files:
+        eta_slice = np.asarray(datafile["eta_ensemble"][:, randidx, :])
+        good_member = np.isfinite(eta_slice).any(axis=(1, 2))
+        n_bad = int((~good_member).sum())
+        if n_bad > 0 and verbose:
+            dropped = np.where(~good_member)[0].tolist()
+            print(
+                f"Dropping {n_bad} ensemble member(s) with no finite eta_ensemble on randidx: {dropped}"
+            )
+        kept = np.where(good_member)[0]
+        if kept.size == 0:
+            raise ValueError(
+                "All ensemble members have non-finite eta_ensemble on the selected samples; "
+                "fix upstream flattening / fishnets."
+            )
+        if n_bad > 0:
+            ensemble_indices_pass = kept
+            w_sub = ensemble_weights_full[kept]
+            ensemble_weights = w_sub / np.maximum(w_sub.sum(), 1e-12)
+            if best_model_idx not in set(kept.tolist()):
+                if verbose:
+                    print(
+                        f"Reference model index {best_model_idx} was dropped; "
+                        f"using highest-weight kept member."
+                    )
+                best_model_idx = int(kept[np.argmax(ensemble_weights_full[kept])])
+            Favg = np.average(
+                datafile["F_ensemble"][kept][:, randidx, :, :],
+                weights=ensemble_weights,
+                axis=0,
+            )
+        else:
+            Favg = np.average(
+                datafile["F_ensemble"][:, randidx, :, :],
+                weights=ensemble_weights_full,
+                axis=0,
+            )
+    else:
+        Favg = np.average(
+            datafile["F_ensemble"][:, randidx, :, :],
+            weights=ensemble_weights_full,
+            axis=0,
+        )
+
     X = datafile["theta"][randidx]
-    
-    Favg = np.average(datafile['F_ensemble'], weights=ensemble_weights, axis=0)
-    
+
     result = {
         'X': X,
         'ensemble_weights': ensemble_weights,
@@ -903,9 +972,16 @@ def load_and_process_data(datapath: str, filename: str,
         'randidx': randidx,
         'Favg': Favg,
         'datafile': datafile,
-        'eta_ensemble': datafile['eta_ensemble'],
         'norm_factor': datafile['norm_factor']
     }
+    if "eta_ensemble" in datafile.files:
+        if ensemble_indices_pass is not None:
+            result["eta_ensemble"] = np.asarray(
+                datafile["eta_ensemble"][ensemble_indices_pass][:, randidx, :]
+            )
+            result["ensemble_indices"] = ensemble_indices_pass
+        else:
+            result["eta_ensemble"] = np.asarray(datafile["eta_ensemble"][:, randidx, :])
     
     if process_ensemble:
         # Run full ensemble processing
@@ -919,7 +995,8 @@ def load_and_process_data(datapath: str, filename: str,
             use_var=use_var,
             apply_varimax=apply_varimax,
             varimax_method=varimax_method,
-            jacobian_sparsity=jacobian_sparsity
+            jacobian_sparsity=jacobian_sparsity,
+            ensemble_indices=ensemble_indices_pass,
         )
         # Merge results
         result.update(ensemble_result)

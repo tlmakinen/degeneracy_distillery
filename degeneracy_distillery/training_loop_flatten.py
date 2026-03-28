@@ -364,6 +364,11 @@ class ForwardBackwardMLP(nn.Module):
     def inverse_path(self, y):
         return self.reverse_net(y)
 
+    def init_forward_and_reverse(self, x):
+        """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""
+        y = self.forward_net(x)
+        return self.reverse_net(y)
+
 
 class WhitenedForwardBackwardMLP(nn.Module):
     """Whitened forward (``WhitenedMLP``) plus learned ``ReversePathMLP`` on η."""
@@ -390,6 +395,11 @@ class WhitenedForwardBackwardMLP(nn.Module):
         return self.forward_net(x)
 
     def inverse_path(self, y):
+        return self.reverse_net(y)
+
+    def init_forward_and_reverse(self, x):
+        """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""
+        y = self.forward_net(x)
         return self.reverse_net(y)
 
 
@@ -1000,7 +1010,13 @@ def fit_flattening(F_network_ensemble, θs,
     # ---------------------- TRAINING PHASE 1: INITIAL TRAINING -----------------------
     print("TRAINING FLATTENER NET")
     key, rng = jr.split(key)
-    w = model.init(key, jnp.ones((n_params,)))
+    x_init = jnp.ones((n_params,))
+    if forward_backward_mlp:
+        # Default init only runs __call__ (forward_net); reverse_net must run once
+        # so Flax creates Dense kernels under reverse_net (see init_forward_and_reverse).
+        w = model.init(key, x_init, method="init_forward_and_reverse")
+    else:
+        w = model.init(key, x_init)
     lr1 = lr_schedule_phase1 if lr_schedule_phase1 is not None else lr_phase1
     w, all_loss, all_dets = training_loop(key, w, theta_true, F_fishnets,
                                           lr=lr1, opt_type=optax.adam)
@@ -1044,7 +1060,10 @@ def fit_flattening(F_network_ensemble, θs,
         key, rng = jr.split(key)
         if init_anew:
             key, rng = jr.split(key)
-            _w = model.init(key, jnp.ones((n_params,)))
+            if forward_backward_mlp:
+                _w = model.init(key, x_init, method="init_forward_and_reverse")
+            else:
+                _w = model.init(key, x_init)
         else:
             _w = w
         lr_ft = lr_schedule_finetune if lr_schedule_finetune is not None else lr_finetune

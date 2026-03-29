@@ -292,7 +292,7 @@ def norm(A: jnp.ndarray) -> float:
 
 def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray, 
                y_std: np.ndarray, dy_sr: np.ndarray, Fs: np.ndarray,
-               n_params: int) -> Tuple[float, str, float, float, float]:
+               n_params: int, length_penalty: float = 2.0) -> Tuple[float, str, float, float, float]:
     """
     Compute description length (MDL) and flattening metrics for a symbolic equation.
     
@@ -321,7 +321,10 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
         Fisher matrices of shape (n_samples, n_params, n_params)
     n_params : int
         Number of parameters
-        
+    length_penalty : float
+        Multiplier on the Fisher-based parameter codelength term in ``DL``. Default 2.0
+        gives ``DL = neglogL + aifeyn + length_penalty * param_codelen``.
+
     Returns
     -------
     complexity : float
@@ -460,10 +463,10 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
         param_codelen = -p / 2. * np.log(3.) + np.sum(
             0.5 * np.log(I_ii) + np.log(np.abs(np.array(theta_ML)))
         )
-    
-    # Combine the terms
-    DL = neglogL + aifeyn + param_codelen
-    
+
+    # Combine the terms (matches docstring: scaled Fisher parameter codelength only)
+    DL = neglogL + aifeyn + float(length_penalty) * param_codelen
+
     return complexity, latex_expr, neglogL, DL, frobloss
 
 
@@ -648,7 +651,8 @@ def analyze_equations(
     parent_dir: str = './sr_results/',
     max_complexity_thresh: int = 14,
     equation_set: str = 'pareto',
-    verbose: bool = True
+    verbose: bool = True,
+    length_penalty: float = 2.0,
 ) -> Tuple[List[str], List[str], Dict[str, List]]:
     """
     Analyze symbolic regression results and rank equations.
@@ -775,7 +779,8 @@ def analyze_equations(
         for j, eq in enumerate(tqdm(eqs, desc=f"Component {i+1}")):
             try:
                 c, latex, logL, DL, frobloss = compute_DL(
-                    eq, idx, X, y, y_std, dy_sr, Fs, n_params
+                    eq, idx, X, y, y_std, dy_sr, Fs, n_params,
+                    length_penalty=length_penalty,
                 )
                 all_complexity[j] = c
                 all_latex[j] = latex
@@ -922,6 +927,7 @@ def fit_and_analyze_sr(
         Default: False (uses full Fisher matrices and parameter space)
     **sr_kwargs
         Additional arguments for fit_symbolic_regression and analyze_equations.
+        ``verbose`` applies to both the fitter and ``analyze_equations``.
         Common fit_symbolic_regression options:
         - allowed_symbols: str = 'add,mul,pow,constant,variable,exp,logabs,sqrt'
         - epsilon: float = 1e-5
@@ -937,7 +943,8 @@ def fit_and_analyze_sr(
         Common analyze_equations options:
         - equation_set: str = 'pareto' ('pareto', 'full_population', or 'both')
         - max_complexity_thresh: int = 14
-        
+        - length_penalty: float = 2.0 (``compute_DL`` parameter codelength weight)
+
     Returns
     -------
     mdl_coordinates : list[str]
@@ -1060,26 +1067,32 @@ def fit_and_analyze_sr(
         n_params = len(components_to_fit)
     
     # Separate kwargs for fitting and analysis
-    fit_kwargs = {k: v for k, v in sr_kwargs.items() 
-                  if k not in ['equation_set', 'max_complexity_thresh']}
-    
-    # Extract analysis-specific kwargs
+    _analysis_only = frozenset({'equation_set', 'max_complexity_thresh', 'length_penalty'})
+    fit_kwargs = {
+        k: v for k, v in sr_kwargs.items() if k not in _analysis_only
+    }
+
+    # Extract analysis-specific kwargs (still allow verbose via fit_kwargs for the fitter)
     equation_set = sr_kwargs.get('equation_set', 'pareto')
     max_complexity_thresh = sr_kwargs.get('max_complexity_thresh', 14)
-    
+    length_penalty = float(sr_kwargs.get('length_penalty', 2.0))
+    verbose_sr = bool(sr_kwargs.get('verbose', True))
+
     # Fit SR models on training set
     fit_symbolic_regression(
         X_train, y_train, y_std_train,
         components_to_fit, parent_dir,
         **fit_kwargs
     )
-    
+
     # Analyze results on validation set
     mdl_coords, frob_coords, analysis = analyze_equations(
         X_val, y_val, y_std_val, dy_sr_val, Fs_val,
         n_params, components_to_fit, parent_dir,
         max_complexity_thresh=max_complexity_thresh,
-        equation_set=equation_set
+        equation_set=equation_set,
+        verbose=verbose_sr,
+        length_penalty=length_penalty,
     )
     
     # Package split data for return

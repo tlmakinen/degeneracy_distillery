@@ -480,7 +480,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
                   apply_varimax: bool = False, varimax_method: str = "varimax",
                   jacobian_sparsity: str = "norm",
                   tol: float = 1e-5,
-                  restore_reference_mean: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                  restore_reference_mean: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Rotate coordinates to align with reference and apply PCA-based rotation.
     
@@ -529,11 +529,10 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     tol : float
         Tolerance for eigenvalue cutoff
     restore_reference_mean : bool
-        If True (default) and ``y_reference`` is provided, add back the reference column
-        mean **in the rotated output basis** (``rotmat @ mean(y_reference)``) after
-        alignment so coordinates sit near the reference scale for SR / units. A pure
-        translation does not change ``∂η/∂θ``. If False, returned ``y`` stays centered
-        around zero in the aligned frame.
+        If True and ``y_reference`` is provided, add back the reference column mean **in
+        the rotated output basis** (``rotmat @ mean(y_reference)``) after alignment so
+        coordinates sit near the reference scale for SR / units. Default False keeps ``y``
+        centered in the aligned frame. A pure translation does not change ``∂η/∂θ``.
 
     Returns
     -------
@@ -675,7 +674,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                varimax_method: str = "varimax",
                                jacobian_sparsity: str = "norm",
                                verbose: bool = True,
-                               ensemble_indices: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                               ensemble_indices: Optional[np.ndarray] = None,
+                               restore_reference_mean: bool = False) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
     
@@ -720,7 +720,9 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         "norm", "flatten", or "variance". Default is "norm".
     verbose : bool
         Whether to print progress information
-        
+    restore_reference_mean : bool
+        Passed to ``rotate_coords``. Default False.
+
     Returns
     -------
     result : Dict[str, Any]
@@ -779,6 +781,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
             apply_varimax=apply_varimax,
             varimax_method=varimax_method,
             jacobian_sparsity=jacobian_sparsity,
+            restore_reference_mean=restore_reference_mean,
         )
         
         if verbose:
@@ -872,7 +875,8 @@ def load_and_process_data(datapath: str, filename: str,
                           apply_varimax: bool = False,
                           varimax_method: str = "varimax",
                           jacobian_sparsity: str = "norm",
-                          verbose: bool = True) -> Dict[str, Any]:
+                          verbose: bool = True,
+                          restore_reference_mean: bool = False) -> Dict[str, Any]:
     """
     Load and process flattening data file.
     
@@ -907,7 +911,9 @@ def load_and_process_data(datapath: str, filename: str,
         Default is "norm".
     verbose : bool
         Whether to print progress
-        
+    restore_reference_mean : bool
+        Passed to ``process_ensemble_rotation`` / ``rotate_coords``. Default False.
+
     Returns
     -------
     data : Dict[str, Any]
@@ -1020,6 +1026,7 @@ def load_and_process_data(datapath: str, filename: str,
             varimax_method=varimax_method,
             jacobian_sparsity=jacobian_sparsity,
             ensemble_indices=ensemble_indices_pass,
+            restore_reference_mean=restore_reference_mean,
         )
         # Merge results
         result.update(ensemble_result)

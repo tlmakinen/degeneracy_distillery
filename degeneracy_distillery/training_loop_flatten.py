@@ -592,7 +592,10 @@ def fit_flattening(F_network_ensemble, θs,
         lr_schedule_initial: Initial value for phase 2 exponential decay when lr_schedule_phase2 is None.
         lr_decay: Decay rate for the default phase 2 exponential schedule (ignored if lr_schedule_phase2 is set).
         lr_finetune: Learning rate for per-ensemble-member fine-tuning when lr_schedule_finetune is None.
-        l1_alpha: L1 regularization coefficient (currently disabled)
+        l1_alpha: Penalty on the forward Jacobian ``J = ∂η/∂θ``: adds
+            ``l1_alpha * mean(|J|)`` to the objective (outside ``log``, same as legacy layout).
+            Default 0 disables it. Alternatives: Frobenius ``‖J‖_F`` or ``‖J-I‖``, Huber on entries,
+            or weight decay on network weights.
         noise: Noise level added to Fisher matrices during training
         seed: Random seed
         output_prefix: Prefix for output filename
@@ -828,12 +831,8 @@ def fit_flattening(F_network_ensemble, θs,
     _log_eps = loss_log_epsilon
     _q_jitter = q_inv_jitter
     _inv_pen_w = forward_backward_invertibility_weight
+    _l1_alpha = l1_alpha
 
-    @jax.jit
-    def l1_reg(x, alpha=l1_alpha):
-        return alpha * jnp.abs(x).mean()
-
-    theta_star = jnp.array([1.0, 1.0])
 
     if forward_backward_mlp:
 
@@ -846,7 +845,10 @@ def fit_flattening(F_network_ensemble, θs,
                 inv_pen = jnp.mean((theta - theta_rec) ** 2)
 
                 J_eta = jax.jacrev(mymodel)(theta).squeeze()
+                jac_l1 = _l1_alpha * jnp.mean(jnp.abs(J_eta))
+                jac_l1 = jnp.nan_to_num(jac_l1, nan=0.0, posinf=0.0, neginf=0.0)
                 Jeta_inv = jnp.linalg.pinv(J_eta)
+
                 Q = Jeta_inv.T @ F @ Jeta_inv
 
                 eye = jnp.eye(n_params)
@@ -861,12 +863,10 @@ def fit_flattening(F_network_ensemble, θs,
                 log_loss = jnp.log(loss + _log_eps)
                 log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
-                l1_loss = 0.0
-
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                return log_loss, det_q, l1_loss
+                return log_loss, det_q, jac_l1
 
             log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
             return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
@@ -879,7 +879,10 @@ def fit_flattening(F_network_ensemble, θs,
                 mymodel = lambda d: model.apply(w, d)
 
                 J_eta = jax.jacrev(mymodel)(theta).squeeze()
+                jac_l1 = _l1_alpha * jnp.mean(jnp.abs(J_eta))
+                jac_l1 = jnp.nan_to_num(jac_l1, nan=0.0, posinf=0.0, neginf=0.0)
                 Jeta_inv = jnp.linalg.pinv(J_eta)
+
                 Q = Jeta_inv.T @ F @ Jeta_inv
 
                 eye = jnp.eye(n_params)
@@ -893,12 +896,10 @@ def fit_flattening(F_network_ensemble, θs,
                 log_loss = jnp.log(loss + _log_eps)
                 log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
-                l1_loss = 0.0
-
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                return log_loss, det_q, l1_loss
+                return log_loss, det_q, jac_l1
 
             log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
             return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)

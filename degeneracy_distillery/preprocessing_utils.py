@@ -479,12 +479,13 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
                   use_var: bool = False, smallest: bool = False,
                   apply_varimax: bool = False, varimax_method: str = "varimax",
                   jacobian_sparsity: str = "norm",
-                  tol: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                  tol: float = 1e-5,
+                  restore_reference_mean: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Rotate coordinates to align with reference and apply PCA-based rotation.
     
     This function performs:
-    1. Centering of y and y_reference
+    1. Centering of y and (if given) y_reference
     2. Optional Jacobian-sparsity rotation on y_reference to define sparse basis
        (maximizes sparsity in dy_reference to isolate nonlinear dependencies)
     3. Fisher-based eigenvalue decomposition
@@ -527,7 +528,13 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
         - "variance": Use gradient variance (indicates nonlinearity)
     tol : float
         Tolerance for eigenvalue cutoff
-        
+    restore_reference_mean : bool
+        If True (default) and ``y_reference`` is provided, add back the reference column
+        mean **in the rotated output basis** (``rotmat @ mean(y_reference)``) after
+        alignment so coordinates sit near the reference scale for SR / units. A pure
+        translation does not change ``∂η/∂θ``. If False, returned ``y`` stays centered
+        around zero in the aligned frame.
+
     Returns
     -------
     y_rotated : np.ndarray
@@ -542,13 +549,17 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
         Transformation matrix (identity in current implementation)
     """
     theta = theta.copy()
-    
+    y = np.asarray(y, dtype=np.float64, order="C")
+
     # Center y
     ybar = y.mean(0)
     y = y - ybar
 
-    # zero-out reference point
-    y_reference -= y_reference.mean(0)
+    ybar_reference = None
+    if y_reference is not None:
+        y_reference = np.array(y_reference, dtype=y.dtype, copy=True)
+        ybar_reference = y_reference.mean(0).copy()
+        y_reference -= ybar_reference
 
     # Apply Jacobian-sparsity rotation to y_reference only
     varimax_rotmat = np.eye(y.shape[-1])
@@ -576,7 +587,10 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     
     argstar = np.argmin(np.sum((theta - theta_fid)**2, -1))
     theta_star = theta[argstar]
-    eta_star = y_reference[argstar]
+    if y_reference is not None:
+        eta_star = y_reference[argstar]
+    else:
+        eta_star = y[argstar]
     dy_star = dy[argstar]
     
     print("thetastar", theta_star)
@@ -637,8 +651,17 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     # Rotate Jacobian with the full composed rotation
     dy_sr = jnp.einsum("ij,bjk->bik", rotmat, dy)
 
-    y -= y_reference.min(0)
-    
+    # Restore reference mean in the *output* basis (same rotmat as y), not raw η —
+    # otherwise the offset mixes axes incorrectly after orthogonal alignment.
+    if (
+        restore_reference_mean
+        and ybar_reference is not None
+    ):
+        offset = np.asarray(rotmat, dtype=np.float64) @ np.asarray(
+            ybar_reference, dtype=np.float64
+        )
+        y = y + offset
+
     return y, dy, dy_sr, rotmat, A
 
 

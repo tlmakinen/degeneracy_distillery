@@ -596,7 +596,10 @@ def fit_flattening(F_network_ensemble, θs,
             ``l1_alpha * mean(|J|)`` to the objective (outside ``log``, same as legacy layout).
             Default 0 disables it. Alternatives: Frobenius ``‖J‖_F`` or ``‖J-I‖``, Huber on entries,
             or weight decay on network weights.
-        noise: Noise level added to Fisher matrices during training
+        noise: Scale of **additive** Gaussian noise on the **strict lower triangle**
+            of each Cholesky factor ``L`` (diagonal of ``L`` unchanged); ``F`` is
+            rebuilt as ``L_noisy @ L_noisy.T`` so matrices stay PSD. This avoids
+            multiplicative noise on ``L_ii`` that inflates ``E[F]`` diagonals.
         seed: Random seed
         output_prefix: Prefix for output filename
         SCALE_THETA: Whether to scale theta (legacy parameter)
@@ -946,11 +949,13 @@ def fit_flattening(F_network_ensemble, θs,
             w, loss_val, opt_state, detFeta, key, theta_true, F_fishnets = inputs
             theta_samples = theta_true[i]
             F_samples = F_fishnets[i]
-            # Add noise to Fisher matrices via Cholesky decomposition
+            key, sk = jr.split(key)
             L = jax.scipy.linalg.cholesky(F_samples, lower=True)
-            L_noisy = L + jr.normal(key, shape=L.shape)*noise*L
-            # F_samples = L_noisy @ L_noisy.T
-            F_samples = jnp.einsum('bij,bkj->bik', L_noisy, L_noisy) 
+            n_p = L.shape[-1]
+            mask = jnp.tril(jnp.ones((n_p, n_p), dtype=L.dtype), k=-1)
+            Z = jr.normal(sk, shape=L.shape)
+            L_noisy = L + noise * Z * mask
+            F_samples = jnp.einsum("bij,bkj->bik", L_noisy, L_noisy)
 
             (loss_val, detFeta), grads = loss_grad_fn(w, theta_samples, F_samples)
             updates, opt_state = tx.update(grads, opt_state)

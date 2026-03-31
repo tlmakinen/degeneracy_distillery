@@ -12,7 +12,7 @@ import yaml
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from typing import Sequence
+from typing import Sequence, Union
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
@@ -43,7 +43,7 @@ def train_fishnets(theta,
                    data_shape=None,
                    hids_min: int = 10,
                    hids_max: int = 300,
-                   n_layers: int = 3,
+                   n_layers: Union[int, Sequence[int]] = 3,
                    num_models: int = 20,
                    seed_model: int = 201,
                    seed_train: int = 999,
@@ -67,7 +67,9 @@ def train_fishnets(theta,
       data_shape    : If provided, the last dimension of data; if None, set from data.shape[-1]
       hids_min      : Minimum number of neurons for each hidden layer
       hids_max      : Maximum number of neurons for each hidden layer (hidden sizes will be sampled uniformly in this range)
-      n_layers      : Number of MLP layers --> could randomise this as well
+      n_layers      : Number of MLP layers. Can be either:
+                      - int: fixed depth for all ensemble members
+                      - [min_layers, max_layers]: sampled uniformly (inclusive) per member
       seed_model    : Seed for model initialization
       seed_train    : Seed for training loop randomness
       train_batch_size : Batch size used for training loops
@@ -149,14 +151,34 @@ def train_fishnets(theta,
     acts = [acts[i] for i in idx_acts]
 
     hids_range = np.arange(hids_min, hids_max)
+    if isinstance(n_layers, (list, tuple, np.ndarray)):
+        if len(n_layers) != 2:
+            raise ValueError("n_layers range must have exactly two values: [min_layers, max_layers].")
+        min_layers, max_layers = int(n_layers[0]), int(n_layers[1])
+        if min_layers <= 0 or max_layers <= 0:
+            raise ValueError("n_layers values must be positive.")
+        if min_layers > max_layers:
+            raise ValueError("n_layers range must satisfy min_layers <= max_layers.")
+        sample_n_layers = True
+    else:
+        fixed_layers = int(n_layers)
+        if fixed_layers <= 0:
+            raise ValueError("n_layers must be a positive integer.")
+        sample_n_layers = False
+
     all_n_hidden = []
     all_sharpness = []
     all_threshold = []
     for n in range(num_models):
-        key, rng = jr.split(key)
-        hidden = int(jr.choice(key, hids_range, replace=True))
-        print("Chosen hidden size for model", n+1, ":", hidden)
-        all_n_hidden.append([hidden]*n_layers)  # three-layer network
+        key, hidden_key = jr.split(key)
+        hidden = int(jr.choice(hidden_key, hids_range, replace=True))
+        if sample_n_layers:
+            key, layers_key = jr.split(key)
+            n_layers_model = int(jr.randint(layers_key, shape=(), minval=min_layers, maxval=max_layers + 1))
+        else:
+            n_layers_model = fixed_layers
+        print("Chosen hidden size for model", n+1, ":", hidden, "| layers:", n_layers_model)
+        all_n_hidden.append([hidden] * n_layers_model)
         
         # Generate sharpness and threshold using jr.normal with proper key management
         key, rng1, rng2 = jr.split(key, 3)

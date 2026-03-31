@@ -13,7 +13,7 @@ Author: Consolidated from postprocessing.ipynb
 import numpy as np
 import jax
 import jax.numpy as jnp
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Literal
 
 # =============================================================================
 # LINEAR ALGEBRA HELPERS
@@ -675,7 +675,9 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                jacobian_sparsity: str = "norm",
                                verbose: bool = True,
                                ensemble_indices: Optional[np.ndarray] = None,
-                               restore_reference_mean: bool = False) -> Dict[str, Any]:
+                               restore_reference_mean: bool = False,
+                               Fisher_to_flatten: Literal["average", "best"] = "average",
+                               ) -> Dict[str, Any]:
     """
     Process and rotate ensemble members to a common reference frame.
     
@@ -722,6 +724,11 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         Whether to print progress information
     restore_reference_mean : bool
         Passed to ``rotate_coords``. Default False.
+    Fisher_to_flatten : {"average", "best"}, optional
+        How to form the aggregate Fisher passed as ``'Fs'`` (per-sample target),
+        matching ``training_loop_flatten.fit_flattening``:
+        ``"average"`` — weighted average over members; ``"best"`` — Fisher from the
+        member with largest ``ensemble_weights`` (argmax). Default ``"average"``.
 
     Returns
     -------
@@ -731,7 +738,8 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         - 'y_std': Weighted std of outputs (n_samples, n_outputs)
         - 'dy': Weighted average of Jacobians (n_samples, n_outputs, n_params)
         - 'dy_sr': Weighted average of rotated Jacobians
-        - 'Fs': Weighted average of Fisher matrices
+        - 'Fs': Weighted average of Fisher matrices, or best member's Fisher if
+          ``Fisher_to_flatten="best"``
         - 'X': Parameters (masked)
         - 'ys': All rotated outputs (n_nets, n_samples, n_outputs)
         - 'dys': All Jacobians (n_nets, n_samples, n_outputs, n_params)
@@ -743,6 +751,11 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
         - 'mask': Boolean mask for valid samples
         - 'Jbar': Copy of weighted average Jacobian
     """
+    if Fisher_to_flatten not in ("average", "best"):
+        raise ValueError(
+            f"Fisher_to_flatten must be 'average' or 'best', got {Fisher_to_flatten!r}"
+        )
+
     ensemble_weights_raw = np.asarray(datafile['ensemble_weights'])
     if ensemble_indices is None:
         member_idx = np.arange(ensemble_weights_raw.shape[0], dtype=int)
@@ -835,7 +848,16 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
     Fs = np.array([f[mask] for f in Fs])
     ensemble_Fs = Fs.copy()
     
-    Fs_avg = np.average(Fs, axis=0, weights=ensemble_weights)
+    if Fisher_to_flatten == "average":
+        Fs_avg = np.average(Fs, axis=0, weights=ensemble_weights)
+    else:
+        k_best = int(np.argmax(ensemble_weights))
+        Fs_avg = Fs[k_best]
+        if verbose:
+            print(
+                f"Fisher_to_flatten='best': using ensemble member index "
+                f"{member_idx[k_best]} (subset slot {k_best}, argmax weights) for Fs"
+            )
     
     # Apply randidx and mask to eta_ensemble (only kept members)
     eta_ensemble_masked = datafile['eta_ensemble'][member_idx][:, randidx, :][:, mask, :]
@@ -876,7 +898,9 @@ def load_and_process_data(datapath: str, filename: str,
                           varimax_method: str = "varimax",
                           jacobian_sparsity: str = "norm",
                           verbose: bool = True,
-                          restore_reference_mean: bool = False) -> Dict[str, Any]:
+                          restore_reference_mean: bool = False,
+                          Fisher_to_flatten: Literal["average", "best"] = "average",
+                          ) -> Dict[str, Any]:
     """
     Load and process flattening data file.
     
@@ -913,6 +937,12 @@ def load_and_process_data(datapath: str, filename: str,
         Whether to print progress
     restore_reference_mean : bool
         Passed to ``process_ensemble_rotation`` / ``rotate_coords``. Default False.
+    Fisher_to_flatten : {"average", "best"}, optional
+        How to form the Fisher matrix used in ``rotate_coords`` (``Favg``) and, when
+        ``process_ensemble=True``, the aggregate ``'Fs'`` in the ensemble result — same
+        semantics as ``fit_flattening(..., Fisher_to_flatten=...)`` in
+        ``training_loop_flatten``: ``"average"`` weighted mean over members,
+        ``"best"`` the member with largest ``ensemble_weights``. Default ``"average"``.
 
     Returns
     -------
@@ -928,6 +958,11 @@ def load_and_process_data(datapath: str, filename: str,
     ``ensemble_weights`` are renormalized over the remaining members.
     Sample rows along parameter space are **not** removed for partial NaNs.
     """
+    if Fisher_to_flatten not in ("average", "best"):
+        raise ValueError(
+            f"Fisher_to_flatten must be 'average' or 'best', got {Fisher_to_flatten!r}"
+        )
+
     np.random.seed(seed)
     
     datafile = np.load(datapath + filename)
@@ -974,23 +1009,24 @@ def load_and_process_data(datapath: str, filename: str,
                         f"using highest-weight kept member."
                     )
                 best_model_idx = int(kept[np.argmax(ensemble_weights_full[kept])])
-            Favg = np.average(
-                datafile["F_ensemble"][kept][:, randidx, :, :],
-                weights=ensemble_weights,
-                axis=0,
-            )
+            F_slice = datafile["F_ensemble"][kept][:, randidx, :, :]
+            if Fisher_to_flatten == "average":
+                Favg = np.average(F_slice, weights=ensemble_weights, axis=0)
+            else:
+                k = int(np.argmax(ensemble_weights))
+                Favg = F_slice[k]
         else:
-            Favg = np.average(
-                datafile["F_ensemble"][:, randidx, :, :],
-                weights=ensemble_weights_full,
-                axis=0,
-            )
+            F_slice = datafile["F_ensemble"][:, randidx, :, :]
+            if Fisher_to_flatten == "average":
+                Favg = np.average(F_slice, weights=ensemble_weights_full, axis=0)
+            else:
+                Favg = F_slice[int(np.argmax(ensemble_weights_full))]
     else:
-        Favg = np.average(
-            datafile["F_ensemble"][:, randidx, :, :],
-            weights=ensemble_weights_full,
-            axis=0,
-        )
+        F_slice = datafile["F_ensemble"][:, randidx, :, :]
+        if Fisher_to_flatten == "average":
+            Favg = np.average(F_slice, weights=ensemble_weights_full, axis=0)
+        else:
+            Favg = F_slice[int(np.argmax(ensemble_weights_full))]
 
     X = datafile["theta"][randidx]
 
@@ -1027,6 +1063,7 @@ def load_and_process_data(datapath: str, filename: str,
             jacobian_sparsity=jacobian_sparsity,
             ensemble_indices=ensemble_indices_pass,
             restore_reference_mean=restore_reference_mean,
+            Fisher_to_flatten=Fisher_to_flatten,
         )
         # Merge results
         result.update(ensemble_result)

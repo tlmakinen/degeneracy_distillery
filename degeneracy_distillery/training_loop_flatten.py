@@ -1009,7 +1009,7 @@ def fit_flattening(F_network_ensemble, θs,
                 else:
                     counter += 1
 
-            pbar.set_description('epoch %d loss: %.4f, detFeta: %.4f, val_detFeta: %.4f'
+            pbar.set_description('epoch %d loss: %.4f, det F(η): %.4f, val det F(η): %.4f'
                                   % (j, loss, detFeta, val_detFeta))
         return best_w, (losses, val_losses), (detFetas, val_detFetas)
 

@@ -212,6 +212,37 @@ def replace_floats_nonlinear(s: str) -> Tuple[str, List[float], List[float], Lis
     return replaced, values, linear_values, linear_labels, linear_indexes
 
 
+def _lambdify_ordered_symbols(
+    expr: sympy.Expr, n_params: int, n_b_params: int
+) -> Tuple[List[sympy.Symbol], List[sympy.Symbol]]:
+    """
+    Build (b0..b{n-1}, X1..X{n_params}) symbol lists for lambdify.
+
+    Parser-created symbols must be reused: ``Symbol('b0')`` and
+    ``Symbol('b0', real=True)`` are not equal in SymPy, so passing fresh
+    ``symbols(..., real=True)`` to lambdify leaves ``b*`` unbound in the
+    generated code (globals), which breaks ``jax.jacrev`` (tracers hit SymPy).
+    """
+    by_name = {s.name: s for s in expr.free_symbols}
+    bs: List[sympy.Symbol] = []
+    for i in range(n_b_params):
+        name = f"b{i}"
+        if name not in by_name:
+            raise ValueError(
+                f"Expression missing parameter {name!r} after parse; "
+                f"have symbols {sorted(by_name)}"
+            )
+        bs.append(by_name[name])
+    xs: List[sympy.Symbol] = []
+    for i in range(1, n_params + 1):
+        name = f"X{i}"
+        if name in by_name:
+            xs.append(by_name[name])
+        else:
+            xs.append(sympy.Symbol(name))
+    return bs, xs
+
+
 # =============================================================================
 # MATRIX UTILITIES FOR OPTIMIZATION
 # =============================================================================
@@ -381,10 +412,7 @@ def check_flattening(coordinates: List[str], X: np.ndarray, Fs: np.ndarray,
             check_ops=True, locs=sympy_locs
         )
         
-        param_list = [f"b{i}" for i in range(len(pars))]
-        all_x = ' '.join([f'X{i}' for i in range(1, X.shape[1] + 1)])
-        all_x = list(sympy.symbols(all_x, real=True))
-        all_b = list(sympy.symbols(param_list, real=True))
+        all_b, all_x = _lambdify_ordered_symbols(expr, X.shape[1], len(pars))
         eq_jax = safe_lambdify(all_b + all_x, expr)
         
         def get_jac_row(p):
@@ -857,15 +885,13 @@ def get_component(eq: str,
         check_ops=True, locs=sympy_locs
     )
     
-    param_list = [f"b{i}" for i in range(len(pars))]
     labels = nodes.to_list(basis_functions)
     
-    all_x = ' '.join([f'X{i}' for i in range(1, X.shape[1] + 1)])
-    all_x = list(sympy.symbols(all_x, real=True))
-    all_b = list(sympy.symbols(param_list, real=True))
+    all_b, all_x = _lambdify_ordered_symbols(expr, X.shape[1], len(pars))
     eq_fn = safe_lambdify(all_b + all_x, expr, preferred_modules=[module])
     
-    linear_b = list(sympy.symbols(linear_par_names, real=True))
+    by_name = {s.name: s for s in expr.free_symbols}
+    linear_b = [by_name[nm] for nm in linear_par_names]
     
     param_dict = dict(
         labels=labels,
@@ -2227,6 +2253,7 @@ def postprocess_eqs(coordinates: List[str],
         print(f"Output expressions: {len(pruned_expressions)}")
     
     return pruned_expressions, constants, A_rotation
+
 
 
 if __name__ == "__main__":

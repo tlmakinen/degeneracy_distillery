@@ -74,7 +74,7 @@ import sys
 import os
 import string
 import multiprocessing
-from typing import List, Tuple, Dict, Optional, Callable
+from typing import List, Tuple, Dict, Optional, Callable, Any
 from tqdm import tqdm
 
 from sklearn.model_selection import train_test_split
@@ -284,6 +284,160 @@ def replace_floats(s: str) -> Tuple[str, List[float]]:
 # DESCRIPTION LENGTH AND FLATTENING
 # =============================================================================
 
+def _parse_sr_equation(eq: str) -> Tuple[sympy.Expr, Any, float, List[float]]:
+    """Parse an Operon/ESR equation string (same grammar as :func:`compute_DL`)."""
+    if not ESR_AVAILABLE:
+        raise ImportError(
+            "ESR is required for parsing equations but not installed.\n"
+            "Install it with:\n"
+            "  !git clone https://github.com/DeaglanBartlett/ESR.git\n"
+            "  !pip install -e ESR\n"
+            "See COLAB_SETUP.md for full installation instructions."
+        )
+
+    basis_functions = [
+        ["X", "b"],  # type0
+        ["square", "exp", "inv", "sqrt", "log", "cos", "logAbs"],  # type1
+        ["+", "*", "-", "/", "^"],  # type2
+    ]
+
+    a, b = sympy.symbols('a b', real=True)
+    sympy.init_printing(use_unicode=True)
+    inv = sympy.Lambda(a, 1 / a)
+    square = sympy.Lambda(a, a * a)
+    cube = sympy.Lambda(a, a * a * a)
+    sqrt = sympy.Lambda(a, sympy.sqrt(a))
+    log = sympy.Lambda(a, sympy.log(a))
+    logAbs = sympy.Lambda(a, sympy.log(sympy.Abs(a)))
+    power = sympy.Lambda((a, b), sympy.Pow(a, b))
+
+    sympy_locs = {
+        "inv": inv,
+        "square": square,
+        "cube": cube,
+        "cos": sympy.cos,
+        "^": power,
+        "Abs": sympy.Abs,
+        "sqrt": sqrt,
+        "log": log,
+        "logAbs": logAbs,
+    }
+
+    expr_str, par_values = replace_floats(eq)
+    expr, nodes, complexity = esr.generation.generator.string_to_node(
+        expr_str,
+        basis_functions,
+        evalf=True,
+        allow_eval=True,
+        check_ops=True,
+        locs=sympy_locs,
+    )
+    return expr, nodes, complexity, par_values
+
+
+def max_exp_nesting_depth(expr: sympy.Expr) -> int:
+    """
+    Longest chain exp(exp(...arg)) along any branch of the expression tree.
+
+    Examples
+    --------
+    ``exp(X1)`` → 1; ``exp(exp(X1))`` → 2; ``exp(X1)+exp(X2)`` → 1.
+    """
+    if expr.func == sympy.exp:
+        return 1 + max_exp_nesting_depth(expr.args[0])
+    if not expr.args:
+        return 0
+    return max(max_exp_nesting_depth(a) for a in expr.args)
+
+
+def max_pow_nesting_depth(expr: sympy.Expr) -> int:
+    """
+    Longest chain of nested ``Pow`` nodes along any branch (base or exponent).
+
+    Examples
+    --------
+    ``X1**2`` → 1; ``(X1**2)**3`` → 2; ``X1**(X2**2)`` → 2.
+    """
+    if isinstance(expr, sympy.Pow):
+        base, ex = expr.as_base_exp()
+        return 1 + max(max_pow_nesting_depth(base), max_pow_nesting_depth(ex))
+    if not expr.args:
+        return 0
+    return max(max_pow_nesting_depth(a) for a in expr.args)
+
+
+def expr_has_pow_with_x_in_exponent(expr: sympy.Expr, x_symbols: List[sympy.Symbol]) -> bool:
+    """True if any ``Pow`` (including ``^`` from SR) has an exponent depending on an X."""
+    xs = frozenset(x_symbols)
+    for node in sympy.preorder_traversal(expr):
+        if isinstance(node, sympy.Pow):
+            _base, ex = node.as_base_exp()
+            if ex.free_symbols & xs:
+                return True
+    return False
+
+
+def sr_structure_predicate(
+    n_params: int,
+    *,
+    check_nested_exp: bool = True,
+    max_exp_nesting: Optional[int] = 2,
+    check_nested_pow: bool = False,
+    max_pow_nesting: Optional[int] = 1,
+    forbid_x_in_pow_exponent: bool = True,
+) -> Callable[[str], bool]:
+    """
+    Build a string predicate for :func:`analyze_equations` / ``equation_predicate``.
+
+    Parses each equation with the same ESR grammar as ``compute_DL``. On parse
+    failure the predicate returns False (equation is skipped).
+
+    Parameters
+    ----------
+    n_params
+        Number of parameter dimensions ``X1`` … ``X{n_params}`` in the grammar.
+    check_nested_exp
+        If True, apply the ``max_exp_nesting`` bound using :func:`max_exp_nesting_depth`.
+    max_exp_nesting
+        Reject if nested ``exp`` depth exceeds this value when ``check_nested_exp``
+        is True. ``None`` means no cap (nested ``exp`` never rejected by this rule).
+        Default ``2`` allows ``exp(exp(...))`` but not a third nested ``exp``.
+    check_nested_pow
+        If True, apply the ``max_pow_nesting`` bound using :func:`max_pow_nesting_depth`.
+    max_pow_nesting
+        Reject if nested ``Pow`` depth exceeds this value when ``check_nested_pow``
+        is True. ``None`` means no cap on ``Pow`` nesting. Default ``1`` keeps at
+        most one ``Pow`` along any ``Pow`` chain (e.g. ``X1**2`` ok, ``(X1**2)**3`` out).
+    forbid_x_in_pow_exponent
+        If True, reject ``Pow`` nodes whose exponent depends on any ``Xi``.
+
+    Returns
+    -------
+    Callable[[str], bool]
+        ``True`` means the equation is kept for MDL / Frobenius analysis.
+    """
+    x_syms = list(
+        sympy.symbols(' '.join(f'X{i}' for i in range(1, n_params + 1)), real=True)
+    )
+
+    def predicate(eq: str) -> bool:
+        try:
+            expr, _, _, _ = _parse_sr_equation(eq)
+        except Exception:
+            return False
+        if forbid_x_in_pow_exponent and expr_has_pow_with_x_in_exponent(expr, x_syms):
+            return False
+        if check_nested_exp and max_exp_nesting is not None:
+            if max_exp_nesting_depth(expr) > max_exp_nesting:
+                return False
+        if check_nested_pow and max_pow_nesting is not None:
+            if max_pow_nesting_depth(expr) > max_pow_nesting:
+                return False
+        return True
+
+    return predicate
+
+
 @jax.jit
 def norm(A: jnp.ndarray) -> float:
     """Frobenius norm of a matrix."""
@@ -338,56 +492,14 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
     frobloss : float
         Frobenius norm flattening loss
     """
-    # Check if ESR is available
-    if not ESR_AVAILABLE:
-        raise ImportError(
-            "ESR is required for computing MDL and complexity metrics but not installed.\n"
-            "Install it with:\n"
-            "  !git clone https://github.com/DeaglanBartlett/ESR.git\n"
-            "  !pip install -e ESR\n"
-            "See COLAB_SETUP.md for full installation instructions."
-        )
-    
     basis_functions = [
         ["X", "b"],  # type0
         ["square", "exp", "inv", "sqrt", "log", "cos", "logAbs"],  # type1
-        ["+", "*", "-", "/", "^"]  # type2
+        ["+", "*", "-", "/", "^"],  # type2
     ]
 
-    # Define sympy functions
-    a, b = sympy.symbols('a b', real=True)
-    sympy.init_printing(use_unicode=True)
-    inv = sympy.Lambda(a, 1 / a)
-    square = sympy.Lambda(a, a * a)
-    cube = sympy.Lambda(a, a * a * a)
-    sqrt = sympy.Lambda(a, sympy.sqrt(a))
-    log = sympy.Lambda(a, sympy.log(a))
-    logAbs = sympy.Lambda(a, sympy.log(sympy.Abs(a)))
-    power = sympy.Lambda((a, b), sympy.Pow(a, b))
+    expr, nodes, complexity, pars = _parse_sr_equation(eq)
 
-    sympy_locs = {
-        "inv": inv,
-        "square": square,
-        "cube": cube,
-        "cos": sympy.cos,
-        "^": power,
-        "Abs": sympy.Abs,
-        "sqrt": sqrt,
-        "log": log,
-        "logAbs": logAbs
-    }
-    
-    # Parse equation
-    expr, pars = replace_floats(eq)
-    expr, nodes, complexity = esr.generation.generator.string_to_node(
-        expr, 
-        basis_functions, 
-        evalf=True, 
-        allow_eval=True, 
-        check_ops=True, 
-        locs=sympy_locs
-    )
-    
     param_list = [f"b{i}" for i in range(len(pars))]
     latex_expr = sympy.latex(expr)
     
@@ -653,6 +765,7 @@ def analyze_equations(
     equation_set: str = 'pareto',
     verbose: bool = True,
     length_penalty: float = 2.0,
+    equation_predicate: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[List[str], List[str], Dict[str, List]]:
     """
     Analyze symbolic regression results and rank equations.
@@ -683,6 +796,12 @@ def analyze_equations(
         Directory containing SR results
     max_complexity_thresh : int
         Maximum complexity to consider
+    equation_predicate : callable, optional
+        If set, ``equation_predicate(eq_str)`` must return True for an equation
+        to be scored with ``compute_DL``. Use e.g. :func:`sr_structure_predicate`
+        to drop variable–variable powers and optionally nested ``exp`` / ``Pow``.
+        Parse errors
+        should be handled inside the predicate (return False to skip).
     equation_set : str
         Which equation set to use for analysis. Options:
         - 'pareto': Use only equations from pareto.csv (default)
@@ -768,6 +887,16 @@ def analyze_equations(
 
         complexity = complexity[mse_mask]
         eqs = [str(eq) for eq in np.array(data['model'])[mse_mask]]
+
+        if equation_predicate is not None:
+            keep = np.array([bool(equation_predicate(eq)) for eq in eqs], dtype=bool)
+            if verbose:
+                print(
+                    f"{keep.sum()} / {len(eqs)} equations pass equation_predicate "
+                    f"(skipped {len(eqs) - keep.sum()})"
+                )
+            complexity = complexity[keep]
+            eqs = [eq for eq, k in zip(eqs, keep) if k]
 
         # Compute metrics for all equations
         all_DL = np.ones(len(eqs)) * np.inf
@@ -944,6 +1073,9 @@ def fit_and_analyze_sr(
         - equation_set: str = 'pareto' ('pareto', 'full_population', or 'both')
         - max_complexity_thresh: int = 14
         - length_penalty: float = 2.0 (``compute_DL`` parameter codelength weight)
+        - equation_predicate: Optional[Callable[[str], bool]] = None
+          (e.g. ``sr_structure_predicate(n_params, max_exp_nesting=1)`` or
+          ``check_nested_pow=True, max_pow_nesting=1`` to cap ``Pow`` nesting only)
 
     Returns
     -------
@@ -1067,7 +1199,12 @@ def fit_and_analyze_sr(
         n_params = len(components_to_fit)
     
     # Separate kwargs for fitting and analysis
-    _analysis_only = frozenset({'equation_set', 'max_complexity_thresh', 'length_penalty'})
+    _analysis_only = frozenset({
+        'equation_set',
+        'max_complexity_thresh',
+        'length_penalty',
+        'equation_predicate',
+    })
     fit_kwargs = {
         k: v for k, v in sr_kwargs.items() if k not in _analysis_only
     }
@@ -1076,6 +1213,7 @@ def fit_and_analyze_sr(
     equation_set = sr_kwargs.get('equation_set', 'pareto')
     max_complexity_thresh = sr_kwargs.get('max_complexity_thresh', 14)
     length_penalty = float(sr_kwargs.get('length_penalty', 2.0))
+    equation_predicate = sr_kwargs.get('equation_predicate', None)
     verbose_sr = bool(sr_kwargs.get('verbose', True))
 
     # Fit SR models on training set
@@ -1093,6 +1231,7 @@ def fit_and_analyze_sr(
         equation_set=equation_set,
         verbose=verbose_sr,
         length_penalty=length_penalty,
+        equation_predicate=equation_predicate,
     )
     
     # Package split data for return

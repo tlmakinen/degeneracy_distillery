@@ -241,13 +241,13 @@ class custom_MLP(nn.Module):
     features: Sequence[int]
     max_x: jnp.array
     min_x: jnp.array
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
 
     @nn.compact
     def __call__(self, x):
-        # Adjust input by min-max scaling.
-        x = (x - self.min_x) / (self.max_x - self.min_x)
-        x += 1.0
+        if self.minmax_scale_inputs:
+            x = (x - self.min_x) / (self.max_x - self.min_x)
 
         # Small dense layers for coefficients.
         x = nn.Dense(self.features[-1])(x)
@@ -288,14 +288,14 @@ class WhitenedMLP(nn.Module):
     max_x: jnp.array
     min_x: jnp.array
     W_inv: jnp.array  # Inverse whitening matrix F_mean^{1/2}
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True  # Can disable for inspection
 
     @nn.compact
     def __call__(self, x):
-        # Adjust input by min-max scaling.
-        x = (x - self.min_x) / (self.max_x - self.min_x)
-        x += 1.0
+        if self.minmax_scale_inputs:
+            x = (x - self.min_x) / (self.max_x - self.min_x)
 
         # Small dense layers for coefficients.
         x = nn.Dense(self.features[-1])(x)
@@ -347,6 +347,7 @@ class ForwardBackwardMLP(nn.Module):
     features: Sequence[int]
     max_x: jnp.ndarray
     min_x: jnp.ndarray
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
 
     def setup(self):
@@ -354,6 +355,7 @@ class ForwardBackwardMLP(nn.Module):
             features=self.features,
             max_x=self.max_x,
             min_x=self.min_x,
+            minmax_scale_inputs=self.minmax_scale_inputs,
             act=self.act,
         )
         self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
@@ -377,6 +379,7 @@ class WhitenedForwardBackwardMLP(nn.Module):
     max_x: jnp.ndarray
     min_x: jnp.ndarray
     W_inv: jnp.ndarray
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True
 
@@ -386,6 +389,7 @@ class WhitenedForwardBackwardMLP(nn.Module):
             max_x=self.max_x,
             min_x=self.min_x,
             W_inv=self.W_inv,
+            minmax_scale_inputs=self.minmax_scale_inputs,
             act=self.act,
             apply_inverse_whitening=self.apply_inverse_whitening,
         )
@@ -413,6 +417,7 @@ class RealNVPWrapper(nn.Module):
     input_dim: int
     max_x: jnp.array
     min_x: jnp.array
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
 
     def setup(self):
@@ -424,20 +429,19 @@ class RealNVPWrapper(nn.Module):
         )
 
     def __call__(self, x):
-        # Adjust input by min-max scaling
-        x = (x - self.min_x) / (self.max_x - self.min_x)
-        x += 1.0
-        
+        if self.minmax_scale_inputs:
+            x = (x - self.min_x) / (self.max_x - self.min_x)
+
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
-        
+
         # Return only the output for flattening
         return y
-    
+
     def inverse(self, y):
         y = self.real_nvp.inverse(y)
-        y -= 1.0
-        y = (y * (self.max_x - self.min_x)) + self.min_x
+        if self.minmax_scale_inputs:
+            y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
 
@@ -462,6 +466,7 @@ class WhitenedRealNVP(nn.Module):
     max_x: jnp.array
     min_x: jnp.array
     W_inv: jnp.array  # Inverse whitening matrix F_mean^{1/2}
+    minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True  # Can disable for inspection
 
@@ -474,10 +479,9 @@ class WhitenedRealNVP(nn.Module):
         )
 
     def __call__(self, x):
-        # Adjust input by min-max scaling
-        x = (x - self.min_x) / (self.max_x - self.min_x)
-        x += 1.0
-        
+        if self.minmax_scale_inputs:
+            x = (x - self.min_x) / (self.max_x - self.min_x)
+
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
         
@@ -500,10 +504,9 @@ class WhitenedRealNVP(nn.Module):
         
         # Reverse RealNVP transformation
         y = self.real_nvp.inverse(y)
-        
-        # Reverse min-max scaling
-        y -= 1.0
-        y = (y * (self.max_x - self.min_x)) + self.min_x
+
+        if self.minmax_scale_inputs:
+            y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
 # ---------------------- UTILITY FUNCTIONS -----------------------
@@ -553,6 +556,7 @@ def fit_flattening(F_network_ensemble, θs,
                    norm_factor: Any = None,
                    norm_method: str = "median_max_eig",
                    use_whitening: bool = True,
+                   minmax_scale_inputs: bool = True,
                    nn_inv: bool = False,
                    forward_backward_mlp: bool = False,
                    forward_backward_invertibility_weight: float = 1.0,
@@ -623,6 +627,10 @@ def fit_flattening(F_network_ensemble, θs,
                        the Fishers through the Jacobian transformation (no need to pre-whiten 
                        training data). The network effectively learns to flatten 
                        F_whitened = W @ F @ W.
+        minmax_scale_inputs: If True (default), map each θ dimension linearly from
+            ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]`` before the network.
+            If False, pass θ through unchanged. RealNVP ``inverse`` applies the inverse map only
+            when this is True.
         nn_inv: If True, use RealNVP (invertible normalizing flow) instead of MLP.
                 The RealNVP is initialized with hidden_dims=hidden_size and 
                 num_layers=n_layers. Can be combined with use_whitening=True for 
@@ -757,6 +765,7 @@ def fit_flattening(F_network_ensemble, θs,
         stable_sin_swish if flattener_activation == "sin_swish" else nn.softplus
     )
     print(f"Flattener activation: {flattener_activation}")
+    print(f"Min-max input scaling: {minmax_scale_inputs}")
 
     _feat = [hidden_size] * n_layers + [n_params]
 
@@ -768,6 +777,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             W_inv=W_inv,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True,
         )
@@ -777,6 +787,7 @@ def fit_flattening(F_network_ensemble, θs,
             features=_feat,
             max_x=max_x,
             min_x=min_x,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act,
         )
     elif nn_inv and use_whitening:
@@ -788,6 +799,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             W_inv=W_inv,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True
         )
@@ -799,6 +811,7 @@ def fit_flattening(F_network_ensemble, θs,
             input_dim=n_params,
             max_x=max_x,
             min_x=min_x,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act
         )
     elif use_whitening:
@@ -808,6 +821,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             W_inv=W_inv,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True
         )
@@ -817,6 +831,7 @@ def fit_flattening(F_network_ensemble, θs,
             features=_feat,
             max_x=max_x,
             min_x=min_x,
+            minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act
         )
 
@@ -1297,6 +1312,11 @@ if __name__ == '__main__':
         help="Weight on ‖θ - reverse(forward(θ))‖² when --forward-backward-mlp is set.",
     )
     parser.add_argument(
+        "--no-minmax-input-scaling",
+        action="store_true",
+        help="Pass θ into the flattener without per-dimension min–max to [0,1] (see fit_flattening).",
+    )
+    parser.add_argument(
         "--fisher-to-flatten",
         type=str,
         default="average",
@@ -1354,6 +1374,7 @@ if __name__ == '__main__':
                    output_prefix=args.output,
                    SCALE_THETA=False,
                    use_whitening=not args.no_whitening,
+                   minmax_scale_inputs=not args.no_minmax_input_scaling,
                    nn_inv=args.nn_inv,
                    forward_backward_mlp=args.forward_backward_mlp,
                    forward_backward_invertibility_weight=(

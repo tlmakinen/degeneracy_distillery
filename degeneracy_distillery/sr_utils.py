@@ -366,15 +366,102 @@ def max_pow_nesting_depth(expr: sympy.Expr) -> int:
     return max(max_pow_nesting_depth(a) for a in expr.args)
 
 
-def expr_has_pow_with_x_in_exponent(expr: sympy.Expr, x_symbols: List[sympy.Symbol]) -> bool:
-    """True if any ``Pow`` (including ``^`` from SR) has an exponent depending on an X."""
-    xs = frozenset(x_symbols)
+def _is_sr_coordinate_symbol(s: sympy.Basic) -> bool:
+    """True for symbols named ``X1``, ``X2``, … as produced by the SR/ESR grammar."""
+    if not isinstance(s, sympy.Symbol):
+        return False
+    name = s.name
+    return len(name) >= 2 and name.startswith("X") and name[1:].isdigit()
+
+
+def _expr_depends_on_sr_coordinate(e: sympy.Expr) -> bool:
+    return any(_is_sr_coordinate_symbol(s) for s in e.free_symbols)
+
+
+def _mul_remove_one_factor(term: sympy.Expr, factor: sympy.Expr) -> sympy.Expr:
+    """Remove one instance of ``factor`` from a product (``term`` is ``expand_mul``'d)."""
+    if isinstance(term, sympy.Mul):
+        args = list(term.args)
+    else:
+        if term == factor:
+            return sympy.S.One
+        return term
+    removed = False
+    kept: List[sympy.Expr] = []
+    for a in args:
+        if not removed and a == factor:
+            removed = True
+            continue
+        kept.append(a)
+    if not removed:
+        return term
+    if not kept:
+        return sympy.S.One
+    if len(kept) == 1:
+        return kept[0]
+    return sympy.Mul(*kept)
+
+
+def _term_is_exp_log_form_of_x_power(term: sympy.Expr) -> bool:
+    """
+    True if ``term`` is (after ``expand_mul``) a product ``c * log(u)`` encoding
+    ``u**c`` via ``exp(term)``, with coordinate dependence in both ``u`` and ``c``.
+
+    Rejects only decompositions where the cofactor of a single top-level ``log``
+    has no ``log`` (so ``exp(X1*log(X2)*log(X3))`` is not treated as a plain
+    two-variable power).
+    """
+    term = sympy.expand_mul(term)
+    factors = list(term.args) if isinstance(term, sympy.Mul) else [term]
+    for fac in factors:
+        if not isinstance(fac, sympy.log):
+            continue
+        u = fac.args[0]
+        c = sympy.expand_mul(_mul_remove_one_factor(term, fac))
+        if c.has(sympy.log):
+            continue
+        if _expr_depends_on_sr_coordinate(u) and _expr_depends_on_sr_coordinate(c):
+            return True
+    return False
+
+
+def _expr_has_exp_log_x_power_form(expr: sympy.Expr) -> bool:
+    """Detect ``exp(… + …)`` shapes equivalent to ``Pow`` with ``Xi`` in exponent."""
+    for node in sympy.preorder_traversal(expr):
+        if node.func != sympy.exp:
+            continue
+        arg = sympy.expand_mul(sympy.expand(node.args[0]))
+        terms = sympy.Add.make_args(arg) if isinstance(arg, sympy.Add) else (arg,)
+        for term in terms:
+            if _term_is_exp_log_form_of_x_power(term):
+                return True
+    return False
+
+
+def expr_has_pow_with_x_in_exponent(expr: sympy.Expr) -> bool:
+    """
+    True if the expression encodes a coordinate-dependent exponent on a
+    coordinate-dependent base (forbidden ``Xi**Xj``-style structure).
+
+    This covers:
+
+    - Any explicit ``Pow`` (including ``^`` from SR) whose exponent depends on
+      some ``Xi`` (symbol names ``X`` + digits).
+    - The common SR encoding ``exp(c * log(u))`` (and sums thereof) when both
+      ``u`` and ``c`` depend on coordinates — e.g. ``(a*X2)**(b*X1)`` as
+      ``exp((b*X1)*log(a*X2))``, which has no ``Pow`` node.
+
+    Matching is by **symbol name** (``X`` + digits), not set intersection with
+    separately constructed ``Symbol`` objects, so this still works when
+    ``n_params`` passed to :func:`sr_structure_predicate` is wrong or when SymPy
+    uses distinct instances for the same ``X2`` label.
+    """
     for node in sympy.preorder_traversal(expr):
         if isinstance(node, sympy.Pow):
             _base, ex = node.as_base_exp()
-            if ex.free_symbols & xs:
+            if any(_is_sr_coordinate_symbol(t) for t in ex.free_symbols):
                 return True
-    return False
+    return _expr_has_exp_log_x_power_form(expr)
 
 
 def sr_structure_predicate(
@@ -395,7 +482,9 @@ def sr_structure_predicate(
     Parameters
     ----------
     n_params
-        Number of parameter dimensions ``X1`` … ``X{n_params}`` in the grammar.
+        Number of parameter dimensions (kept for API consistency; the
+        variable-in-exponent rule uses symbol **names** ``X1``, ``X2``, …, not
+        this count, so a mismatched ``n_params`` no longer disables that check).
     check_nested_exp
         If True, apply the ``max_exp_nesting`` bound using :func:`max_exp_nesting_depth`.
     max_exp_nesting
@@ -416,16 +505,12 @@ def sr_structure_predicate(
     Callable[[str], bool]
         ``True`` means the equation is kept for MDL / Frobenius analysis.
     """
-    x_syms = list(
-        sympy.symbols(' '.join(f'X{i}' for i in range(1, n_params + 1)), real=True)
-    )
-
     def predicate(eq: str) -> bool:
         try:
             expr, _, _, _ = _parse_sr_equation(eq)
         except Exception:
             return False
-        if forbid_x_in_pow_exponent and expr_has_pow_with_x_in_exponent(expr, x_syms):
+        if forbid_x_in_pow_exponent and expr_has_pow_with_x_in_exponent(expr):
             return False
         if check_nested_exp and max_exp_nesting is not None:
             if max_exp_nesting_depth(expr) > max_exp_nesting:

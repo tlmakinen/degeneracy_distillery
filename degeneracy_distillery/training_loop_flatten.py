@@ -248,6 +248,7 @@ class custom_MLP(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
+            x += 1.0
 
         # Small dense layers for coefficients.
         x = nn.Dense(self.features[-1])(x)
@@ -296,6 +297,7 @@ class WhitenedMLP(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
+            x += 1.0
 
         # Small dense layers for coefficients.
         x = nn.Dense(self.features[-1])(x)
@@ -431,6 +433,7 @@ class RealNVPWrapper(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
+            x += 1.0
 
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
@@ -441,6 +444,7 @@ class RealNVPWrapper(nn.Module):
     def inverse(self, y):
         y = self.real_nvp.inverse(y)
         if self.minmax_scale_inputs:
+            y -= 1.0
             y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
@@ -481,6 +485,7 @@ class WhitenedRealNVP(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
+            x += 1.0
 
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
@@ -506,6 +511,7 @@ class WhitenedRealNVP(nn.Module):
         y = self.real_nvp.inverse(y)
 
         if self.minmax_scale_inputs:
+            y -= 1.0
             y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
@@ -627,10 +633,10 @@ def fit_flattening(F_network_ensemble, θs,
                        the Fishers through the Jacobian transformation (no need to pre-whiten 
                        training data). The network effectively learns to flatten 
                        F_whitened = W @ F @ W.
-        minmax_scale_inputs: If True (default), map each θ dimension linearly from
-            ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]`` before the network.
-            If False, pass θ through unchanged. RealNVP ``inverse`` applies the inverse map only
-            when this is True.
+        minmax_scale_inputs: If True (default), map each θ dimension from
+            ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]``, then add 1 so the
+            network sees values in ``[1, 2]`` on that box. If False, pass θ through unchanged.
+            RealNVP ``inverse`` reverses the shift and scaling only when this is True.
         nn_inv: If True, use RealNVP (invertible normalizing flow) instead of MLP.
                 The RealNVP is initialized with hidden_dims=hidden_size and 
                 num_layers=n_layers. Can be combined with use_whitening=True for 
@@ -1314,7 +1320,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--no-minmax-input-scaling",
         action="store_true",
-        help="Pass θ into the flattener without per-dimension min–max to [0,1] (see fit_flattening).",
+        help="Pass θ into the flattener without min–max (+1) preprocessing (see fit_flattening).",
     )
     parser.add_argument(
         "--fisher-to-flatten",

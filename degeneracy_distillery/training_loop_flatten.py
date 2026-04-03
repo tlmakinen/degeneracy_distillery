@@ -575,7 +575,8 @@ def fit_flattening(F_network_ensemble, θs,
                    grad_clip_norm: Optional[float] = None,
                    lr_schedule_phase1: Optional[Any] = None,
                    lr_schedule_phase2: Optional[Any] = None,
-                   lr_schedule_finetune: Optional[Any] = None):
+                   lr_schedule_finetune: Optional[Any] = None,
+                   update_pbar_every: int = 10):
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
@@ -670,6 +671,8 @@ def fit_flattening(F_network_ensemble, θs,
             (legacy behavior).
         lr_schedule_finetune: Optional schedule for ensemble fine-tuning. None means constant lr_finetune
             (legacy behavior).
+        update_pbar_every: Refresh the tqdm bar description (and tqdm ``miniters``) at most every this
+            many epochs; default 10 reduces log/Colab traffic. Use 1 to update every epoch.
     
     Returns:
         w: Trained network parameters
@@ -941,6 +944,7 @@ def fit_flattening(F_network_ensemble, θs,
     F_fishnets = F_fishnets_shuffled.reshape(-1, batch_size, n_params, n_params)
 
     # ---------------------- TRAINING LOOP DEFINITION -----------------------
+    _pbar_stride = max(1, int(update_pbar_every))
     def training_loop(key, w, theta_true, F_fishnets,
                       val_size: int = 5,
                       lr = 1e-5,
@@ -996,7 +1000,12 @@ def fit_flattening(F_network_ensemble, θs,
         best_detFeta = jnp.inf
         counter = 0
 
-        pbar = tqdm(range(epochs), leave=True, position=0)
+        pbar = tqdm(
+            range(epochs),
+            leave=True,
+            position=0,
+            miniters=_pbar_stride,
+        )
         for j in pbar:
             if (counter > patience) and (j + 1 > min_epochs):
                 print("\n patience reached. stopping training.")
@@ -1004,6 +1013,10 @@ def fit_flattening(F_network_ensemble, θs,
                 detFetas = detFetas[:j]
                 val_losses = val_losses[:j]
                 val_detFetas = val_detFetas[:j]
+                pbar.set_description(
+                    "epoch %d loss: %.4f, det F(η): %.4f, val det F(η): %.4f"
+                    % (j, loss, detFeta, val_detFeta)
+                )
                 break
             else:
                 key, rng = jr.split(key)
@@ -1030,8 +1043,11 @@ def fit_flattening(F_network_ensemble, θs,
                 else:
                     counter += 1
 
-            pbar.set_description('epoch %d loss: %.4f, det F(η): %.4f, val det F(η): %.4f'
-                                  % (j, loss, detFeta, val_detFeta))
+            if (j + 1) % _pbar_stride == 0 or j == epochs - 1:
+                pbar.set_description(
+                    "epoch %d loss: %.4f, det F(η): %.4f, val det F(η): %.4f"
+                    % (j, loss, detFeta, val_detFeta)
+                )
         return best_w, (losses, val_losses), (detFetas, val_detFetas)
 
     # ---------------------- TRAINING PHASE 1: INITIAL TRAINING -----------------------

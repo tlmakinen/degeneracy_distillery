@@ -55,7 +55,8 @@ def train_fishnets(theta,
                    acts: list = None,
                    scaler_type: str = 'minmax',
                    embedding_net: nn.Module = None,
-                   outdir: str = "fishnets-log"):
+                   outdir: str = "fishnets-log",
+                   update_pbar_every: int = 10):
     """
     Trains an ensemble of fishnet networks.
 
@@ -82,6 +83,8 @@ def train_fishnets(theta,
       embedding_net    : Optional nn.Module to use as the first layer in the ensemble models. If provided, it will be prepended to the Sequential model.
       outdir           : Directory where outputs will be saved. If it does not exist, it is created;
                          if it exists, it is emptied before saving.
+      update_pbar_every : Refresh the tqdm bar description (and tqdm ``miniters``) every this many epochs;
+                         default 10 reduces Colab/log noise. Use 1 for every epoch.
     
     Returns:
       ws             : A list of trained parameters for each ensemble network.
@@ -238,6 +241,7 @@ def train_fishnets(theta,
     train_batch = train_batch_size
     train_epochs_val = train_epochs
     train_min_epochs_val = train_min_epochs
+    _pbar_stride = max(1, int(update_pbar_every))
 
     def training_loop(key, model, w, data, theta, data_val, theta_val,
                       patience=patience, epochs=train_epochs_val, min_epochs=train_min_epochs_val):
@@ -278,7 +282,13 @@ def train_fishnets(theta,
         patience_counter = 0
         best_loss = jnp.inf
         best_w = w
-        pbar = tqdm(range(epochs), desc="Training Epochs", leave=True, position=0)
+        pbar = tqdm(
+            range(epochs),
+            desc="Training Epochs",
+            leave=True,
+            position=0,
+            miniters=_pbar_stride,
+        )
 
         for j in pbar:
             key, rng = jr.split(key)
@@ -294,7 +304,6 @@ def train_fishnets(theta,
             # Evaluate validation loss on provided data_val and theta_val 
             val_loss, _ = loss_grad_fn(w, data_val, theta_val)
             val_losses = val_losses.at[j].set(val_loss)
-            pbar.set_description('Epoch %d loss: %.5f ; val_loss: %.5f' % (j, loss_val, val_loss))
 
             counter += 1
             if val_loss < best_loss:
@@ -304,7 +313,12 @@ def train_fishnets(theta,
             else:
                 patience_counter += 1
 
-            if (patience_counter - min_epochs > patience) and (j + 1 > min_epochs):
+            will_stop = (patience_counter - min_epochs > patience) and (j + 1 > min_epochs)
+            if (j + 1) % _pbar_stride == 0 or j == epochs - 1 or will_stop:
+                pbar.set_description(
+                    "Epoch %d loss: %.5f ; val_loss: %.5f" % (j, loss_val, val_loss)
+                )
+            if will_stop:
                 print("\nEarly stopping triggered at epoch %d" % j)
                 break
 

@@ -337,7 +337,7 @@ class ReversePathMLP(nn.Module):
             z = nn.Dense(feat)(z)
             x = self.act(x + z)
         x = nn.Dense(self.features[-1])(x)
-        return x
+        return x - 1.0 # include inductive bias
 
 
 class ForwardBackwardMLP(nn.Module):
@@ -366,7 +366,7 @@ class ForwardBackwardMLP(nn.Module):
         return self.forward_net(x)
 
     def inverse_path(self, y):
-        return self.reverse_net(y)
+        return ((self.reverse_net(y) - 1.0) / (self.max_x - self.min_x)) + self.min_x
 
     def init_forward_and_reverse(self, x):
         """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""

@@ -401,7 +401,8 @@ class WhitenedForwardBackwardMLP(nn.Module):
         return self.forward_net(x)
 
     def inverse_path(self, y):
-        return self.reverse_net(y)
+        # y is η = W_inv @ η_raw (same as forward output); reverse_net is trained on η, not η_raw.
+        return ((self.reverse_net(y) - 1.0) / (self.max_x - self.min_x)) + self.min_x
 
     def init_forward_and_reverse(self, x):
         """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""

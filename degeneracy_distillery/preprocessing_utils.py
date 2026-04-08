@@ -480,7 +480,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
                   apply_varimax: bool = False, varimax_method: str = "varimax",
                   jacobian_sparsity: str = "norm",
                   tol: float = 1e-5,
-                  restore_reference_mean: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                  restore_reference_mean: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Rotate coordinates to align with reference and apply PCA-based rotation.
     
@@ -675,7 +675,7 @@ def process_ensemble_rotation(datafile: Dict[str, Any],
                                jacobian_sparsity: str = "norm",
                                verbose: bool = True,
                                ensemble_indices: Optional[np.ndarray] = None,
-                               restore_reference_mean: bool = False,
+                               restore_reference_mean: bool = True,
                                Fisher_to_flatten: Literal["average", "best"] = "average",
                                ) -> Dict[str, Any]:
     """
@@ -898,7 +898,7 @@ def load_and_process_data(datapath: str, filename: str,
                           varimax_method: str = "varimax",
                           jacobian_sparsity: str = "norm",
                           verbose: bool = True,
-                          restore_reference_mean: bool = False,
+                          restore_reference_mean: bool = True,
                           Fisher_to_flatten: Literal["average", "best"] = "average",
                           ) -> Dict[str, Any]:
     """

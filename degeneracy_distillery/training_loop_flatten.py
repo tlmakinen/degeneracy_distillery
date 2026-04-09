@@ -235,6 +235,29 @@ def compute_robust_norm_factor(F_ensemble, method: str = "median_max_eig"):
     return float(norm_factor)
 
 
+# ---------------------- INPUT AUGMENTATION -----------------------
+def _log_augment(x):
+    """Augment a single sample with log features computed from *raw* inputs.
+
+    Returns a vector of extra features:
+      - log(|x_i| + ε)  for each dimension i
+      - log(|x_i + x_j| + ε)  for each unique pair i < j
+
+    These give the network direct access to logarithmic combinations
+    (e.g. log(m₁m₂), log(m₁+m₂)) without having to learn them from
+    composed nonlinearities.
+    """
+    _eps = 1e-10
+    n = x.shape[-1]
+    log_x = jnp.log(jnp.abs(x) + _eps)
+    parts = [log_x]
+    if n > 1:
+        idx_i, idx_j = jnp.triu_indices(n, k=1)
+        pairwise_sums = x[idx_i] + x[idx_j]
+        parts.append(jnp.log(jnp.abs(pairwise_sums) + _eps))
+    return jnp.concatenate(parts)
+
+
 # ---------------------- CUSTOM NETWORK DEFINITIONS -----------------------
 class custom_MLP(nn.Module):
     """MLP that outputs in whitened space (no inverse transform applied)."""
@@ -242,18 +265,23 @@ class custom_MLP(nn.Module):
     max_x: jnp.array
     min_x: jnp.array
     minmax_scale_inputs: bool = True
+    augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
 
     @nn.compact
     def __call__(self, x):
+        if self.augment_log_inputs:
+            log_feats = _log_augment(x)
+
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
             x += 1.0
 
-        # Small dense layers for coefficients.
+        if self.augment_log_inputs:
+            x = jnp.concatenate([x, log_feats])
+
         x = nn.Dense(self.features[-1])(x)
 
-        
         x = self.act(nn.Dense(self.features[0])(x))
         for feat in self.features[1:-1]:
             z = self.act(nn.Dense(feat)(x))
@@ -290,18 +318,24 @@ class WhitenedMLP(nn.Module):
     min_x: jnp.array
     W_inv: jnp.array  # Inverse whitening matrix F_mean^{1/2}
     minmax_scale_inputs: bool = True
+    augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True  # Can disable for inspection
 
     @nn.compact
     def __call__(self, x):
+        if self.augment_log_inputs:
+            log_feats = _log_augment(x)
+
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
             x += 1.0
 
-        # Small dense layers for coefficients.
+        if self.augment_log_inputs:
+            x = jnp.concatenate([x, log_feats])
+
         x = nn.Dense(self.features[-1])(x)
-        
+
         x = self.act(nn.Dense(self.features[0])(x))
         for feat in self.features[1:-1]:
             z = self.act(nn.Dense(feat)(x))
@@ -309,12 +343,10 @@ class WhitenedMLP(nn.Module):
             x = self.act(x + z)
 
         x = nn.Dense(self.features[-1])(x)
-        
-        # Apply inverse whitening transform (fixed, non-trainable)
-        # η_final = F_mean^{1/2} @ η_raw
+
         if self.apply_inverse_whitening:
             x = self.W_inv @ x
-        
+
         return x
 
 
@@ -350,6 +382,7 @@ class ForwardBackwardMLP(nn.Module):
     max_x: jnp.ndarray
     min_x: jnp.ndarray
     minmax_scale_inputs: bool = True
+    augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
 
     def setup(self):
@@ -358,6 +391,7 @@ class ForwardBackwardMLP(nn.Module):
             max_x=self.max_x,
             min_x=self.min_x,
             minmax_scale_inputs=self.minmax_scale_inputs,
+            augment_log_inputs=self.augment_log_inputs,
             act=self.act,
         )
         self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
@@ -382,6 +416,7 @@ class WhitenedForwardBackwardMLP(nn.Module):
     min_x: jnp.ndarray
     W_inv: jnp.ndarray
     minmax_scale_inputs: bool = True
+    augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True
 
@@ -392,6 +427,7 @@ class WhitenedForwardBackwardMLP(nn.Module):
             min_x=self.min_x,
             W_inv=self.W_inv,
             minmax_scale_inputs=self.minmax_scale_inputs,
+            augment_log_inputs=self.augment_log_inputs,
             act=self.act,
             apply_inverse_whitening=self.apply_inverse_whitening,
         )
@@ -564,10 +600,12 @@ def fit_flattening(F_network_ensemble, θs,
                    norm_method: str = "median_max_eig",
                    use_whitening: bool = True,
                    minmax_scale_inputs: bool = True,
+                   augment_log_inputs: bool = False,
                    nn_inv: bool = False,
                    forward_backward_mlp: bool = False,
                    forward_backward_invertibility_weight: float = 1.0,
                    flattener_activation: Literal["sin_swish", "softplus"] = "sin_swish",
+                   loss_type: Literal["log_frob", "frob", "squared_frob"] = "log_frob",
                    do_plot: bool = True,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
@@ -639,6 +677,15 @@ def fit_flattening(F_network_ensemble, θs,
             ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]``, then add 1 so the
             network sees values in ``[1, 2]`` on that box. If False, pass θ through unchanged.
             RealNVP ``inverse`` reverses the shift and scaling only when this is True.
+        augment_log_inputs: If True, concatenate logarithmic features to the
+            (optionally scaled) inputs before the first dense layer.  Appended
+            features are ``log(|θ_i| + ε)`` for each dimension and
+            ``log(|θ_i + θ_j| + ε)`` for every unique pair *i < j*, computed from
+            the **raw** (unscaled) parameters.  This gives the network direct
+            access to log-space structure (e.g. ``log(m₁m₂)``, ``log(m₁+m₂)``)
+            without having to learn it from composed activations.  Only supported
+            for MLP-based architectures; ignored (with a warning) when
+            ``nn_inv=True``.
         nn_inv: If True, use RealNVP (invertible normalizing flow) instead of MLP.
                 The RealNVP is initialized with hidden_dims=hidden_size and 
                 num_layers=n_layers. Can be combined with use_whitening=True for 
@@ -652,6 +699,13 @@ def fit_flattening(F_network_ensemble, θs,
         flattener_activation: Nonlinearity for all flattener hidden units: ``sin_swish``
             (default, ``sin(swish(x))``) or ``softplus`` (``flax.linen.nn.softplus``), including
             RealNVP coupling nets when ``nn_inv`` is True.
+        loss_type: Form of the per-sample flattening objective:
+            ``"log_frob"`` (default) — reweighted ``‖Q−I‖_F + ‖Q⁻¹−I‖_F``, then outer
+            ``log(·)``. Legacy behaviour.
+            ``"frob"`` — same reweighted Frobenius + inverse term, **without** the outer log.
+            Gives stronger gradients near the optimum.
+            ``"squared_frob"`` — plain ``‖Q−I‖_F²`` with no reweighting, inverse term, or
+            log. Simplest loss; most aggressive gradient signal near the optimum.
         do_plot: Whether to generate coordinate visualization plots
         loss_reweight_lambda: λ in the per-sample reweighting r = λ·loss / (loss + exp(-α·loss));
             larger values change how aggressively large residuals are up-weighted. Default matches
@@ -771,11 +825,24 @@ def fit_flattening(F_network_ensemble, θs,
             "flattener_activation must be 'sin_swish' or 'softplus', "
             f"got {flattener_activation!r}"
         )
+    if loss_type not in ("log_frob", "frob", "squared_frob"):
+        raise ValueError(
+            "loss_type must be 'log_frob', 'frob', or 'squared_frob', "
+            f"got {loss_type!r}"
+        )
     _flattener_act = (
         stable_sin_swish if flattener_activation == "sin_swish" else nn.softplus
     )
     print(f"Flattener activation: {flattener_activation}")
+    print(f"Loss type: {loss_type}")
     print(f"Min-max input scaling: {minmax_scale_inputs}")
+    if augment_log_inputs:
+        if nn_inv:
+            print("WARNING: augment_log_inputs is not supported with RealNVP (nn_inv); ignoring.")
+            augment_log_inputs = False
+        else:
+            _n_log = n_params + n_params * (n_params - 1) // 2
+            print(f"Log input augmentation: ON (+{_n_log} features)")
 
     _feat = [hidden_size] * n_layers + [n_params]
 
@@ -788,6 +855,7 @@ def fit_flattening(F_network_ensemble, θs,
             min_x=min_x,
             W_inv=W_inv,
             minmax_scale_inputs=minmax_scale_inputs,
+            augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True,
         )
@@ -798,6 +866,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             minmax_scale_inputs=minmax_scale_inputs,
+            augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
         )
     elif nn_inv and use_whitening:
@@ -832,6 +901,7 @@ def fit_flattening(F_network_ensemble, θs,
             min_x=min_x,
             W_inv=W_inv,
             minmax_scale_inputs=minmax_scale_inputs,
+            augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True
         )
@@ -842,6 +912,7 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             minmax_scale_inputs=minmax_scale_inputs,
+            augment_log_inputs=augment_log_inputs,
             act=_flattener_act
         )
 
@@ -860,6 +931,7 @@ def fit_flattening(F_network_ensemble, θs,
     _q_jitter = q_inv_jitter
     _inv_pen_w = forward_backward_invertibility_weight
     _l1_alpha = l1_alpha
+    _loss_type = loss_type
 
 
     if forward_backward_mlp:
@@ -878,23 +950,30 @@ def fit_flattening(F_network_ensemble, θs,
                 Jeta_inv = jnp.linalg.pinv(J_eta)
 
                 Q = Jeta_inv.T @ F @ Jeta_inv
-
                 eye = jnp.eye(n_params)
-                Q_reg = Q + _q_jitter * eye
-                inv_term = jnp.linalg.inv(Q_reg)
-                loss = norm(Q - eye) + norm(inv_term - eye)
-                loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
-                r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
-                loss *= r
-                loss = loss + _inv_pen_w * inv_pen
-
-                log_loss = jnp.log(loss + _log_eps)
-                log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                return log_loss, det_q, jac_l1
+                if _loss_type == "squared_frob":
+                    loss = jnp.sum((Q - eye) ** 2)
+                    loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                else:
+                    Q_reg = Q + _q_jitter * eye
+                    inv_term = jnp.linalg.inv(Q_reg)
+                    loss = norm(Q - eye) + norm(inv_term - eye)
+                    loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                    r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
+                    loss *= r
+
+                loss = loss + _inv_pen_w * inv_pen
+
+                if _loss_type == "log_frob":
+                    loss = jnp.log(loss + _log_eps)
+
+                loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+                return loss, det_q, jac_l1
 
             log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
             return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
@@ -912,22 +991,28 @@ def fit_flattening(F_network_ensemble, θs,
                 Jeta_inv = jnp.linalg.pinv(J_eta)
 
                 Q = Jeta_inv.T @ F @ Jeta_inv
-
                 eye = jnp.eye(n_params)
-                Q_reg = Q + _q_jitter * eye
-                inv_term = jnp.linalg.inv(Q_reg)
-                loss = norm(Q - eye) + norm(inv_term - eye)
-                loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
-                r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
-                loss *= r
-
-                log_loss = jnp.log(loss + _log_eps)
-                log_loss = jnp.nan_to_num(log_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                return log_loss, det_q, jac_l1
+                if _loss_type == "squared_frob":
+                    loss = jnp.sum((Q - eye) ** 2)
+                    loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                else:
+                    Q_reg = Q + _q_jitter * eye
+                    inv_term = jnp.linalg.inv(Q_reg)
+                    loss = norm(Q - eye) + norm(inv_term - eye)
+                    loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                    r = _loss_lam * loss / (loss + jnp.exp(-_loss_alpha * loss))
+                    loss *= r
+
+                if _loss_type == "log_frob":
+                    loss = jnp.log(loss + _log_eps)
+
+                loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+                return loss, det_q, jac_l1
 
             log_losses, dets, l1_terms = jax.vmap(fn)(theta_batched, F_batched)
             return (jnp.mean(log_losses)) + l1_terms.mean(), jnp.mean(dets)
@@ -1319,6 +1404,22 @@ if __name__ == '__main__':
         help="Hidden activation for the flattener (MLP / RealNVP). Default: sin_swish.",
     )
     parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="log_frob",
+        choices=["log_frob", "frob", "squared_frob"],
+        help=(
+            "Flattening loss form. 'log_frob': reweighted Frobenius + inverse with "
+            "outer log (legacy). 'frob': same without log. 'squared_frob': plain "
+            "||Q-I||_F^2, no reweighting/inverse/log. Default: log_frob."
+        ),
+    )
+    parser.add_argument(
+        "--augment-log-inputs",
+        action="store_true",
+        help="Concatenate log(|θ_i|) and log(|θ_i+θ_j|) features to the network input.",
+    )
+    parser.add_argument(
         "--nn-inv",
         action="store_true",
         help="Use RealNVP (invertible normalizing flow) instead of MLP"
@@ -1398,11 +1499,13 @@ if __name__ == '__main__':
                    SCALE_THETA=False,
                    use_whitening=not args.no_whitening,
                    minmax_scale_inputs=not args.no_minmax_input_scaling,
+                   augment_log_inputs=args.augment_log_inputs,
                    nn_inv=args.nn_inv,
                    forward_backward_mlp=args.forward_backward_mlp,
                    forward_backward_invertibility_weight=(
                        args.forward_backward_invertibility_weight
                    ),
                    flattener_activation=args.flattener_activation,
+                   loss_type=args.loss_type,
                    do_plot=not args.no_plot,
                    Fisher_to_flatten=args.fisher_to_flatten)

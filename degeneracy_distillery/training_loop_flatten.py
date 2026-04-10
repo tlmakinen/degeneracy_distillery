@@ -610,6 +610,7 @@ def fit_flattening(F_network_ensemble, θs,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
                    loss_log_epsilon: float = 1e-12,
+                   loss_log_tau: float = 0.1,
                    q_inv_jitter: float = 1e-8,
                    grad_clip_norm: Optional[float] = None,
                    lr_schedule_phase1: Optional[Any] = None,
@@ -712,8 +713,12 @@ def fit_flattening(F_network_ensemble, θs,
             former hardcoded λ=100.
         loss_reweight_epsilon: ϵ in the same reweighting (α derived from λ, ϵ). Default matches
             former hardcoded ϵ=1e-7.
-        loss_log_epsilon: Small positive offset so log(loss) stays finite when loss→0 or is
-            contaminated by numerical noise (weird ensemble members / batches).
+        loss_log_epsilon: Unused (kept for backward compatibility).
+        loss_log_tau: Crossover scale for ``log_frob`` loss. The loss is computed as
+            ``τ · log1p(L / τ)``, whose gradient w.r.t. L is ``1 / (1 + L/τ)``.
+            When ``L << τ`` this is ~1 (full raw-loss gradient); when ``L >> τ`` it
+            decays as ``τ/L`` (log compression). Set ``τ ≈ exp(stall_log_loss)`` where
+            ``stall_log_loss`` is the printed loss value at which training plateaus.
         q_inv_jitter: Added to Q as ε·I before jnp.linalg.inv(Q) in the loss, so singular or
             nearly singular Q (e.g. rank-deficient predicted Fisher) does not produce NaN grads.
             Set to 0 to restore the previous strict behavior (may NaN).
@@ -928,6 +933,7 @@ def fit_flattening(F_network_ensemble, θs,
         / _loss_eps
     )
     _log_eps = loss_log_epsilon
+    _log_tau = loss_log_tau
     _q_jitter = q_inv_jitter
     _inv_pen_w = forward_backward_invertibility_weight
     _l1_alpha = l1_alpha
@@ -969,7 +975,7 @@ def fit_flattening(F_network_ensemble, θs,
                 loss = loss + _inv_pen_w * inv_pen
 
                 if _loss_type == "log_frob":
-                    loss = jnp.log(loss + _log_eps)
+                    loss = _log_tau * jnp.log1p(loss / _log_tau)
 
                 loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -1008,7 +1014,7 @@ def fit_flattening(F_network_ensemble, θs,
                     loss *= r
 
                 if _loss_type == "log_frob":
-                    loss = jnp.log(loss + _log_eps)
+                    loss = _log_tau * jnp.log1p(loss / _log_tau)
 
                 loss = jnp.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 

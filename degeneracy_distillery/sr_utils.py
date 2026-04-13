@@ -366,6 +366,49 @@ def max_pow_nesting_depth(expr: sympy.Expr) -> int:
     return max(max_pow_nesting_depth(a) for a in expr.args)
 
 
+def _is_sympy_log_abs(expr: sympy.Expr) -> bool:
+    """True for ``log(Abs(u))``, i.e. the SR ``logAbs`` unary as parsed in :func:`_parse_sr_equation`."""
+    return (
+        expr.func == sympy.log
+        and len(expr.args) == 1
+        and expr.args[0].func == sympy.Abs
+    )
+
+
+def max_log_nesting_depth(expr: sympy.Expr) -> int:
+    """
+    Longest chain ``log(log(...arg))`` along any branch of the expression tree.
+
+    Examples
+    --------
+    ``log(X1)`` → 1; ``log(log(X1))`` → 2; ``log(X1)+log(X2)`` → 1.
+    """
+    if expr.func == sympy.log:
+        return 1 + max_log_nesting_depth(expr.args[0])
+    if not expr.args:
+        return 0
+    return max(max_log_nesting_depth(a) for a in expr.args)
+
+
+def max_logabs_nesting_depth(expr: sympy.Expr) -> int:
+    """
+    Longest chain of nested ``log(Abs(...))`` (SR ``logAbs``) along any branch.
+
+    Only counts when the outer node is exactly ``log`` with a single ``Abs``
+    child, matching the grammar's ``logAbs`` operator — not plain ``log(u)``.
+
+    Examples
+    --------
+    ``log(Abs(X1))`` → 1; ``log(Abs(log(Abs(X1))))`` → 2.
+    """
+    if _is_sympy_log_abs(expr):
+        inner = expr.args[0].args[0]
+        return 1 + max_logabs_nesting_depth(inner)
+    if not expr.args:
+        return 0
+    return max(max_logabs_nesting_depth(a) for a in expr.args)
+
+
 def _is_sr_coordinate_symbol(s: sympy.Basic) -> bool:
     """True for symbols named ``X1``, ``X2``, … as produced by the SR/ESR grammar."""
     if not isinstance(s, sympy.Symbol):
@@ -471,6 +514,10 @@ def sr_structure_predicate(
     max_exp_nesting: Optional[int] = 2,
     check_nested_pow: bool = False,
     max_pow_nesting: Optional[int] = 1,
+    check_nested_log: bool = False,
+    max_log_nesting: Optional[int] = 1,
+    check_nested_logabs: bool = False,
+    max_logabs_nesting: Optional[int] = 1,
     forbid_x_in_pow_exponent: bool = True,
 ) -> Callable[[str], bool]:
     """
@@ -497,6 +544,19 @@ def sr_structure_predicate(
         Reject if nested ``Pow`` depth exceeds this value when ``check_nested_pow``
         is True. ``None`` means no cap on ``Pow`` nesting. Default ``1`` keeps at
         most one ``Pow`` along any ``Pow`` chain (e.g. ``X1**2`` ok, ``(X1**2)**3`` out).
+    check_nested_log
+        If True, apply the ``max_log_nesting`` bound using :func:`max_log_nesting_depth`.
+    max_log_nesting
+        Reject if nested ``log`` depth exceeds this value when ``check_nested_log``
+        is True. ``None`` means no cap. Default ``1`` allows ``log(X1)`` but not
+        ``log(log(X1))``.
+    check_nested_logabs
+        If True, apply the ``max_logabs_nesting`` bound using
+        :func:`max_logabs_nesting_depth` (chains of ``log(Abs(...))``, i.e. SR ``logAbs``).
+    max_logabs_nesting
+        Reject if nested ``log(Abs(...))`` depth exceeds this value when
+        ``check_nested_logabs`` is True. ``None`` means no cap. Default ``1``
+        allows one ``logAbs`` wrapper but not ``logAbs(logAbs(...))``.
     forbid_x_in_pow_exponent
         If True, reject ``Pow`` nodes whose exponent depends on any ``Xi``.
 
@@ -517,6 +577,12 @@ def sr_structure_predicate(
                 return False
         if check_nested_pow and max_pow_nesting is not None:
             if max_pow_nesting_depth(expr) > max_pow_nesting:
+                return False
+        if check_nested_log and max_log_nesting is not None:
+            if max_log_nesting_depth(expr) > max_log_nesting:
+                return False
+        if check_nested_logabs and max_logabs_nesting is not None:
+            if max_logabs_nesting_depth(expr) > max_logabs_nesting:
                 return False
         return True
 
@@ -884,7 +950,8 @@ def analyze_equations(
     equation_predicate : callable, optional
         If set, ``equation_predicate(eq_str)`` must return True for an equation
         to be scored with ``compute_DL``. Use e.g. :func:`sr_structure_predicate`
-        to drop variable–variable powers and optionally nested ``exp`` / ``Pow``.
+        to drop variable–variable powers and optionally nested ``exp``, ``Pow``,
+        ``log``, or ``log(Abs(...))`` (SR ``logAbs``).
         Parse errors
         should be handled inside the predicate (return False to skip).
     equation_set : str
@@ -1160,7 +1227,9 @@ def fit_and_analyze_sr(
         - length_penalty: float = 2.0 (``compute_DL`` parameter codelength weight)
         - equation_predicate: Optional[Callable[[str], bool]] = None
           (e.g. ``sr_structure_predicate(n_params, max_exp_nesting=1)`` or
-          ``check_nested_pow=True, max_pow_nesting=1`` to cap ``Pow`` nesting only)
+          ``check_nested_pow=True, max_pow_nesting=1`` to cap ``Pow`` nesting only;
+          use ``check_nested_log=True`` / ``check_nested_logabs=True`` to cap
+          nested ``log`` and ``logAbs`` chains)
 
     Returns
     -------

@@ -259,36 +259,6 @@ def _log_augment(x):
     return jnp.concatenate(parts)
 
 
-def _poly_augment(x_scaled):
-    """Augment a single sample with the product elementary symmetric polynomial.
-
-    Must be called on *already min-max-scaled* inputs (x ∈ [1, 2]), so that
-    the polynomial values are O(1) and do not dominate the first Dense layer.
-
-    Returns a 1-element vector:
-      - prod(x_i)  — last elementary symmetric polynomial (e.g. proportional
-                     to m₁·m₂ after the affine scaling), computed in log-domain
-                     to stay numerically stable for any input dimension.
-
-    NOTE: sum(x_i) is intentionally omitted.  Its gradient ∂(sum)/∂θᵢ = 1/Δᵢ
-    is a constant scalar multiple of [1, 1, …, 1] for every θ, which is exactly
-    collinear with the ∂log(Σxᵢ)/∂θ direction already present from _log_augment.
-    Adding it would make the augmented-input Jacobian J_aug near-rank-deficient
-    near equal-input configurations (e.g. m₁ ≈ m₂), causing det(J) → 0 and
-    det(Q) → ∞, which destabilises training via the nan_to_num safety clamps.
-
-    prod(x_i) has gradient [x₂/Δ₁, x₁/Δ₂] which varies with θ, so it is NOT
-    always collinear with the existing features and genuinely adds information
-    about the bilinear combination (e.g. m₁·m₂ in the GW case).
-
-    With x ∈ [1, 2]:  prod ∈ [1, 2ⁿ]  — safely O(1).
-    """
-    _eps = 1e-10
-    log_x = jnp.log(jnp.abs(x_scaled) + _eps)
-    sign = jnp.prod(jnp.sign(x_scaled + _eps))
-    prod_val = sign * jnp.exp(jnp.sum(log_x))
-    return jnp.stack([prod_val])
-
 
 # ---------------------- CUSTOM NETWORK DEFINITIONS -----------------------
 class custom_MLP(nn.Module):
@@ -310,8 +280,7 @@ class custom_MLP(nn.Module):
             x += 1.0
 
         if self.augment_log_inputs:
-            poly_feats = _poly_augment(x)
-            x = jnp.concatenate([x, log_feats, poly_feats])
+            x = jnp.concatenate([x, log_feats])
 
         x = nn.Dense(self.features[-1])(x)
 
@@ -365,8 +334,7 @@ class WhitenedMLP(nn.Module):
             x += 1.0
 
         if self.augment_log_inputs:
-            poly_feats = _poly_augment(x)
-            x = jnp.concatenate([x, log_feats, poly_feats])
+            x = jnp.concatenate([x, log_feats])
 
         x = nn.Dense(self.features[-1])(x)
 

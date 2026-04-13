@@ -237,20 +237,16 @@ def compute_robust_norm_factor(F_ensemble, method: str = "median_max_eig"):
 
 # ---------------------- INPUT AUGMENTATION -----------------------
 def _log_augment(x):
-    """Augment a single sample with log and symmetric-polynomial features
-    computed from *raw* inputs.
+    """Augment a single sample with log features computed from *raw* inputs.
 
     Returns a vector of extra features:
       - log(|x_i| + ε)  for each dimension i
       - log(|x_i + x_j| + ε)  for each unique pair i < j
-      - sum(x_i)   — first elementary symmetric polynomial (e.g. m₁+m₂ = M_total)
-      - prod(x_i)  — last elementary symmetric polynomial (e.g. m₁·m₂), computed
-                     in log-domain for numerical stability and then exponentiated,
-                     so it is sign-preserving and overflow-safe for any dimension.
 
-    The sum and product give the network direct access to the two fundamental
-    symmetric polynomials that span chirp mass and symmetric mass ratio without
-    requiring the network to learn them from composed nonlinearities.
+    These give the network direct access to logarithmic combinations
+    (e.g. log(m₁m₂), log(m₁+m₂)) without having to learn them from
+    composed nonlinearities.  Must be called on raw (unscaled) inputs so
+    that the log values carry physical meaning.
     """
     _eps = 1e-10
     n = x.shape[-1]
@@ -260,14 +256,29 @@ def _log_augment(x):
         idx_i, idx_j = jnp.triu_indices(n, k=1)
         pairwise_sums = x[idx_i] + x[idx_j]
         parts.append(jnp.log(jnp.abs(pairwise_sums) + _eps))
-
-    # Elementary symmetric polynomials
-    parts.append(jnp.sum(x, keepdims=True))
-    sign = jnp.prod(jnp.sign(x + _eps))
-    log_abs_prod = jnp.sum(log_x)
-    parts.append(jnp.array([sign * jnp.exp(log_abs_prod)]))
-
     return jnp.concatenate(parts)
+
+
+def _poly_augment(x_scaled):
+    """Augment a single sample with elementary symmetric polynomial features.
+
+    Must be called on *already min-max-scaled* inputs (x ∈ [1, 2]), so that
+    the polynomial values are O(1) and do not dominate the first Dense layer.
+
+    Returns a 2-element vector:
+      - sum(x_i)   — first elementary symmetric polynomial (e.g. proportional
+                     to m₁+m₂ = M_total after the affine scaling)
+      - prod(x_i)  — last elementary symmetric polynomial (e.g. proportional
+                     to m₁·m₂ after scaling), computed in log-domain to stay
+                     numerically stable for any input dimension.
+
+    With x ∈ [1, 2]:  sum ∈ [n, 2n],  prod ∈ [1, 2ⁿ]  — both safely O(1).
+    """
+    _eps = 1e-10
+    log_x = jnp.log(jnp.abs(x_scaled) + _eps)
+    sign = jnp.prod(jnp.sign(x_scaled + _eps))
+    prod_val = sign * jnp.exp(jnp.sum(log_x))
+    return jnp.array([jnp.sum(x_scaled), prod_val])
 
 
 # ---------------------- CUSTOM NETWORK DEFINITIONS -----------------------
@@ -290,7 +301,8 @@ class custom_MLP(nn.Module):
             x += 1.0
 
         if self.augment_log_inputs:
-            x = jnp.concatenate([x, log_feats])
+            poly_feats = _poly_augment(x)
+            x = jnp.concatenate([x, log_feats, poly_feats])
 
         x = nn.Dense(self.features[-1])(x)
 
@@ -344,7 +356,8 @@ class WhitenedMLP(nn.Module):
             x += 1.0
 
         if self.augment_log_inputs:
-            x = jnp.concatenate([x, log_feats])
+            poly_feats = _poly_augment(x)
+            x = jnp.concatenate([x, log_feats, poly_feats])
 
         x = nn.Dense(self.features[-1])(x)
 

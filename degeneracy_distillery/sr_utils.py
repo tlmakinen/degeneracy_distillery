@@ -1168,6 +1168,8 @@ def fit_and_analyze_sr(
     random_state: Optional[int] = None,
     shuffle: bool = True,
     slice_fisher: bool = False,
+    save_split_data: bool = True,
+    split_data_npz_name: str = "split_data.npz",
     **sr_kwargs
 ) -> Tuple[List[str], List[str], Dict[str, List], Dict]:
     """
@@ -1195,6 +1197,11 @@ def fit_and_analyze_sr(
         Which components to fit. If None, fits all components.
     parent_dir : str
         Output directory for results
+    save_split_data : bool
+        If True (default), writes ``split_data`` arrays (and split metadata) to
+        ``os.path.join(parent_dir, split_data_npz_name)`` after analysis.
+    split_data_npz_name : str
+        Filename for the compressed NumPy archive (default ``split_data.npz``).
     test_size : float
         Proportion of dataset to include in validation split (default: 0.5)
     random_state : int, optional
@@ -1249,6 +1256,11 @@ def fit_and_analyze_sr(
         - 'dy_sr_train', 'dy_sr_test': Jacobians
         - 'Fs_train', 'Fs_test': Fisher matrices
         - 'n_params': Number of parameters (updated if slice_fisher=True)
+
+        When ``save_split_data`` is True, the same arrays are stored under the
+        same keys in ``parent_dir/split_data_npz_name``, plus ``components_to_fit``
+        (int64), ``slice_fisher`` (bool), ``test_size``, ``shuffle``, and
+        ``random_state`` (int64, ``-1`` if the call used ``random_state=None``).
         
     Examples
     --------
@@ -1404,5 +1416,29 @@ def fit_and_analyze_sr(
         'components_to_fit': components_to_fit,
         'slice_fisher': slice_fisher,
     }
-    
+
+    if save_split_data and split_data_npz_name:
+        os.makedirs(parent_dir, exist_ok=True)
+        split_npz_path = os.path.join(parent_dir, split_data_npz_name)
+        rs_save = np.int64(-1) if random_state is None else np.int64(random_state)
+        np.savez_compressed(
+            split_npz_path,
+            X_train=X_train,
+            X_test=X_val,
+            y_train=y_train,
+            y_test=y_val,
+            y_std_train=y_std_train,
+            y_std_test=y_std_val,
+            dy_sr_train=dy_sr_train,
+            dy_sr_test=dy_sr_val,
+            Fs_train=Fs_train,
+            Fs_test=Fs_val,
+            n_params=np.int64(n_params),
+            components_to_fit=np.asarray(components_to_fit, dtype=np.int64),
+            slice_fisher=np.bool_(slice_fisher),
+            test_size=np.float64(test_size),
+            shuffle=np.bool_(shuffle),
+            random_state=rs_save,
+        )
+
     return mdl_coords, frob_coords, analysis, split_data

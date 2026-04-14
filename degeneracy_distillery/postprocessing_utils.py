@@ -458,6 +458,73 @@ def make_check_flattening_fn(X: np.ndarray, Fs: np.ndarray) -> Callable:
     return check_fn
 
 
+def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
+    """
+    Evaluate symbolic-regression coordinate strings on ``X`` (NumPy only).
+
+    Uses the same ESR parse, ``replace_floats``, ``_lambdify_ordered_symbols``,
+    and argument order as :func:`check_flattening` (constants ``pars`` then
+    ``X1``..``X{n_params}``), but returns the coordinate values instead of a
+    Jacobian.
+
+    Parameters
+    ----------
+    coordinates : list of str
+        One SR expression per output dimension.
+    X : np.ndarray, shape (n_samples, n_params)
+        Parameter samples.
+
+    Returns
+    -------
+    y : np.ndarray, shape (n_samples, len(coordinates))
+        Predicted coordinates, column ``k`` is expression ``coordinates[k]``.
+    """
+    if len(coordinates) == 0:
+        return np.empty((X.shape[0], 0), dtype=float)
+
+    basis_functions = [
+        ["X", "b"],
+        ["square", "exp", "inv", "sqrt", "log", "cos"],
+        ["+", "*", "-", "/", "^"],
+    ]
+
+    a, b = sympy.symbols("a b", real=True)
+    inv = sympy.Lambda(a, 1 / a)
+    square = sympy.Lambda(a, a * a)
+    sqrt = sympy.Lambda(a, sympy.sqrt(a))
+    log = sympy.Lambda(a, sympy.log(a))
+    power = sympy.Lambda((a, b), sympy.Pow(a, b))
+
+    sympy_locs = {
+        "inv": inv,
+        "square": square,
+        "cos": sympy.cos,
+        "^": power,
+        "Abs": sympy.Abs,
+        "sqrt": sqrt,
+        "log": log,
+    }
+
+    cols: List[np.ndarray] = []
+    for eq in coordinates:
+        expr_str, pars = replace_floats(eq)
+        expr, nodes, c = esr.generation.generator.string_to_node(
+            expr_str,
+            basis_functions,
+            evalf=True,
+            allow_eval=True,
+            check_ops=True,
+            locs=sympy_locs,
+        )
+        all_b, all_x = _lambdify_ordered_symbols(expr, X.shape[1], len(pars))
+        eq_fn = safe_lambdify(all_b + all_x, expr, ["numpy"])
+        y = np.asarray(eq_fn(*pars, *X.T))
+        y = np.reshape(y, (X.shape[0],))
+        cols.append(y)
+
+    return np.column_stack(cols)
+
+
 def get_missing_vars(coordinates, n_params, n_appearances=2):
     pars_to_append = []
 

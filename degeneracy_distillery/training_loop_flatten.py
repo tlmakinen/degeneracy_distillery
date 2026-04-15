@@ -269,6 +269,7 @@ class custom_MLP(nn.Module):
     minmax_scale_inputs: bool = True
     augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
+    offset: float = 0.1
 
     @nn.compact
     def __call__(self, x):
@@ -277,7 +278,7 @@ class custom_MLP(nn.Module):
 
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
-            x += 1.0
+            x += self.offset
 
         if self.augment_log_inputs:
             x = jnp.concatenate([x, log_feats])
@@ -323,6 +324,7 @@ class WhitenedMLP(nn.Module):
     augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True  # Can disable for inspection
+    offset: float = 0.1
 
     @nn.compact
     def __call__(self, x):
@@ -331,7 +333,7 @@ class WhitenedMLP(nn.Module):
 
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
-            x += 1.0
+            x += self.offset
 
         if self.augment_log_inputs:
             x = jnp.concatenate([x, log_feats])
@@ -360,6 +362,7 @@ class ReversePathMLP(nn.Module):
 
     features: Sequence[int]
     act: Callable = stable_sin_swish
+    offset: float = 0.1
 
     @nn.compact
     def __call__(self, y):
@@ -371,7 +374,7 @@ class ReversePathMLP(nn.Module):
             z = nn.Dense(feat)(z)
             x = self.act(x + z)
         x = nn.Dense(self.features[-1])(x)
-        return x - 1.0 # include inductive bias
+        return x - self.offset  # inductive bias matching forward min–max shift
 
 
 class ForwardBackwardMLP(nn.Module):
@@ -386,6 +389,7 @@ class ForwardBackwardMLP(nn.Module):
     minmax_scale_inputs: bool = True
     augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
+    offset: float = 0.1
 
     def setup(self):
         self.forward_net = custom_MLP(
@@ -395,14 +399,19 @@ class ForwardBackwardMLP(nn.Module):
             minmax_scale_inputs=self.minmax_scale_inputs,
             augment_log_inputs=self.augment_log_inputs,
             act=self.act,
+            offset=self.offset,
         )
-        self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
+        self.reverse_net = ReversePathMLP(
+            features=self.features, act=self.act, offset=self.offset
+        )
 
     def __call__(self, x):
         return self.forward_net(x)
 
     def inverse_path(self, y):
-        return ((self.reverse_net(y) - 1.0) / (self.max_x - self.min_x)) + self.min_x
+        return (
+            (self.reverse_net(y) - self.offset) / (self.max_x - self.min_x)
+        ) + self.min_x
 
     def init_forward_and_reverse(self, x):
         """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""
@@ -421,6 +430,7 @@ class WhitenedForwardBackwardMLP(nn.Module):
     augment_log_inputs: bool = False
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True
+    offset: float = 0.1
 
     def setup(self):
         self.forward_net = WhitenedMLP(
@@ -432,15 +442,20 @@ class WhitenedForwardBackwardMLP(nn.Module):
             augment_log_inputs=self.augment_log_inputs,
             act=self.act,
             apply_inverse_whitening=self.apply_inverse_whitening,
+            offset=self.offset,
         )
-        self.reverse_net = ReversePathMLP(features=self.features, act=self.act)
+        self.reverse_net = ReversePathMLP(
+            features=self.features, act=self.act, offset=self.offset
+        )
 
     def __call__(self, x):
         return self.forward_net(x)
 
     def inverse_path(self, y):
         # y is η = W_inv @ η_raw (same as forward output); reverse_net is trained on η, not η_raw.
-        return ((self.reverse_net(y) - 1.0) / (self.max_x - self.min_x)) + self.min_x
+        return (
+            (self.reverse_net(y) - self.offset) / (self.max_x - self.min_x)
+        ) + self.min_x
 
     def init_forward_and_reverse(self, x):
         """Initialize params for both nets (default ``init`` only runs ``__call__`` / forward)."""
@@ -460,6 +475,7 @@ class RealNVPWrapper(nn.Module):
     min_x: jnp.array
     minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
+    offset: float = 0.1
 
     def setup(self):
         self.real_nvp = RealNVP(
@@ -472,7 +488,7 @@ class RealNVPWrapper(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
-            x += 1.0
+            x += self.offset
 
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
@@ -483,7 +499,7 @@ class RealNVPWrapper(nn.Module):
     def inverse(self, y):
         y = self.real_nvp.inverse(y)
         if self.minmax_scale_inputs:
-            y -= 1.0
+            y -= self.offset
             y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
@@ -512,6 +528,7 @@ class WhitenedRealNVP(nn.Module):
     minmax_scale_inputs: bool = True
     act: Callable = stable_sin_swish
     apply_inverse_whitening: bool = True  # Can disable for inspection
+    offset: float = 0.1
 
     def setup(self):
         self.real_nvp = RealNVP(
@@ -524,7 +541,7 @@ class WhitenedRealNVP(nn.Module):
     def __call__(self, x):
         if self.minmax_scale_inputs:
             x = (x - self.min_x) / (self.max_x - self.min_x)
-            x += 1.0
+            x += self.offset
 
         # Apply RealNVP (returns output and log_det)
         y, log_det = self.real_nvp(x)
@@ -550,7 +567,7 @@ class WhitenedRealNVP(nn.Module):
         y = self.real_nvp.inverse(y)
 
         if self.minmax_scale_inputs:
-            y -= 1.0
+            y -= self.offset
             y = (y * (self.max_x - self.min_x)) + self.min_x
         return y
 
@@ -602,6 +619,7 @@ def fit_flattening(F_network_ensemble, θs,
                    norm_method: str = "median_max_eig",
                    use_whitening: bool = True,
                    minmax_scale_inputs: bool = True,
+                   offset: float = 0.1,
                    augment_log_inputs: bool = False,
                    nn_inv: bool = False,
                    forward_backward_mlp: bool = False,
@@ -677,9 +695,12 @@ def fit_flattening(F_network_ensemble, θs,
                        training data). The network effectively learns to flatten 
                        F_whitened = W @ F @ W.
         minmax_scale_inputs: If True (default), map each θ dimension from
-            ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]``, then add 1 so the
-            network sees values in ``[1, 2]`` on that box. If False, pass θ through unchanged.
-            RealNVP ``inverse`` reverses the shift and scaling only when this is True.
+            ``[min_x, max_x]`` (from the training θ grid) to ``[0, 1]``, then add ``offset``
+            so the network sees values in ``[offset, 1 + offset]`` on that box. If False,
+            pass θ through unchanged. RealNVP ``inverse`` reverses the shift and scaling only
+            when this is True.
+        offset: Constant added after min–max scaling to ``[0, 1]`` (and subtracted again
+            in RealNVP ``inverse`` / paired ``ReversePathMLP`` paths). Default ``0.1``.
         augment_log_inputs: If True, concatenate logarithmic features to the
             (optionally scaled) inputs before the first dense layer.  Appended
             features are ``log(|θ_i| + ε)`` for each dimension and
@@ -843,6 +864,7 @@ def fit_flattening(F_network_ensemble, θs,
     print(f"Flattener activation: {flattener_activation}")
     print(f"Loss type: {loss_type}")
     print(f"Min-max input scaling: {minmax_scale_inputs}")
+    print(f"Min-max post-scale offset: {offset}")
     if augment_log_inputs:
         if nn_inv:
             print("WARNING: augment_log_inputs is not supported with RealNVP (nn_inv); ignoring.")
@@ -865,6 +887,7 @@ def fit_flattening(F_network_ensemble, θs,
             augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
             apply_inverse_whitening=True,
+            offset=offset,
         )
     elif forward_backward_mlp:
         print("USING forward–backward MLP (custom_MLP + ReversePathMLP)")
@@ -875,6 +898,7 @@ def fit_flattening(F_network_ensemble, θs,
             minmax_scale_inputs=minmax_scale_inputs,
             augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
+            offset=offset,
         )
     elif nn_inv and use_whitening:
         print("USING WHITENED RealNVP (invertible normalizing flow with inverse whitening layer)")
@@ -887,7 +911,8 @@ def fit_flattening(F_network_ensemble, θs,
             W_inv=W_inv,
             minmax_scale_inputs=minmax_scale_inputs,
             act=_flattener_act,
-            apply_inverse_whitening=True
+            apply_inverse_whitening=True,
+            offset=offset,
         )
     elif nn_inv:
         print("USING RealNVP (invertible normalizing flow)")
@@ -898,7 +923,8 @@ def fit_flattening(F_network_ensemble, θs,
             max_x=max_x,
             min_x=min_x,
             minmax_scale_inputs=minmax_scale_inputs,
-            act=_flattener_act
+            act=_flattener_act,
+            offset=offset,
         )
     elif use_whitening:
         print("USING WHITENED MLP (with inverse whitening layer)")
@@ -910,7 +936,8 @@ def fit_flattening(F_network_ensemble, θs,
             minmax_scale_inputs=minmax_scale_inputs,
             augment_log_inputs=augment_log_inputs,
             act=_flattener_act,
-            apply_inverse_whitening=True
+            apply_inverse_whitening=True,
+            offset=offset,
         )
     else:
         print("USING CUSTOM MLP (no whitening)")
@@ -920,7 +947,8 @@ def fit_flattening(F_network_ensemble, θs,
             min_x=min_x,
             minmax_scale_inputs=minmax_scale_inputs,
             augment_log_inputs=augment_log_inputs,
-            act=_flattener_act
+            act=_flattener_act,
+            offset=offset,
         )
 
     # ---------------------- LOSS & HELPER FUNCTIONS -----------------------
@@ -1444,9 +1472,15 @@ if __name__ == '__main__':
         help="Weight on ‖θ - reverse(forward(θ))‖² when --forward-backward-mlp is set.",
     )
     parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.1,
+        help="Added after min–max to [0,1] before the network; subtracted in inverse paths. Default: 0.1.",
+    )
+    parser.add_argument(
         "--no-minmax-input-scaling",
         action="store_true",
-        help="Pass θ into the flattener without min–max (+1) preprocessing (see fit_flattening).",
+        help="Pass θ into the flattener without min–max (+offset) preprocessing (see fit_flattening).",
     )
     parser.add_argument(
         "--fisher-to-flatten",
@@ -1507,6 +1541,7 @@ if __name__ == '__main__':
                    SCALE_THETA=False,
                    use_whitening=not args.no_whitening,
                    minmax_scale_inputs=not args.no_minmax_input_scaling,
+                   offset=args.offset,
                    augment_log_inputs=args.augment_log_inputs,
                    nn_inv=args.nn_inv,
                    forward_backward_mlp=args.forward_backward_mlp,

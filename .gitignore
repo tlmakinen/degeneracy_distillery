@@ -76,7 +76,7 @@ dmypy.json
 
 # Project specific
 data/
-plots/
+# plots/
 sr_results/
 results/
 example_*/
@@ -85,6 +85,10 @@ ex_*/
 *.png
 *.jpg
 *.jpeg
+*.zip
+*.tar
+*.npy
+*.npz
 
 # External packages (installed separately)
 ESR/

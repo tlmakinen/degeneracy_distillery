@@ -151,7 +151,7 @@ def forward_variational_student(model: nn.Module, w, x: jnp.ndarray, n_p: int | 
     squeeze = x.ndim == 1
     if squeeze:
         x = x[None, :]
-    t_hat, z_mean, pi_logits, mu, sigma = model.apply(w, x)
+    t_hat, z_mean, pi_logits, mu, sigma = jax.vmap(lambda xx: model.apply(w, xx))(x)
     n_p_i = int(n_p) if n_p is not None else int(t_hat.shape[-1])
     F_mean = jax.vmap(lambda z: construct_fisher_matrix_log_cholesky(z, n_p_i))(z_mean)
     pi = jax.nn.softmax(pi_logits, axis=-1)
@@ -500,8 +500,8 @@ def train_fishnets_variational(
 
     # --- Phase 2: student with KL + MDN NLL ---
     def student_loss_fn_batched(w, x_b, theta_b, t_w):
-        t_hat, z_mean, pi_logits, mu, sigma = student_model.apply(w, x_b)
-        _tt, z_t, _Ft = teacher_model.apply(t_w, x_b)
+        t_hat, z_mean, pi_logits, mu, sigma = jax.vmap(lambda xx: student_model.apply(w, xx))(x_b)
+        _tt, z_t, _Ft = jax.vmap(lambda xx: teacher_model.apply(t_w, xx))(x_b)
         F_mean = jax.vmap(lambda z: construct_fisher_matrix_log_cholesky(z, n_params))(z_mean)
         kl = _fisher_kl_term(t_hat, F_mean, theta_b)
         log_p = mdn_log_prob_diagonal(pi_logits, mu, sigma, z_t)

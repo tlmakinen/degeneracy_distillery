@@ -488,9 +488,14 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     1. Centering of y and (if given) y_reference
     2. Optional Jacobian-sparsity rotation on y_reference to define sparse basis
        (maximizes sparsity in dy_reference to isolate nonlinear dependencies)
-    3. Fisher-based eigenvalue decomposition
-    4. Align Jacobian-sparse y_reference to Fisher eigenvector
+    3. Fisher-based eigenvalue decomposition (direct ``eigh`` on the
+       prior-normalized Fisher, ascending order, so the 0th eigenvector is the
+       most degenerate / flat θ-direction)
+    4. Align Jacobian-sparse y_reference to that flat θ-direction
     5. Kabsch alignment of y to the transformed y_reference
+
+    The first output axis of ``y_rotated`` is therefore the degenerate /
+    flat coordinate, and the last axis is the best-constrained one.
     
     Parameters
     ----------
@@ -510,9 +515,12 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     theta_fid : np.ndarray, optional
         Fiducial parameter values
     use_var : bool
-        Use variance-based covariance
+        If True, diagonalize ``std(F_norm)`` across samples instead of the
+        fiducial Fisher ``F_norm[argstar]``. Same ascending-eigenvalue
+        convention either way.
     smallest : bool
-        Align to smallest eigenvalue direction
+        Deprecated / unused. Kept for backward-compatible call signatures;
+        the 0th eigenvector (smallest Fisher eigenvalue) is always used.
     apply_varimax : bool
         Apply Jacobian-sparsity rotation for sparsity maximization.
         If True, Jacobian-based sparsity rotation is applied to y_reference to define 
@@ -527,7 +535,7 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
         - "flatten": Use full flattened Jacobian structure
         - "variance": Use gradient variance (indicates nonlinearity)
     tol : float
-        Tolerance for eigenvalue cutoff
+        Deprecated / unused. Kept for backward-compatible call signatures.
     restore_reference_mean : bool
         If True and ``y_reference`` is provided, add back the reference column mean **in
         the rotated output basis** (``rotmat @ mean(y_reference)``) after alignment so
@@ -599,11 +607,14 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     prior_norm = jnp.outer(delta, delta)
     F_norm = Fs / prior_norm
     
+    # Diagonalize the (prior-normalized) Fisher directly so that eigenvectors
+    # are ordered by ascending Fisher eigenvalue: column 0 is the most
+    # degenerate / flat θ-direction, column -1 is the best-constrained one.
     if use_var:
         print('using var F')
-        C = jnp.linalg.pinv(F_norm.std(0)) # jnp.linalg.pinv(F_norm[argstar] / F_norm.std(0)) #
+        C = F_norm.std(0)
     else:
-        C = jnp.linalg.pinv(F_norm[argstar])
+        C = F_norm[argstar]
     
     eigenval, eigenvec = np.linalg.eigh(C)
     idx = eigenval.argsort()
@@ -613,17 +624,10 @@ def rotate_coords(y: np.ndarray, theta: np.ndarray, Fs: np.ndarray,
     A_eig = eigenvec[:, :]
     S = np.matmul(A_eig.T, theta_star)
     
-    if smallest:
-        eigidx = np.min(np.arange(eigenval.shape[0])[eigenval > tol])
-        print(f'smallest evalue idx above tolerance {tol:.3f}: {eigidx}')
-        eigidx = 0
-    else:
-        eigidx = -1
-    
     # Kabsch alignment to reference
     if y_reference is not None:
 
-        # set theta_star to first (best constrained) eigenvalue
+        # Align the first output axis to the smallest-eigenvalue (flat) θ-direction
         theta_star = eigenvec[:, 0]
         
         # first align reference to theta star

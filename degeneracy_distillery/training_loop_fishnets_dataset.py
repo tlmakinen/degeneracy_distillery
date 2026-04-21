@@ -219,6 +219,44 @@ def _materialise_dataset(dataset):
     return list(dataset)
 
 
+def _prefetch_iter(iterable, n_prefetch):
+    """Overlap a Python producer (``iterable``) with the consumer by running
+    the producer in a daemon thread and buffering up to ``n_prefetch`` items.
+
+    When ``n_prefetch <= 0`` this returns the iterable unchanged. Exceptions
+    raised inside the worker are re-raised on the consumer side.
+    """
+    if n_prefetch is None or n_prefetch <= 0:
+        yield from iterable
+        return
+
+    import queue
+    import threading
+
+    q: "queue.Queue" = queue.Queue(maxsize=int(n_prefetch))
+    _SENTINEL = object()
+    _ERROR = object()
+
+    def _worker():
+        try:
+            for item in iterable:
+                q.put(item)
+        except BaseException as exc:
+            q.put((_ERROR, exc))
+            return
+        q.put(_SENTINEL)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    while True:
+        item = q.get()
+        if item is _SENTINEL:
+            return
+        if isinstance(item, tuple) and len(item) == 2 and item[0] is _ERROR:
+            raise item[1]
+        yield item
+
+
 def _iter_batches(dataset, indices, batch_size, collate_fn, drop_last=True):
     """Yield collated batches for the given index order."""
     n = len(indices)
@@ -235,7 +273,9 @@ def _iter_batches(dataset, indices, batch_size, collate_fn, drop_last=True):
 # Prediction helpers
 # =============================================================================
 
-def _predict_dataset(model, w, dataset, batch_size, collate_fn, model_apply_fn):
+def _predict_dataset(
+    model, w, dataset, batch_size, collate_fn, model_apply_fn, prefetch_batches=0
+):
     """Run the model over an entire dataset in batches and stack outputs.
 
     Returns ``(mle, F, theta)`` stacked along the leading axis.
@@ -243,8 +283,9 @@ def _predict_dataset(model, w, dataset, batch_size, collate_fn, model_apply_fn):
     n = len(dataset)
     all_mle, all_F, all_theta = [], [], []
     indices = np.arange(n)
-    for x_batch, theta_batch in _iter_batches(
-        dataset, indices, batch_size, collate_fn, drop_last=False
+    for x_batch, theta_batch in _prefetch_iter(
+        _iter_batches(dataset, indices, batch_size, collate_fn, drop_last=False),
+        prefetch_batches,
     ):
         mle, F = model_apply_fn(model, w, x_batch)
         all_mle.append(np.asarray(mle))
@@ -291,6 +332,7 @@ def train_fishnets_dataset(
     outdir: str = "fishnets-log",
     update_pbar_every: int = 10,
     drop_last: bool = True,
+    prefetch_batches: int = 0,
 ):
     """Train an ensemble of fishnet networks from an iterator-style dataset.
 
@@ -347,6 +389,12 @@ def train_fishnets_dataset(
     drop_last
         Whether to drop a partial trailing batch during training. Validation
         always uses every sample.
+    prefetch_batches
+        If ``> 0``, collate up to this many batches ahead in a background
+        thread so GPU compute on the current batch overlaps with CPU
+        collation/transfer of the next. Default ``0`` (no prefetching, fully
+        synchronous behaviour). Reasonable values are ``2``--``8``; more than
+        ~4 rarely helps but uses more host memory.
 
     Returns
     -------
@@ -571,8 +619,11 @@ def train_fishnets_dataset(
             perm = np.asarray(jr.permutation(rng, jnp.arange(n_train_samples)))
             epoch_loss = 0.0
             n_batches = 0
-            for x_batch, theta_batch in _iter_batches(
-                train_dataset, perm, train_batch, collate_fn, drop_last=drop_last
+            for x_batch, theta_batch in _prefetch_iter(
+                _iter_batches(
+                    train_dataset, perm, train_batch, collate_fn, drop_last=drop_last
+                ),
+                prefetch_batches,
             ):
                 w, opt_state, batch_loss = train_step(w, opt_state, x_batch, theta_batch)
                 epoch_loss = epoch_loss + batch_loss
@@ -589,8 +640,11 @@ def train_fishnets_dataset(
             val_indices = np.arange(n_test_samples)
             v_total = 0.0
             v_count = 0
-            for x_batch, theta_batch in _iter_batches(
-                test_dataset, val_indices, val_batch, collate_fn, drop_last=False
+            for x_batch, theta_batch in _prefetch_iter(
+                _iter_batches(
+                    test_dataset, val_indices, val_batch, collate_fn, drop_last=False
+                ),
+                prefetch_batches,
             ):
                 v = eval_loss(w, x_batch, theta_batch)
                 bs = int(x_batch.shape[0]) if hasattr(x_batch, 'shape') else int(theta_batch.shape[0])
@@ -644,7 +698,13 @@ def train_fishnets_dataset(
     test_mles, test_Fs, test_thetas, test_xs = [], [], [], None
     for i in range(num_models):
         mle, F, theta_stacked = _predict_dataset(
-            models[i], ws[i], test_dataset, val_batch, collate_fn, model_apply_fn
+            models[i],
+            ws[i],
+            test_dataset,
+            val_batch,
+            collate_fn,
+            model_apply_fn,
+            prefetch_batches=prefetch_batches,
         )
         test_mles.append(mle)
         test_Fs.append(F)

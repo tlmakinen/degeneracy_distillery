@@ -25,11 +25,16 @@ Typical usage with a PyG-style dataset
         # model directly accepts the batched graph -> per-graph (mle, F).
         return model.apply(w, x_batch)
 
+    def model_init_fn(model, key, x_batch):
+        # init on the batched graph rather than a single element of x_batch.
+        return model.init(key, x_batch)
+
     ws, ens_w, models, _, outputs = train_fishnets_dataset(
         train_ds, test_ds,
         n_params=14,
         collate_fn=collate_fn,
         model_apply_fn=model_apply_fn,
+        model_init_fn=model_init_fn,
         embedding_net=MyGNN(),
         ...
     )
@@ -123,6 +128,16 @@ def _default_model_apply(model, w, x_batch):
     return jax.vmap(fn)(x_batch)
 
 
+def _default_model_init(model, key, x_batch):
+    """Default init: matches the vmap-based apply by initialising on a single
+    element of ``x_batch`` (i.e. ``x_batch[0]``).
+
+    Override ``model_init_fn`` when your embedding network expects a batched
+    input directly (e.g. ``model.init(key, x_batch)`` for a jraph GNN).
+    """
+    return model.init(key, x_batch[0])
+
+
 # =============================================================================
 # Dataset utilities
 # =============================================================================
@@ -188,6 +203,7 @@ def train_fishnets_dataset(
     sample_to_xy_fn: Optional[Callable] = None,
     collate_fn: Optional[Callable] = None,
     model_apply_fn: Optional[Callable] = None,
+    model_init_fn: Optional[Callable] = None,
     init_input: Any = None,
     hids_min: int = 10,
     hids_max: int = 300,
@@ -232,10 +248,18 @@ def train_fishnets_dataset(
         ``model.apply`` over the batch axis of a stacked array. Override when
         the model already accepts a batched input (e.g. a jraph GNN with a
         batched ``GraphsTuple``).
+    model_init_fn
+        ``(model, key, x_batch) -> w``. Default calls
+        ``model.init(key, x_batch[0])`` (matches the default vmap-based apply).
+        Override when your embedding network expects a batched input directly
+        -- e.g. for graph data pass
+        ``lambda model, key, x_batch: model.init(key, x_batch)``.
     init_input
-        A single ``x`` example used for ``model.init`` (must have the same
-        structure as a single sample's ``x``). If ``None``, uses
-        ``sample_to_xy_fn(train_dataset[0])[0]``.
+        Explicit escape hatch: if provided, ``model.init(key, init_input)`` is
+        called directly and both ``model_init_fn`` and ``collate_fn`` are
+        bypassed for initialisation. If ``None``, the init input is built by
+        feeding ``[train_dataset[0]]`` through ``collate_fn`` and passing the
+        resulting ``x_batch`` to ``model_init_fn``.
     scaler_type
         ``'minmax'``, ``'standard'`` or ``'none'``. When not ``'none'`` we
         iterate up to ``scaler_fit_max_samples`` items of ``train_dataset`` and
@@ -288,8 +312,10 @@ def train_fishnets_dataset(
         collate_fn = make_default_collate(sample_to_xy_fn)
     if model_apply_fn is None:
         model_apply_fn = _default_model_apply
+    if model_init_fn is None:
+        model_init_fn = _default_model_init
 
-    # Probe one sample to infer n_params and pick an init input.
+    # Probe one sample to infer n_params.
     first_x, first_theta = sample_to_xy_fn(train_dataset[0])
     first_theta_arr = _to_jnp(first_theta)
     if n_params is None:
@@ -297,8 +323,6 @@ def train_fishnets_dataset(
             n_params = 1
         else:
             n_params = int(first_theta_arr.shape[-1])
-    if init_input is None:
-        init_input = first_x
 
     # ---------------- optional input scaling ----------------
     data_scaler = None
@@ -334,13 +358,6 @@ def train_fishnets_dataset(
             return jnp.asarray(arr), theta_batch
 
         collate_fn = _scaling_collate
-        # Refresh init input with scaled values (assumes tensor-shaped x).
-        init_x_arr = np.asarray(_to_jnp(first_x))
-        init_shape = init_x_arr.shape
-        init_x_arr = data_scaler.transform(
-            init_x_arr.reshape(-1, init_shape[-1])
-        ).reshape(init_shape)
-        init_input = jnp.asarray(init_x_arr)
 
     # ---------------- model setup ----------------
     key = jr.PRNGKey(seed_model)
@@ -422,7 +439,18 @@ def train_fishnets_dataset(
         ]
 
     keys = jr.split(key, num=num_models)
-    ws = [models[i].init(keys[i], init_input) for i in range(num_models)]
+    if init_input is not None:
+        # Explicit override: call model.init directly on the user-supplied input.
+        ws = [models[i].init(keys[i], init_input) for i in range(num_models)]
+    else:
+        # Route through the user's collate_fn so any torch->jax conversion,
+        # graph batching, or input scaling that happens at training time is
+        # also applied at init time.
+        x_batch_init, _ = collate_fn([train_dataset[0]])
+        ws = [
+            model_init_fn(models[i], keys[i], x_batch_init)
+            for i in range(num_models)
+        ]
 
     # ---------------- training loop ----------------
     train_batch = train_batch_size

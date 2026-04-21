@@ -129,13 +129,26 @@ def _default_model_apply(model, w, x_batch):
 
 
 def _default_model_init(model, key, x_batch):
-    """Default init: matches the vmap-based apply by initialising on a single
-    element of ``x_batch`` (i.e. ``x_batch[0]``).
+    """Default init.
 
-    Override ``model_init_fn`` when your embedding network expects a batched
-    input directly (e.g. ``model.init(key, x_batch)`` for a jraph GNN).
+    Tries the vmap-friendly path first by initialising on ``x_batch[0]``
+    (a single sample) to match the default ``_default_model_apply`` which
+    vmaps ``model.apply`` over the leading batch axis.
+
+    If ``x_batch`` is a structured batched container that can't be subscripted
+    (e.g. a ``jraph.GraphsTuple`` or PyG-style ``GraphBatch`` coming from a
+    custom ``collate_fn``), we fall back to initialising on the whole batched
+    input -- which is what a model that consumes batched graphs directly
+    expects anyway.
+
+    You can bypass this heuristic entirely by passing a custom
+    ``model_init_fn``.
     """
-    return model.init(key, x_batch[0])
+    try:
+        single = x_batch[0]
+    except (TypeError, KeyError, IndexError):
+        return model.init(key, x_batch)
+    return model.init(key, single)
 
 
 # =============================================================================

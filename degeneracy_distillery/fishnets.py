@@ -136,41 +136,46 @@ def construct_fisher_matrix_single(outputs):
 def construct_fisher_matrix_log_cholesky(outputs, n_p):
     """
     Construct Fisher matrix from properly parameterized Cholesky factors.
-    
-    Learns log of diagonal elements (for positivity constraint) and 
+
+    Learns log of diagonal elements (for positivity constraint) and
     unconstrained off-diagonal elements.
-    
+
+    Supports arbitrary leading batch dimensions: if ``outputs`` has shape
+    ``(..., n_p * (n_p + 1) / 2)``, the returned Fisher matrix has shape
+    ``(..., n_p, n_p)``. For a flat 1-D input this reduces to the original
+    single-sample behaviour.
+
     Args:
-        outputs: flat array of length n_p * (n_p + 1) / 2
-        n_p: dimension of the parameter space
-    
+        outputs: array of shape ``(..., n_p * (n_p + 1) / 2)``.
+        n_p: dimension of the parameter space.
+
     Returns:
-        Fisher matrix F = L @ L.T where L is lower triangular
+        Fisher matrix ``F = L @ L.T`` of shape ``(..., n_p, n_p)`` with ``L``
+        lower triangular.
     """
-    # Split outputs into diagonal and off-diagonal components
     n_diag = n_p
-    n_off_diag = (n_p * (n_p - 1)) // 2
-    
-    # First n_diag elements are log-diagonal (exponentiate for positivity)
-    log_diag = outputs[:n_diag]
-    # Increased minimum value for better numerical stability
+    batch_shape = outputs.shape[:-1]
+
+    # First n_diag elements are log-diagonal (softplus for positivity).
+    log_diag = outputs[..., :n_diag]
     diag_elements = jax.nn.softplus(log_diag) + 1e-4
-    
-    # Remaining elements are off-diagonal (unconstrained)
-    off_diag = outputs[n_diag:]
-    
-    # Construct lower triangular matrix
-    L = jnp.zeros((n_p, n_p))
-    
-    # Fill diagonal
-    L = L.at[jnp.arange(n_p), jnp.arange(n_p)].set(diag_elements)
-    
-    # Fill off-diagonal (lower triangle only)
+
+    # Remaining elements are unconstrained off-diagonal entries of the lower
+    # triangle (row-major order, matching jnp.tril_indices).
+    off_diag = outputs[..., n_diag:]
+
+    L = jnp.zeros(batch_shape + (n_p, n_p), dtype=outputs.dtype)
+
+    # Scatter the diagonal across the trailing (n_p, n_p) block of every
+    # leading batch index. Ellipsis indexing broadcasts correctly over any
+    # number of leading dims (including zero -- so 1-D inputs still work).
+    diag_idx = jnp.arange(n_p)
+    L = L.at[..., diag_idx, diag_idx].set(diag_elements)
+
     lower_idx = jnp.tril_indices(n_p, k=-1)
-    L = L.at[lower_idx].set(off_diag)
-    
-    # Return F = L @ L.T
-    return L @ L.T
+    L = L.at[..., lower_idx[0], lower_idx[1]].set(off_diag)
+
+    return jnp.matmul(L, jnp.swapaxes(L, -1, -2))
 
 
 def construct_fisher_matrix_multiple(outputs):

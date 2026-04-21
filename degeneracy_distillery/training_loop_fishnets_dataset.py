@@ -128,6 +128,59 @@ def _default_model_apply(model, w, x_batch):
     return jax.vmap(fn)(x_batch)
 
 
+def default_kl_loss(mle, F, theta_batch, x_batch):
+    """Default Gaussian KL-style loss used by ``train_fishnets_dataset``.
+
+    Parameters
+    ----------
+    mle : jnp.ndarray
+        Predicted MLE, shape ``(B, n_params)``.
+    F : jnp.ndarray
+        Predicted Fisher information, shape ``(B, n_params, n_params)``.
+    theta_batch : jnp.ndarray
+        True parameters, shape ``(B, n_params)``.
+    x_batch : Any
+        The collated input batch. Unused by the default loss; present in the
+        signature so user-supplied ``loss_fn`` overrides can read fields like
+        ``x_batch.graph_mask`` for padded graph batches.
+
+    Returns
+    -------
+    jnp.ndarray
+        Scalar loss.
+    """
+    del x_batch
+    res = theta_batch - mle
+    sign, logdet = jnp.linalg.slogdet(F)
+    logdet = jnp.clip(logdet, -50, 50)
+    return 0.5 * jnp.mean(
+        jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) - logdet,
+        axis=0,
+    )
+
+
+def masked_kl_loss(mle, F, theta_batch, x_batch):
+    """Graph-padding-aware KL loss.
+
+    Reads ``x_batch.graph_mask`` (a boolean/float array of shape ``(B,)``
+    where ``True`` marks real graphs) and computes the mean over real graphs
+    only. Pad-graph contributions are zeroed out; the normaliser is
+    ``sum(graph_mask)`` rather than ``B``.
+
+    Use this as the ``loss_fn`` argument to ``train_fishnets_dataset`` when
+    your ``collate_fn`` pads batches to a fixed size.
+    """
+    mask = x_batch.graph_mask.astype(mle.dtype)     # (B,)
+    res = theta_batch - mle                         # (B, n_p)
+    sign, logdet = jnp.linalg.slogdet(F)            # (B,)
+    logdet = jnp.clip(logdet, -50, 50)
+    per_graph = (
+        jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) - logdet
+    )                                               # (B,)
+    denom = jnp.maximum(jnp.sum(mask), 1.0)
+    return 0.5 * jnp.sum(per_graph * mask) / denom
+
+
 def _default_model_init(model, key, x_batch):
     """Default init.
 
@@ -217,6 +270,7 @@ def train_fishnets_dataset(
     collate_fn: Optional[Callable] = None,
     model_apply_fn: Optional[Callable] = None,
     model_init_fn: Optional[Callable] = None,
+    loss_fn: Optional[Callable] = None,
     init_input: Any = None,
     hids_min: int = 10,
     hids_max: int = 300,
@@ -267,6 +321,12 @@ def train_fishnets_dataset(
         Override when your embedding network expects a batched input directly
         -- e.g. for graph data pass
         ``lambda model, key, x_batch: model.init(key, x_batch)``.
+    loss_fn
+        ``(mle, F, theta_batch, x_batch) -> scalar``. Default is
+        :func:`default_kl_loss` (unmasked Gaussian-KL mean over the batch).
+        For padded graph batches carrying a ``graph_mask`` field in
+        ``x_batch``, pass :func:`masked_kl_loss` to average only over real
+        graphs. Any callable with this signature works.
     init_input
         Explicit escape hatch: if provided, ``model.init(key, init_input)`` is
         called directly and both ``model_init_fn`` and ``collate_fn`` are
@@ -327,6 +387,8 @@ def train_fishnets_dataset(
         model_apply_fn = _default_model_apply
     if model_init_fn is None:
         model_init_fn = _default_model_init
+    if loss_fn is None:
+        loss_fn = default_kl_loss
 
     # Probe one sample to infer n_params.
     first_x, first_theta = sample_to_xy_fn(train_dataset[0])
@@ -471,19 +533,13 @@ def train_fishnets_dataset(
     _pbar_stride = max(1, int(update_pbar_every))
 
     def training_loop(key, model, w):
-        def kl_loss(w, x_batch, theta_batch):
+        def loss(w, x_batch, theta_batch):
             mle, F = model_apply_fn(model, w, x_batch)
-            res = theta_batch - mle
-            sign, logdet = jnp.linalg.slogdet(F)
-            logdet = jnp.clip(logdet, -50, 50)
-            return 0.5 * jnp.mean(
-                jnp.einsum('ij,ij->i', res, jnp.einsum('ijk,ik->ij', F, res)) - logdet,
-                axis=0,
-            )
+            return loss_fn(mle, F, theta_batch, x_batch)
 
         tx = optax.adam(learning_rate=lr)
         opt_state = tx.init(w)
-        loss_grad_fn = jax.value_and_grad(kl_loss)
+        loss_grad_fn = jax.value_and_grad(loss)
 
         @jax.jit
         def train_step(w, opt_state, x_batch, theta_batch):
@@ -494,7 +550,7 @@ def train_fishnets_dataset(
 
         @jax.jit
         def eval_loss(w, x_batch, theta_batch):
-            return kl_loss(w, x_batch, theta_batch)
+            return loss(w, x_batch, theta_batch)
 
         losses = []
         val_losses = []

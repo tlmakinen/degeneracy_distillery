@@ -533,24 +533,24 @@ def train_fishnets_dataset(
     _pbar_stride = max(1, int(update_pbar_every))
 
     def training_loop(key, model, w):
-        def loss(w, x_batch, theta_batch):
+        def _compute_loss(w, x_batch, theta_batch):
             mle, F = model_apply_fn(model, w, x_batch)
             return loss_fn(mle, F, theta_batch, x_batch)
 
         tx = optax.adam(learning_rate=lr)
         opt_state = tx.init(w)
-        loss_grad_fn = jax.value_and_grad(loss)
+        loss_grad_fn = jax.value_and_grad(_compute_loss)
 
         @jax.jit
         def train_step(w, opt_state, x_batch, theta_batch):
-            loss, grads = loss_grad_fn(w, x_batch, theta_batch)
+            loss_val, grads = loss_grad_fn(w, x_batch, theta_batch)
             updates, opt_state = tx.update(grads, opt_state, w)
             w = optax.apply_updates(w, updates)
-            return w, opt_state, loss
+            return w, opt_state, loss_val
 
         @jax.jit
         def eval_loss(w, x_batch, theta_batch):
-            return loss(w, x_batch, theta_batch)
+            return _compute_loss(w, x_batch, theta_batch)
 
         losses = []
         val_losses = []
@@ -574,8 +574,8 @@ def train_fishnets_dataset(
             for x_batch, theta_batch in _iter_batches(
                 train_dataset, perm, train_batch, collate_fn, drop_last=drop_last
             ):
-                w, opt_state, loss = train_step(w, opt_state, x_batch, theta_batch)
-                epoch_loss = epoch_loss + loss
+                w, opt_state, batch_loss = train_step(w, opt_state, x_batch, theta_batch)
+                epoch_loss = epoch_loss + batch_loss
                 n_batches += 1
             if n_batches == 0:
                 raise RuntimeError(

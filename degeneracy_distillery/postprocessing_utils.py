@@ -49,6 +49,27 @@ except ImportError:
 # SR EXPRESSION UTILITIES
 # =============================================================================
 
+def substitute_names(expr, name_map: dict[str, str]) -> str:
+    """Replace keys in `name_map` inside the string form of `expr`."""
+    s = str(expr)
+    for key in sorted(name_map.keys(), key=len, reverse=True):
+        s = s.replace(key, name_map[key])
+    return s
+
+
+def print_discovered_expressions(
+    pruned_exprs,
+    name_map: dict[str, str] | None = None,
+    ) -> None:
+    """Print discovered expressions with optional name substitution."""
+    name_map = name_map or {}
+    print("\n" + "=" * 60)
+    print("DISCOVERED EXPRESSIONS")
+    print("=" * 60)
+    for i, expr in enumerate(pruned_exprs):
+        print(f"  η_{i+1} = {substitute_names(expr, name_map)}")
+
+
 def split_by_punctuation(s: str) -> List[str]:
     """
     Split string by mathematical punctuation while preserving operators.

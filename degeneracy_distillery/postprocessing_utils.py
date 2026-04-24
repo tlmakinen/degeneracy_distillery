@@ -525,6 +525,189 @@ def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
     return np.column_stack(cols)
 
 
+def pruned_coordinate_is_degenerate(expr: str, X: np.ndarray, y_atol: float = 1e-10) -> bool:
+    """
+    True if a pruned coordinate has no nontrivial signal (the Jacobian row is ~0).
+
+    Uses a cheap string/sympy check, then a numerical check via :func:`get_y_sr`
+    in case the expression is not exactly the symbol ``0`` after ``sympy.simplify``.
+    """
+    s = str(expr).strip()
+    if s in ("0", "0.0", "-0", "-0.0"):
+        return True
+    try:
+        if sympy.simplify(s) == 0:
+            return True
+    except Exception:
+        pass
+    if not ESR_AVAILABLE:
+        return False
+    try:
+        y = get_y_sr([s], X)
+        if y.size and float(np.max(np.abs(y))) < y_atol:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _mean_flattening_score(
+    coordinates: List[str],
+    check_flattening_fn: Callable,
+    A: np.ndarray,
+    n_params: int,
+) -> float:
+    """Scalar score used in pruning: mean_s ||flat_s - I||_F with same convention as :func:`check_flattening`."""
+    eye = jnp.eye(n_params)
+    flats, _ = check_flattening_fn(coordinates, A=jnp.array(A))
+    return float(jax.vmap(norm)(flats - eye).mean())
+
+
+def repair_degenerate_pruned_expressions(
+    coordinates: List[str],
+    X: np.ndarray,
+    n_params: int,
+    A: np.ndarray,
+    check_flattening_fn: Callable,
+    flat_score_ref: float,
+    y_atol: float = 1e-10,
+    rel_deviation_threshold: float = 0.05,
+    scale: float = 1.0,
+    verbose: bool = False,
+) -> Tuple[List[str], List[int], List[Dict[str, Any]]]:
+    """
+    If importance pruning drives a full coordinate to zero, restore a *single* linear
+    :math:`c X_j` term in :math:`\\theta` (notation ``X1..Xn``) so the Jacobian
+    is no longer rank-degenerate.
+
+    The flattening map uses :math:`Q = (A J^+)^T F (A J^+)`; a row of :math:`J`
+    that is identically zero makes the pseudoinverse pathological, so a literal
+    ``0`` or constant coordinate is not acceptable.
+
+    **Invariance:** There is in general *no* linear :math:`c^\\top X` for which the
+    flatness score is *exactly* unchanged after replacing a zero row—:math:`J^+` is
+    global. This routine picks :math:`(j, c=\\text{scale})` that *minimizes* the
+    change from ``flat_score_ref`` (the same idea as the pruning
+    :math:`\\Delta / \\text{ref}` test). If the best result still deviates by more
+    than ``rel_deviation_threshold``, it is kept anyway to avoid a dead output;
+    you can set ``scale`` small (e.g. ``1e-3``) to reduce impact on the score.
+
+    Parameters
+    ----------
+    flat_score_ref
+        Reference from the un-pruned (or pre-repair) pipeline, e.g. from
+        :func:`get_pruned_expressions_final` before the fix.
+    rel_deviation_threshold
+        Maximum acceptable relative change ``|S - ref| / ref`` for logging only.
+    scale
+        Coefficient in ``+ scale * Xj``; choose ``<< 1`` if a gentler nudge
+        to the score is required.
+
+    Returns
+    -------
+    fixed_expressions
+        A copy of ``coordinates`` with degenerate entries patched.
+    repaired_indices
+        Indices of coordinates that were modified.
+    details
+        One dict per repair with keys ``output_index``, ``X_index``, ``coeff``,
+        ``rel_delta`` (float or ``"inf"``).
+    """
+    if not ESR_AVAILABLE:
+        return list(coordinates), [], []
+
+    out: List[str] = list(map(str, coordinates))
+    ref = float(flat_score_ref) if not np.isnan(flat_score_ref) else 0.0
+    A_np = np.asarray(A)
+    if ref <= 0.0 or np.isclose(ref, 0.0):
+        ref = max(ref, 1e-30)  # avoid div by zero in rel_delta
+
+    repaired: List[int] = []
+    details: List[Dict[str, Any]] = []
+
+    for i in range(len(out)):
+        if not pruned_coordinate_is_degenerate(out[i], X, y_atol=y_atol):
+            continue
+        if n_params < 1:
+            continue
+
+        best_j = 1
+        best_score: Optional[float] = None
+        best_cand: Optional[str] = None
+        e0 = str(out[i])
+        cstr = f"{float(scale):.12g}"
+        for j in range(1, n_params + 1):
+            # Parenthesize so the parser sees one expression (same convention as the rest of the module).
+            candidate = f"({e0})+{cstr}*X{j}"
+            try:
+                simp = str(sympy.simplify(candidate))
+            except Exception:
+                simp = candidate
+            try:
+                s_test = _mean_flattening_score(
+                    [simp if k == i else out[k] for k in range(len(out))],
+                    check_flattening_fn,
+                    A_np,
+                    n_params,
+                )
+            except Exception:
+                continue
+            if best_score is None or abs(s_test - ref) < abs(best_score - ref):
+                best_score = s_test
+                best_j = j
+                best_cand = simp
+        if best_cand is None and n_params >= 1:
+            if verbose:
+                print(
+                    f"degenerate output {i}: no candidate linear term could be "
+                    f"scored; defaulting to {cstr}*X1"
+                )
+            best_j = 1
+            j = 1
+            try:
+                best_cand = str(sympy.simplify(f"({e0})+{cstr}*X{j}"))
+            except Exception:
+                best_cand = f"({e0})+{cstr}*X{j}"
+        if best_cand is None:
+            if verbose:
+                print(f"degenerate output {i}: repair skipped (n_params={n_params})")
+            continue
+
+        tmp_coords = [str(best_cand) if k == i else out[k] for k in range(len(out))]
+        try:
+            s_after = _mean_flattening_score(
+                tmp_coords, check_flattening_fn, A_np, n_params
+            )
+        except Exception:
+            s_after = best_score
+        if s_after is not None and not (isinstance(s_after, float) and np.isnan(s_after)):
+            rel_delta = abs(float(s_after) - ref) / ref
+        else:
+            rel_delta = float("inf")
+        if verbose and rel_delta is not None:
+            if rel_delta > rel_deviation_threshold and rel_delta < float("inf"):
+                print(
+                    f"repair: output {i} -> + {cstr}*X{best_j}  "
+                    f"(rel |Δflat|/ref = {rel_delta:.6f} > {rel_deviation_threshold})"
+                )
+            else:
+                print(
+                    f"repair: output {i} was degenerate; set to include ~{cstr}*X{best_j} "
+                    f"(rel |Δflat|/ref = {rel_delta if rel_delta < float('inf') else 'inf'})"
+                )
+        out[i] = str(best_cand)
+        repaired.append(i)
+        details.append(
+            {
+                "output_index": i,
+                "X_index": best_j,
+                "coeff": float(scale),
+                "rel_delta": float(rel_delta) if rel_delta < float("inf") else "inf",
+            }
+        )
+    return out, repaired, details
+
+
 def get_missing_vars(coordinates, n_params, n_appearances=2):
     pars_to_append = []
 
@@ -1137,7 +1320,10 @@ def get_pruned_expressions_final(A: np.ndarray,
                                   importance_based: bool = True,
                                   perturbation: float = 1e-4,
                                   batch_removal: bool = False,
-                                  batch_size: int = 5) -> Tuple[List[str], List[List[float]]]:
+                                  batch_size: int = 5,
+                                  repair_degenerate_linear: bool = True,
+                                  repair_linear_scale: float = 1.0,
+                                  repair_y_atol: float = 1e-10) -> Tuple[List[str], List[List[float]]]:
     """
     Generate final pruned expressions with loss-based coefficient removal.
     
@@ -1200,6 +1386,13 @@ def get_pruned_expressions_final(A: np.ndarray,
         Attempt to remove multiple low-importance coefficients simultaneously
     batch_size : int
         Number of coefficients to attempt removing in each batch
+    repair_degenerate_linear : bool
+        If True, any coordinate that collapses to 0 (dead Jacobian row) is patched
+        with a single :math:`c X_j` term; see :func:`repair_degenerate_pruned_expressions`.
+    repair_linear_scale : float
+        Coefficient ``c`` in that term (try ``1e-3`` if the score moves too much).
+    repair_y_atol : float
+        Numerical tolerance for "all outputs zero" in :func:`pruned_coordinate_is_degenerate`.
         
     Returns
     -------
@@ -1487,6 +1680,32 @@ def get_pruned_expressions_final(A: np.ndarray,
         remove_floats=remove_floats, decimal=decimal,
         rational=rational, threshold=0.0
     )
+
+    if repair_degenerate_linear and ESR_AVAILABLE:
+        new_expr, _repaired, _rinfo = repair_degenerate_pruned_expressions(
+            new_expr,
+            X,
+            n_params,
+            A,
+            check_flattening_fn,
+            float(flat_score_reference),
+            y_atol=repair_y_atol,
+            rel_deviation_threshold=threshold,
+            scale=repair_linear_scale,
+            verbose=verbose,
+        )
+        if _repaired:
+            if remove_floats:
+                paired = [
+                    replace_floats(str(sympy.simplify(str(e)))) for e in new_expr
+                ]
+                new_expr = [p[0] for p in paired]
+                consts = [p[1] for p in paired]
+            else:
+                new_expr = [str(sympy.simplify(str(e))) for e in new_expr]
+                consts = [
+                    replace_floats(s)[1] for s in new_expr
+                ]
     
     return new_expr, consts
 
@@ -2058,7 +2277,10 @@ def postprocess_eqs(coordinates: List[str],
                     verbose: bool = True,
                     perturbation: float = 1e-4,
                     check_flattening_fn: Optional[Callable] = None,
-                    module: str = "jax") -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
+                    module: str = "jax",
+                    repair_degenerate_linear: bool = True,
+                    repair_linear_scale: float = 1.0,
+                    repair_y_atol: float = 1e-10) -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
     """
     High-level wrapper for postprocessing symbolic expressions.
     
@@ -2122,6 +2344,14 @@ def postprocess_eqs(coordinates: List[str],
         one automatically from X and Fs.
     module : str, default="jax"
         Module for lambdify ("jax" or "numpy")
+    repair_degenerate_linear : bool, default=True
+        If a pruned output is identically zero, append a linear :math:`c X_j` term
+        (see :func:`repair_degenerate_pruned_expressions`). Set False to disable.
+    repair_linear_scale : float, default=1.0
+        Coefficient :math:`c` in the repair term; use a small value (e.g. ``1e-3``)
+        if the flatness score moves too much.
+    repair_y_atol : float, default=1e-10
+        Tolerance for treating a coordinate as numerically zero on ``X``.
         
     Returns
     -------
@@ -2292,7 +2522,10 @@ def postprocess_eqs(coordinates: List[str],
         importance_based=importance_based,
         perturbation=perturbation,
         batch_removal=batch_removal,
-        batch_size=batch_size
+        batch_size=batch_size,
+        repair_degenerate_linear=repair_degenerate_linear,
+        repair_linear_scale=repair_linear_scale,
+        repair_y_atol=repair_y_atol
     )
     
     # Optional second pass: prune ALL constants (including nonlinear)

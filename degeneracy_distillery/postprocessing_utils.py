@@ -301,11 +301,74 @@ def get_Q_jax(A: jnp.ndarray) -> jnp.ndarray:
     -------
     Q : jnp.ndarray
         Orthogonal matrix
+
+    Notes
+    -----
+    ``sign(diag(R))`` has zero-gradient cliffs at ``R_ii = 0`` — the map is
+    only piecewise-smooth.  For optimization, prefer :func:`cayley_rotation`
+    or :func:`expm_rotation`, which are smooth everywhere on their domain
+    (the latter is in fact a global surjection onto ``SO(n)``).
     """
     Q, R = jnp.linalg.qr(A)
     D = jnp.diag(jnp.sign(jnp.diag(R)))
     Q = Q @ D
     return Q
+
+
+# ---------------------------------------------------------------------------
+# Smooth SO(n) parameterisations (no QR+sign cliffs).
+#
+# These are drop-in alternatives to get_Q_jax in optimizer inner loops.  They
+# operate on a flat vector ``w`` of length ``n*(n-1)/2`` (the strict
+# upper-triangular entries of a skew-symmetric matrix).  Use
+# :func:`skew_param_count` to size the optimizer state.
+# ---------------------------------------------------------------------------
+
+def skew_param_count(n: int) -> int:
+    """Number of free parameters in an ``n x n`` skew-symmetric matrix."""
+    return n * (n - 1) // 2
+
+
+def _skew_from_params_jax(w: jnp.ndarray, n: int) -> jnp.ndarray:
+    """Build ``n x n`` skew-symmetric matrix from its ``n(n-1)/2`` free
+    parameters (strict upper triangle)."""
+    S = jnp.zeros((n, n))
+    iu = jnp.triu_indices(n, k=1)
+    S = S.at[iu].set(w)
+    return S - S.T
+
+
+def cayley_rotation(w: jnp.ndarray, n: int) -> jnp.ndarray:
+    r"""Cayley map :math:`R = (I - S)(I + S)^{-1}` with ``S`` skew-symmetric.
+
+    Smooth on all of :math:`\\mathbb{R}^{n(n-1)/2}` and has image dense in
+    ``SO(n)`` (misses only the measure-zero set where ``-1`` is an
+    eigenvalue).  Strictly better gradients than the QR + sign parameterisation
+    used by :func:`get_Q_jax` — that is the primary reason to use it.
+    """
+    S = _skew_from_params_jax(w, n)
+    I = jnp.eye(n)
+    # S has pure-imaginary eigenvalues, so I + S is always invertible.
+    return jnp.linalg.solve(I + S, I - S)
+
+
+def expm_rotation(w: jnp.ndarray, n: int) -> jnp.ndarray:
+    """Matrix-exponential ``R = expm(S)`` with ``S`` skew-symmetric.
+
+    Globally surjective onto ``SO(n)``; slightly more expensive than Cayley
+    but with no missing sub-manifold.
+    """
+    S = _skew_from_params_jax(w, n)
+    return jax.scipy.linalg.expm(S)
+
+
+def rotation_from_param(w: jnp.ndarray, n: int, param: str) -> jnp.ndarray:
+    """Dispatch helper: choose the orthogonal parameterisation by name."""
+    if param == "cayley":
+        return cayley_rotation(w, n)
+    if param == "expm":
+        return expm_rotation(w, n)
+    raise ValueError(f"Unknown param={param!r}; use 'cayley' or 'expm'.")
 
 
 @jax.jit
@@ -1955,7 +2018,14 @@ def optimize_sparse_rotation(M: np.ndarray,
                              maxiter: int = 1000,
                              verbose: bool = True,
                              use_jax: bool = True,
-                             enforce_orthogonal: bool = True) -> np.ndarray:
+                             enforce_orthogonal: bool = True,
+                             param: str = "qr",
+                             loss: str = "logcosh",
+                             n_reweight: int = 5,
+                             reweight_eps: float = 1e-3,
+                             learning_rate: float = 0.01,
+                             momentum: float = 0.9,
+                             seed: Optional[int] = None) -> np.ndarray:
     """
     Find orthogonal rotation matrix A that makes A @ M sparse.
     
@@ -1967,175 +2037,304 @@ def optimize_sparse_rotation(M: np.ndarray,
     M : np.ndarray
         Coefficient matrix of shape (n_params, n_coefficients)
     lambda_ortho : float, default=1.0
-        Weight for orthogonality constraint (higher = stricter orthogonality)
+        Weight for orthogonality penalty (only used when ``param='qr'`` and
+        ``enforce_orthogonal=False``).  Ignored for ``'cayley'`` / ``'expm'``.
     alpha : float, default=1.0
-        Scaling factor for log-cosh sparsity loss (higher = closer to L1)
+        Scaling factor for log-cosh sparsity loss (higher = closer to L1).
+        Ignored when ``loss='reweighted_l1'``.
     maxiter : int, default=1000
-        Maximum optimization iterations
+        Maximum inner-loop gradient-descent iterations.  For reweighted-L1
+        the total work is ``n_reweight * maxiter``.
     verbose : bool, default=True
-        Print optimization progress
+        Print optimization progress.
     use_jax : bool, default=True
-        Use JAX for optimization (recommended for better gradients)
+        Use JAX (recommended).  Ignored for ``param`` other than ``'qr'`` —
+        the Cayley / expm parameterisations are JAX-only.
     enforce_orthogonal : bool, default=True
-        Project to orthogonal manifold at each step (recommended)
-        
+        When ``param='qr'``: project to orthogonal manifold at each step.
+        Ignored for ``'cayley'`` / ``'expm'``, which are orthogonal by
+        construction.
+    param : {'qr', 'cayley', 'expm'}, default='qr'
+        Orthogonal parameterisation.
+
+        - ``'qr'``: legacy path — optimise ``A_flat`` and project with
+          :func:`get_Q_jax`.  ``sign(diag(R))`` has gradient cliffs; when
+          the optimiser lands near ``R_ii = 0`` it can stall.
+        - ``'cayley'``: optimise the ``n(n-1)/2`` strictly-upper-triangular
+          parameters ``w`` and build ``R = (I - S)(I + S)^{-1}`` via
+          :func:`cayley_rotation`.  Smooth gradients; recommended.
+        - ``'expm'``: ``R = expm(S)`` via :func:`expm_rotation`.  Slightly
+          more expensive but globally surjective onto ``SO(n)``.
+    loss : {'logcosh', 'reweighted_l1'}, default='logcosh'
+        Sparsity-inducing loss on ``A @ M``.
+
+        - ``'logcosh'``: smooth L1 (``sum log cosh(alpha * x) / alpha``).
+          Does not drive entries to exact zero; some residual always
+          remains.
+        - ``'reweighted_l1'``: iteratively-reweighted L1 (Candès-Wakin-Boyd)
+          ``sum w_ij sqrt(x_ij^2 + eps^2)`` with ``w_{k+1} = 1 /
+          sqrt(x_k^2 + eps^2)``.  Converges to a ``||.||_0``-like solution
+          with much cleaner zero structure.  Prefer with
+          ``param='cayley'``.
+    n_reweight : int, default=5
+        Number of outer reweighting iterations when
+        ``loss='reweighted_l1'`` (ignored otherwise).
+    reweight_eps : float, default=1e-3
+        Smoothing parameter in the reweighted-L1 surrogate.
+    learning_rate, momentum : float
+        Inner-loop optimiser settings.  Defaults match the legacy values.
+    seed : int, optional
+        Seed for the random orthogonal initialisation.  ``None`` uses
+        :func:`numpy.random`'s global state (legacy behaviour).
+
     Returns
     -------
     A_opt : np.ndarray
-        Optimized rotation matrix of shape (n_params, n_params)
-        
+        Optimized rotation matrix of shape (n_params, n_params).
+
     Notes
     -----
-    Two modes available:
-    
-    1. enforce_orthogonal=True (recommended):
-       - Parameterizes A via QR decomposition
-       - A is always exactly orthogonal
-       - Optimization happens in tangent space
-       
-    2. enforce_orthogonal=False (soft constraint):
-       - Uses penalty term lambda_ortho * ||A^T A - I||^2
-       - A may drift from orthogonality
-       - Simpler but less reliable
+    The default combination ``param='qr'`` and ``loss='logcosh'`` reproduces
+    the original behaviour exactly.  For best results on realistic SR
+    output, use ``param='cayley'`` and ``loss='reweighted_l1'``.
+
+    Examples
+    --------
+    Legacy call (unchanged)::
+
+        A = optimize_sparse_rotation(M)
+
+    Recommended::
+
+        A = optimize_sparse_rotation(M, param='cayley',
+                                     loss='reweighted_l1',
+                                     n_reweight=8, maxiter=400)
     """
     n_dim = M.shape[0]
-    
-    if use_jax:
-        import jax.numpy as jnp
-        from jax import grad, jit
-        
-        if enforce_orthogonal:
-            # Optimize in space of orthogonal matrices via QR parameterization
-            @jit
-            def loss_fn(A_flat):
-                A = A_flat.reshape((n_dim, n_dim))
-                A = get_Q_jax(A)  # Project to orthogonal manifold
-                
-                transformed_M = A @ jnp.array(M)
-                
-                # Sparsity via log-cosh (smooth L1)
-                sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
-                
-                # Also penalize row-wise L1 (encourages full rows to be sparse)
-                row_sparsity = jnp.abs(transformed_M).sum(axis=1).mean()
-                
-                return sparsity_loss + 0.5 * row_sparsity
-            
-        else:
-            # Soft orthogonality constraint
-            @jit
-            def loss_fn(A_flat):
-                A = A_flat.reshape((n_dim, n_dim))
-                transformed_M = A @ jnp.array(M)
-                
-                sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
-                row_sparsity = jnp.abs(transformed_M).sum(axis=1).mean()
-                
-                # Orthogonality penalty
-                I = jnp.eye(n_dim)
-                ortho_loss = jnp.linalg.norm(A.T @ A - I, ord='fro')**2
-                
-                return sparsity_loss + 0.5 * row_sparsity + lambda_ortho * ortho_loss
-        
-        grad_fn = jit(grad(loss_fn))
-        
-        # Initialize with random orthogonal matrix
-        A_init = get_Q_jax(jnp.array(np.random.randn(n_dim, n_dim) * (2.0 / n_dim**2)))
-        A_flat = A_init.flatten()
-        
-        # Simple gradient descent with momentum
-        learning_rate = 0.01
-        momentum = 0.9
-        velocity = jnp.zeros_like(A_flat)
-        
-        best_loss = float('inf')
-        best_A = A_flat
-        patience = 50
-        no_improve = 0
-        
-        if verbose:
-            print(f"Optimizing rotation matrix (JAX, {'orthogonal' if enforce_orthogonal else 'soft constraint'})...")
-        
-        for i in range(maxiter):
-            g = grad_fn(A_flat)
-            velocity = momentum * velocity - learning_rate * g
-            A_flat = A_flat + velocity
-            
-            current_loss = float(loss_fn(A_flat))
-            
-            if current_loss < best_loss:
-                best_loss = current_loss
-                best_A = A_flat
-                no_improve = 0
-            else:
-                no_improve += 1
-            
-            if no_improve > patience:
-                if verbose:
-                    print(f"Early stopping at iteration {i}")
-                break
-            
-            if verbose and i % 100 == 0:
-                print(f"Iter {i}: loss = {current_loss:.6f}")
-        
-        A_opt = np.array(best_A).reshape((n_dim, n_dim))
-        if enforce_orthogonal:
-            A_opt = np.array(get_Q_jax(jnp.array(A_opt)))
-        
+    if param not in ("qr", "cayley", "expm"):
+        raise ValueError(f"param must be one of 'qr','cayley','expm'; got {param!r}")
+    if loss not in ("logcosh", "reweighted_l1"):
+        raise ValueError(f"loss must be 'logcosh' or 'reweighted_l1'; got {loss!r}")
+
+    # Cayley / expm are JAX-only.
+    if param in ("cayley", "expm") and not use_jax:
+        raise ValueError(f"param={param!r} requires use_jax=True")
+
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+
+        def _randn(*shape):
+            return rng.standard_normal(shape)
     else:
-        # NumPy/SciPy version
-        from scipy.optimize import minimize
-        
-        def loss_fn_numpy(A_flat):
-            A = A_flat.reshape((n_dim, n_dim))
+        def _randn(*shape):
+            return np.random.randn(*shape)
+
+    # ---------------------------------------------------------------
+    # QR parameterisation (legacy path)
+    # ---------------------------------------------------------------
+    if param == "qr":
+        if use_jax:
+            from jax import grad, jit
+
+            M_j = jnp.array(M)
+
+            def _sparsity(RM, weights):
+                if loss == "logcosh":
+                    return jnp.sum(jnp.log(jnp.cosh(alpha * RM))) / alpha
+                # reweighted_l1
+                return jnp.sum(weights * jnp.sqrt(RM * RM + reweight_eps ** 2))
+
             if enforce_orthogonal:
-                A = np.array(get_Q(A))
-            
-            transformed_M = A @ M
-            sparsity_loss = np.sum(np.log(np.cosh(alpha * transformed_M))) / alpha
-            row_sparsity = np.abs(transformed_M).sum(axis=1).mean()
-            
-            if enforce_orthogonal:
-                return sparsity_loss + 0.5 * row_sparsity
+                def _raw_loss(A_flat, weights):
+                    A = A_flat.reshape((n_dim, n_dim))
+                    A = get_Q_jax(A)
+                    RM = A @ M_j
+                    row_sparsity = jnp.abs(RM).sum(axis=1).mean()
+                    return _sparsity(RM, weights) + 0.5 * row_sparsity
             else:
+                def _raw_loss(A_flat, weights):
+                    A = A_flat.reshape((n_dim, n_dim))
+                    RM = A @ M_j
+                    row_sparsity = jnp.abs(RM).sum(axis=1).mean()
+                    I = jnp.eye(n_dim)
+                    ortho_loss = jnp.linalg.norm(A.T @ A - I, ord='fro') ** 2
+                    return (_sparsity(RM, weights) + 0.5 * row_sparsity
+                            + lambda_ortho * ortho_loss)
+
+            loss_fn = jit(_raw_loss)
+            grad_fn = jit(grad(_raw_loss))
+
+            A_init = get_Q_jax(
+                jnp.array(_randn(n_dim, n_dim) * (2.0 / n_dim ** 2))
+            )
+            x = A_init.flatten()
+            weights = jnp.ones_like(M_j)
+
+            best_loss = float("inf")
+            best_x = x
+
+            if verbose:
+                print(
+                    f"Optimizing rotation (JAX, param=qr, loss={loss}, "
+                    f"{'orthogonal' if enforce_orthogonal else 'soft'})..."
+                )
+
+            outer = n_reweight if loss == "reweighted_l1" else 1
+            for r in range(outer):
+                velocity = jnp.zeros_like(x)
+                patience = 50
+                no_improve = 0
+                for i in range(maxiter):
+                    g = grad_fn(x, weights)
+                    velocity = momentum * velocity - learning_rate * g
+                    x = x + velocity
+                    cur = float(loss_fn(x, weights))
+                    if cur < best_loss:
+                        best_loss = cur
+                        best_x = x
+                        no_improve = 0
+                    else:
+                        no_improve += 1
+                    if no_improve > patience:
+                        if verbose:
+                            print(f"  outer {r+1}/{outer}: early stop at inner {i}")
+                        break
+                    if verbose and i % 100 == 0:
+                        print(f"  outer {r+1}/{outer} iter {i}: loss = {cur:.6f}")
+                if loss == "reweighted_l1":
+                    A_cur = get_Q_jax(x.reshape((n_dim, n_dim))) if enforce_orthogonal \
+                        else x.reshape((n_dim, n_dim))
+                    RM_cur = A_cur @ M_j
+                    weights = 1.0 / jnp.sqrt(RM_cur * RM_cur + reweight_eps ** 2)
+                    if verbose:
+                        print(f"  reweight {r+1}/{outer}: ||R M||_1 "
+                              f"= {float(jnp.abs(RM_cur).sum()):.4f}")
+
+            A_opt = np.array(best_x).reshape((n_dim, n_dim))
+            if enforce_orthogonal:
+                A_opt = np.array(get_Q_jax(jnp.array(A_opt)))
+
+        else:
+            # NumPy/SciPy version (logcosh only — reweighted_l1 would add
+            # complexity with little upside outside JAX).
+            if loss == "reweighted_l1":
+                raise ValueError(
+                    "loss='reweighted_l1' requires use_jax=True"
+                )
+            from scipy.optimize import minimize
+
+            def loss_fn_numpy(A_flat):
+                A = A_flat.reshape((n_dim, n_dim))
+                if enforce_orthogonal:
+                    A = np.array(get_Q(A))
+                RM = A @ M
+                sparsity = np.sum(np.log(np.cosh(alpha * RM))) / alpha
+                row_sparsity = np.abs(RM).sum(axis=1).mean()
+                if enforce_orthogonal:
+                    return sparsity + 0.5 * row_sparsity
                 I = np.eye(n_dim)
-                ortho_loss = np.linalg.norm(A.T @ A - I, ord='fro')**2
-                return sparsity_loss + 0.5 * row_sparsity + lambda_ortho * ortho_loss
-        
-        A_init = get_Q(np.random.randn(n_dim, n_dim) * (2.0 / n_dim**2))
-        
-        result = minimize(
-            fun=loss_fn_numpy,
-            x0=A_init.flatten(),
-            method='L-BFGS-B',
-            options={'disp': verbose, 'maxiter': maxiter}
-        )
-        
-        A_opt = result.x.reshape((n_dim, n_dim))
-        if enforce_orthogonal:
-            A_opt = get_Q(A_opt)
-    
-    # Final diagnostics
+                ortho = np.linalg.norm(A.T @ A - I, ord='fro') ** 2
+                return sparsity + 0.5 * row_sparsity + lambda_ortho * ortho
+
+            A_init = get_Q(_randn(n_dim, n_dim) * (2.0 / n_dim ** 2))
+            result = minimize(
+                fun=loss_fn_numpy, x0=A_init.flatten(),
+                method="L-BFGS-B",
+                options={"disp": verbose, "maxiter": maxiter},
+            )
+            A_opt = result.x.reshape((n_dim, n_dim))
+            if enforce_orthogonal:
+                A_opt = get_Q(A_opt)
+
+    # ---------------------------------------------------------------
+    # Cayley / expm parameterisation (recommended path)
+    # ---------------------------------------------------------------
+    else:
+        from jax import grad, jit
+
+        M_j = jnp.array(M)
+        n_w = skew_param_count(n_dim)
+        rot_fn = cayley_rotation if param == "cayley" else expm_rotation
+
+        def _sparsity(RM, weights):
+            if loss == "logcosh":
+                return jnp.sum(jnp.log(jnp.cosh(alpha * RM))) / alpha
+            return jnp.sum(weights * jnp.sqrt(RM * RM + reweight_eps ** 2))
+
+        def _raw_loss(w, weights):
+            R = rot_fn(w, n_dim)
+            RM = R @ M_j
+            row_sparsity = jnp.abs(RM).sum(axis=1).mean()
+            return _sparsity(RM, weights) + 0.5 * row_sparsity
+
+        loss_fn = jit(_raw_loss)
+        grad_fn = jit(grad(_raw_loss))
+
+        w = jnp.array(_randn(n_w) * 1e-3)
+        weights = jnp.ones_like(M_j)
+
+        best_loss = float("inf")
+        best_w = w
+
+        if verbose:
+            print(f"Optimizing rotation (JAX, param={param}, loss={loss})...")
+
+        outer = n_reweight if loss == "reweighted_l1" else 1
+        for r in range(outer):
+            velocity = jnp.zeros_like(w)
+            patience = 50
+            no_improve = 0
+            for i in range(maxiter):
+                g = grad_fn(w, weights)
+                velocity = momentum * velocity - learning_rate * g
+                w = w + velocity
+                cur = float(loss_fn(w, weights))
+                if cur < best_loss:
+                    best_loss = cur
+                    best_w = w
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                if no_improve > patience:
+                    if verbose:
+                        print(f"  outer {r+1}/{outer}: early stop at inner {i}")
+                    break
+                if verbose and i % 100 == 0:
+                    print(f"  outer {r+1}/{outer} iter {i}: loss = {cur:.6f}")
+            if loss == "reweighted_l1":
+                R_cur = rot_fn(w, n_dim)
+                RM_cur = R_cur @ M_j
+                weights = 1.0 / jnp.sqrt(RM_cur * RM_cur + reweight_eps ** 2)
+                if verbose:
+                    print(f"  reweight {r+1}/{outer}: ||R M||_1 "
+                          f"= {float(jnp.abs(RM_cur).sum()):.4f}")
+
+        A_opt = np.array(rot_fn(best_w, n_dim))
+
+    # ---------------------------------------------------------------
+    # Diagnostics (common)
+    # ---------------------------------------------------------------
     if verbose:
         M_sparse = A_opt @ M
         from scipy.stats import kurtosis
-        
+
         ortho_check = A_opt.T @ A_opt
-        ortho_error = np.linalg.norm(ortho_check - np.eye(n_dim), ord='fro')
-        
-        kurt_original = np.mean(kurtosis(M, axis=1, nan_policy='omit'))
-        kurt_rotated = np.mean(kurtosis(M_sparse, axis=1, nan_policy='omit'))
-        
+        ortho_error = np.linalg.norm(ortho_check - np.eye(n_dim), ord="fro")
+
+        kurt_original = np.mean(kurtosis(M, axis=1, nan_policy="omit"))
+        kurt_rotated = np.mean(kurtosis(M_sparse, axis=1, nan_policy="omit"))
+
         sparsity_original = np.mean(np.abs(M) < 0.01)
         sparsity_rotated = np.mean(np.abs(M_sparse) < 0.01)
-        
-        print(f"\nRotation optimization complete:")
-        print(f"  Orthogonality error: {ortho_error:.6e}")
-        print(f"  Kurtosis (original): {kurt_original:.2f}")
-        print(f"  Kurtosis (rotated):  {kurt_rotated:.2f} (higher = sparser)")
-        print(f"  Sparsity (original): {sparsity_original:.2%}")
-        print(f"  Sparsity (rotated):  {sparsity_rotated:.2%}")
-    
+
+        print("\nRotation optimization complete:")
+        print(f"  param / loss        : {param} / {loss}")
+        print(f"  Orthogonality error : {ortho_error:.6e}")
+        print(f"  Kurtosis (original) : {kurt_original:.2f}")
+        print(f"  Kurtosis (rotated)  : {kurt_rotated:.2f} (higher = sparser)")
+        print(f"  Sparsity (original) : {sparsity_original:.2%}")
+        print(f"  Sparsity (rotated)  : {sparsity_rotated:.2%}")
+
     return A_opt
 
 
@@ -2150,132 +2349,194 @@ def optimize_rotation_with_flattening(all_pars: List[np.ndarray],
                                       lambda_flat: float = 10.0,
                                       alpha: float = 1.0,
                                       maxiter: int = 500,
-                                      verbose: bool = True) -> np.ndarray:
+                                      verbose: bool = True,
+                                      param: str = "qr",
+                                      loss: str = "logcosh",
+                                      n_reweight: int = 5,
+                                      reweight_eps: float = 1e-3,
+                                      learning_rate: float = 0.01,
+                                      momentum: float = 0.9,
+                                      seed: Optional[int] = None) -> np.ndarray:
     """
     Optimize rotation matrix considering BOTH sparsity and flattening quality.
     
     This is the recommended approach as it finds A that:
     1. Makes A @ M sparse (fewer terms in expressions)
     2. Ensures Fisher matrices remain well-flattened
-    
+
     Parameters
     ----------
     all_pars : List[np.ndarray]
-        Parameter arrays for each component
+        Parameter arrays for each component.
     all_fns : List[Callable]
-        Callable functions for each component
+        Callable functions for each component.
     linear_pars : List[List[float]]
-        Linear parameters
+        Linear parameters.
     linear_indexes : List[List[int]]
-        Indices of linear parameters
+        Indices of linear parameters.
     X : np.ndarray
-        Input data
+        Input data.
     Fs : np.ndarray
-        Fisher matrices
+        Fisher matrices.
     n_params : int
-        Number of parameters
+        Number of parameters.
     lambda_sparse : float, default=1.0
-        Weight for sparsity term
+        Weight for the sparsity term.
     lambda_flat : float, default=10.0
-        Weight for flattening quality
+        Weight for the flattening term (passed through to
+        :func:`lossfn_jac_jax`).
     alpha : float, default=1.0
-        Scaling for log-cosh sparsity
+        Scaling for the log-cosh sparsity loss (ignored when
+        ``loss='reweighted_l1'``).
     maxiter : int, default=500
-        Maximum iterations
+        Inner gradient-descent iterations (per outer reweight).
     verbose : bool, default=True
-        Print progress
-        
+        Print progress.
+    param : {'qr', 'cayley', 'expm'}, default='qr'
+        Orthogonal parameterisation.  See :func:`optimize_sparse_rotation`
+        for a full discussion.  ``'qr'`` reproduces the legacy behaviour
+        exactly; ``'cayley'`` or ``'expm'`` give smoother gradients.
+    loss : {'logcosh', 'reweighted_l1'}, default='logcosh'
+        Sparsity surrogate.  ``'reweighted_l1'`` converges to an
+        ``L0``-like solution over ``n_reweight`` outer iterations.
+    n_reweight : int, default=5
+        Outer reweighting iterations for ``loss='reweighted_l1'``.
+    reweight_eps : float, default=1e-3
+        Smoothing in the reweighted-L1 surrogate.
+    learning_rate, momentum : float
+        Inner-loop optimiser settings.
+    seed : int, optional
+        Seed for the random initialisation (``param='qr'`` starts at
+        ``I``; Cayley/expm start at a tiny-random ``w``).
+
     Returns
     -------
     A_opt : np.ndarray
-        Optimized rotation matrix
+        Optimized rotation matrix.
+
+    Notes
+    -----
+    The default ``param='qr'`` / ``loss='logcosh'`` combination reproduces
+    the original behaviour exactly.  Prefer ``param='cayley'`` and
+    ``loss='reweighted_l1'`` for realistic SR output.
     """
+    if param not in ("qr", "cayley", "expm"):
+        raise ValueError(f"param must be 'qr','cayley','expm'; got {param!r}")
+    if loss not in ("logcosh", "reweighted_l1"):
+        raise ValueError(f"loss must be 'logcosh' or 'reweighted_l1'; got {loss!r}")
+
+    from jax import grad, jit
+
     M = construct_M(linear_pars, n_params)
-    
-    # Use the existing lossfn_jac_jax but add sparsity term
-    def combined_loss(A_flat):
-        A = A_flat.reshape((n_params, n_params))
-        
-        # Part 1: Flattening quality (from lossfn_jac_jax)
+    M_j = jnp.array(M)
+
+    rng = np.random.default_rng(seed) if seed is not None else np.random
+
+    def _sparsity(RM, weights):
+        if loss == "logcosh":
+            return jnp.sum(jnp.log(jnp.cosh(alpha * RM))) / alpha
+        return jnp.sum(weights * jnp.sqrt(RM * RM + reweight_eps ** 2))
+
+    # ---------- pick parameterisation ----------
+    if param == "qr":
+        def _build_A(x):
+            return x.reshape((n_params, n_params))
+
+        def _build_A_ortho(x):
+            return get_Q_jax(x.reshape((n_params, n_params)))
+
+        x0 = jnp.eye(n_params).flatten()  # legacy init
+    else:
+        rot_fn = cayley_rotation if param == "cayley" else expm_rotation
+        n_w = skew_param_count(n_params)
+
+        def _build_A(x):
+            return rot_fn(x, n_params)
+
+        def _build_A_ortho(x):
+            return rot_fn(x, n_params)
+
+        x0 = jnp.array(rng.standard_normal(n_w) * 1e-3)
+
+    # ---------- combined loss ----------
+    def _raw_loss(x, weights):
+        A = _build_A(x)
         flat_loss = lossfn_jac_jax(
             A=A,
             all_pars=all_pars,
             all_fns=all_fns,
             linear_pars=linear_pars,
             linear_indexes=linear_indexes,
-            X=X,
-            Fs=Fs,
-            n_params=n_params,
-            alpha=0.5,  # Lower alpha for flattening loss
+            X=X, Fs=Fs, n_params=n_params,
+            alpha=0.5,
             lambda_flat=lambda_flat,
-            smoothl1=True
+            smoothl1=True,
         )
-        
-        # Part 2: Sparsity of rotated coefficients
-        A_ortho = get_Q_jax(A)
-        transformed_M = A_ortho @ jnp.array(M)
-        sparsity_loss = jnp.sum(jnp.log(jnp.cosh(alpha * transformed_M))) / alpha
-        
+        A_ortho = _build_A_ortho(x)
+        RM = A_ortho @ M_j
+        sparsity_loss = _sparsity(RM, weights)
         return flat_loss + lambda_sparse * sparsity_loss
-    
-    # Initialize
-    A_init = jnp.eye(n_params)
-    
+
+    loss_fn = jit(_raw_loss)
+    grad_fn = jit(grad(_raw_loss))
+
+    x = x0
+    weights = jnp.ones_like(M_j)
+    best_loss = float("inf")
+    best_x = x
+
     if verbose:
         print("Optimizing rotation with both sparsity and flattening constraints...")
-        print(f"  lambda_sparse={lambda_sparse}, lambda_flat={lambda_flat}")
-    
-    # Use JAX optimizer
-    from jax import grad, jit
-    
-    grad_fn = jit(grad(combined_loss))
-    
-    A_flat = A_init.flatten()
-    learning_rate = 0.01
-    momentum = 0.9
-    velocity = jnp.zeros_like(A_flat)
-    
-    best_loss = float('inf')
-    best_A = A_flat
-    patience = 50
-    no_improve = 0
-    
-    for i in range(maxiter):
-        g = grad_fn(A_flat)
-        velocity = momentum * velocity - learning_rate * g
-        A_flat = A_flat + velocity
-        
-        current_loss = float(combined_loss(A_flat))
-        
-        if current_loss < best_loss:
-            best_loss = current_loss
-            best_A = A_flat
-            no_improve = 0
-        else:
-            no_improve += 1
-        
-        if no_improve > patience:
+        print(f"  lambda_sparse={lambda_sparse}, lambda_flat={lambda_flat}, "
+              f"param={param}, loss={loss}")
+
+    outer = n_reweight if loss == "reweighted_l1" else 1
+    for r in range(outer):
+        velocity = jnp.zeros_like(x)
+        patience = 50
+        no_improve = 0
+        for i in range(maxiter):
+            g = grad_fn(x, weights)
+            velocity = momentum * velocity - learning_rate * g
+            x = x + velocity
+            cur = float(loss_fn(x, weights))
+            if cur < best_loss:
+                best_loss = cur
+                best_x = x
+                no_improve = 0
+            else:
+                no_improve += 1
+            if no_improve > patience:
+                if verbose:
+                    print(f"  outer {r+1}/{outer}: early stop at inner {i}")
+                break
+            if verbose and i % 50 == 0:
+                print(f"  outer {r+1}/{outer} iter {i}: loss = {cur:.6f}")
+        if loss == "reweighted_l1":
+            A_cur = _build_A_ortho(x)
+            RM_cur = A_cur @ M_j
+            weights = 1.0 / jnp.sqrt(RM_cur * RM_cur + reweight_eps ** 2)
             if verbose:
-                print(f"Early stopping at iteration {i}")
-            break
-        
-        if verbose and i % 50 == 0:
-            print(f"Iter {i}: loss = {current_loss:.6f}")
-    
-    A_opt = np.array(best_A).reshape((n_params, n_params))
-    A_opt = np.array(get_Q_jax(jnp.array(A_opt)))
-    
+                print(f"  reweight {r+1}/{outer}: ||R M||_1 "
+                      f"= {float(jnp.abs(RM_cur).sum()):.4f}")
+
+    A_opt = np.array(_build_A_ortho(best_x))
+
     if verbose:
         M_sparse = A_opt @ M
         from scipy.stats import kurtosis
-        
+
         kurt_original = np.mean(kurtosis(M, axis=1, nan_policy='omit'))
         kurt_rotated = np.mean(kurtosis(M_sparse, axis=1, nan_policy='omit'))
-        
-        print(f"\nOptimization complete:")
-        print(f"  Final loss: {best_loss:.6f}")
-        print(f"  Kurtosis improvement: {kurt_original:.2f} → {kurt_rotated:.2f}")
-    
+        ortho_error = float(np.linalg.norm(
+            A_opt.T @ A_opt - np.eye(n_params), ord='fro'
+        ))
+
+        print("\nOptimization complete:")
+        print(f"  Final loss            : {best_loss:.6f}")
+        print(f"  Orthogonality error   : {ortho_error:.3e}")
+        print(f"  Kurtosis improvement  : {kurt_original:.2f} -> {kurt_rotated:.2f}")
+
     return A_opt
 
 
@@ -2332,8 +2593,20 @@ def postprocess_eqs(coordinates: List[str],
         - "full": Optimize for both sparsity and flattening (recommended but slower)
     rotation_params : Dict, optional
         Parameters for rotation optimization. Keys depend on optimize_rotation:
-        - For "sparse": lambda_ortho, alpha, maxiter, use_jax, enforce_orthogonal
-        - For "full": lambda_sparse, lambda_flat, alpha, maxiter
+
+        - For "sparse": ``lambda_ortho``, ``alpha``, ``maxiter``, ``use_jax``,
+          ``enforce_orthogonal``, plus the parameterisation / loss knobs
+          ``param`` (``'qr'|'cayley'|'expm'``), ``loss``
+          (``'logcosh'|'reweighted_l1'``), ``n_reweight``, ``reweight_eps``,
+          ``learning_rate``, ``momentum``, ``seed``.  See
+          :func:`optimize_sparse_rotation` for the full parameter list.
+        - For "full": ``lambda_sparse``, ``lambda_flat``, ``alpha``,
+          ``maxiter`` plus the same extended knobs as above.  See
+          :func:`optimize_rotation_with_flattening`.
+
+        The defaults (``param='qr'``, ``loss='logcosh'``) reproduce the
+        legacy behaviour exactly.  For realistic SR output, prefer
+        ``rotation_params={"param": "cayley", "loss": "reweighted_l1"}``.
     threshold : float, default=0.05
         Relative loss threshold for removing linear coefficients.
     importance_based : bool, default=True

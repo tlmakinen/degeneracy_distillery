@@ -19,7 +19,7 @@ import optax
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from typing import Sequence, Any, Callable, Optional, Literal
+from typing import Sequence, Any, Callable, Optional, Literal, Union
 from tqdm import tqdm
 
 # Import external modules (assumed to be provided)
@@ -624,7 +624,9 @@ def fit_flattening(F_network_ensemble, θs,
                    nn_inv: bool = False,
                    forward_backward_mlp: bool = False,
                    forward_backward_invertibility_weight: float = 1.0,
-                   flattener_activation: Literal["sin_swish", "softplus"] = "sin_swish",
+                   flattener_activation: Union[
+                       Literal["sin_swish", "softplus"], Callable[[Any], Any]
+                   ] = "sin_swish",
                    loss_type: Literal["log_frob", "frob", "squared_frob"] = "log_frob",
                    do_plot: bool = True,
                    loss_reweight_lambda: float = 100.0,
@@ -720,9 +722,13 @@ def fit_flattening(F_network_ensemble, θs,
             to the training loss. Mutually exclusive with ``nn_inv``.
         forward_backward_invertibility_weight: Multiplier on the cycle-consistency term
             when ``forward_backward_mlp`` is True.
-        flattener_activation: Nonlinearity for all flattener hidden units: ``sin_swish``
-            (default, ``sin(swish(x))``) or ``softplus`` (``flax.linen.nn.softplus``), including
-            RealNVP coupling nets when ``nn_inv`` is True.
+        flattener_activation: Nonlinearity for all flattener hidden units. Accepts either:
+            - a string shortcut: ``"sin_swish"`` (default, ``sin(swish(x))``) or ``"softplus"``
+              (``flax.linen.nn.softplus``); or
+            - any callable ``f(x) -> x`` (e.g. ``jax.nn.gelu``, ``jax.nn.mish``, a custom
+              Snake/SIREN activation, etc.). The callable is used as-is for all hidden layers,
+              including RealNVP coupling nets when ``nn_inv`` is True. It should be traceable
+              under ``jax.jit``/``jax.grad`` and ideally smooth if the loss uses Jacobians.
         loss_type: Form of the per-sample flattening objective:
             ``"log_frob"`` (default) — reweighted ``‖Q−I‖_F + ‖Q⁻¹−I‖_F``, then outer
             ``log(·)``. Legacy behaviour.
@@ -848,20 +854,35 @@ def fit_flattening(F_network_ensemble, θs,
     if nn_inv and forward_backward_mlp:
         raise ValueError("nn_inv and forward_backward_mlp cannot both be True.")
 
-    if flattener_activation not in ("sin_swish", "softplus"):
-        raise ValueError(
-            "flattener_activation must be 'sin_swish' or 'softplus', "
-            f"got {flattener_activation!r}"
+    _string_activations = {
+        "sin_swish": stable_sin_swish,
+        "softplus": nn.softplus,
+    }
+    if isinstance(flattener_activation, str):
+        if flattener_activation not in _string_activations:
+            raise ValueError(
+                "flattener_activation string must be one of "
+                f"{sorted(_string_activations)}, got {flattener_activation!r}"
+            )
+        _flattener_act = _string_activations[flattener_activation]
+        _flattener_act_name = flattener_activation
+    elif callable(flattener_activation):
+        _flattener_act = flattener_activation
+        _flattener_act_name = getattr(
+            flattener_activation, "__name__", repr(flattener_activation)
+        )
+    else:
+        raise TypeError(
+            "flattener_activation must be a string "
+            f"({sorted(_string_activations)}) or a callable, got "
+            f"{type(flattener_activation).__name__}"
         )
     if loss_type not in ("log_frob", "frob", "squared_frob"):
         raise ValueError(
             "loss_type must be 'log_frob', 'frob', or 'squared_frob', "
             f"got {loss_type!r}"
         )
-    _flattener_act = (
-        stable_sin_swish if flattener_activation == "sin_swish" else nn.softplus
-    )
-    print(f"Flattener activation: {flattener_activation}")
+    print(f"Flattener activation: {_flattener_act_name}")
     print(f"Loss type: {loss_type}")
     print(f"Min-max input scaling: {minmax_scale_inputs}")
     print(f"Min-max post-scale offset: {offset}")
@@ -1335,7 +1356,7 @@ def fit_flattening(F_network_ensemble, θs,
         ),
         fisher_to_flatten=np.array(_fisher_mode),
         best_ensemble_member_index=np.array(best_idx),
-        flattener_activation=np.array(flattener_activation),
+        flattener_activation=np.array(_flattener_act_name),
     )
     
     # Add whitening matrices if used

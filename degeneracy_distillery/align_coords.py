@@ -52,6 +52,7 @@ def nonlinearity_rotation(
     prior_scales: Optional[np.ndarray] = None,
     regularization: float = 1e-12,
     center: bool = True,
+    enforce_proper: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Orthogonal rotation that concentrates θ-nonlinearity in the first η-axes.
 
@@ -85,6 +86,13 @@ def nonlinearity_rotation(
     center : bool
         If False, skip the subtraction of ``J̄`` (useful when ``dy`` is already
         pre-centered, or to capture absolute J structure instead of variation).
+    enforce_proper : bool
+        If True (default), force ``det(R) = +1`` (proper rotation, ``SO(D_out)``)
+        by flipping the sign of the *last* row of ``R`` when needed.  The last
+        row corresponds to the smallest singular value, i.e. the axis with the
+        least nonlinearity energy, so the flip has minimal semantic impact.
+        Fisher flatness ``Q = J^{-T} F J^{-1}`` is preserved either way (any
+        orthogonal conjugation leaves ``‖Q − I‖_F`` and ``eig(Q)`` unchanged).
 
     Returns
     -------
@@ -132,6 +140,12 @@ def nonlinearity_rotation(
     U = U * sign[None, :]
 
     R = U.T
+
+    if enforce_proper and np.linalg.det(R) < 0:
+        # Flip the lowest-σ axis (least nonlinear): minimal impact on ordering.
+        R = R.copy()
+        R[-1] *= -1.0
+
     return R, sigma + regularization
 
 
@@ -258,6 +272,7 @@ def fisher_order_canonicalize(
     Fs: np.ndarray,
     prior_scales: Optional[np.ndarray] = None,
     mode: Literal["sign_only", "permute_and_sign"] = "sign_only",
+    enforce_proper: bool = True,
 ) -> np.ndarray:
     """Apply a sign (and optional permutation) fix to ``R`` using the mean Fisher.
 
@@ -282,6 +297,14 @@ def fisher_order_canonicalize(
         Prior widths, forwarded to :func:`mean_fisher_eigen`.
     mode : {"sign_only", "permute_and_sign"}
         How aggressive the canonicalization is.
+    enforce_proper : bool
+        If True (default), guarantee ``det(R) = +1`` (proper rotation,
+        ``SO(D_out)``) on output.  When the sign / permutation step would
+        otherwise produce a reflection (``det = -1``), the row whose sign was
+        chosen with the *least* confidence — i.e. ``argmin |⟨R J, eigvec⟩|`` —
+        has its sign re-flipped.  This costs nothing in Fisher flatness (any
+        orthogonal conjugation preserves it) and minimally perturbs the
+        canonical sign convention.
 
     Returns
     -------
@@ -316,6 +339,13 @@ def fisher_order_canonicalize(
     inner = np.einsum("ij,ji->i", J_rot_mean, eigvecs)
     signs = np.where(inner >= 0, 1.0, -1.0)
     R = signs[:, None] * R
+
+    if enforce_proper and np.linalg.det(R) < 0:
+        # Flip the row whose sign was chosen with the least confidence.
+        flip_idx = int(np.argmin(np.abs(inner)))
+        R = R.copy()
+        R[flip_idx] *= -1.0
+
     return R
 
 
@@ -336,6 +366,7 @@ def rotate_coords_v2(
     canonicalize: Literal["none", "sign_only", "permute_and_sign"] = "sign_only",
     use_prior_normalization: bool = True,
     restore_reference_mean: bool = True,
+    enforce_proper: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Improved coordinate/Jacobian rotation for a single ensemble member.
 
@@ -362,6 +393,10 @@ def rotate_coords_v2(
       reference scale, matching the legacy behaviour.  Pure translation has no
       effect on Jacobians.
     * ``A`` is kept for signature compatibility (identity here).
+    * ``enforce_proper=True`` (default) guarantees ``det(R_total) = +1`` —
+      i.e. proper rotation, no parity flip relative to θ.  Disable only if
+      you accept that the η frame may be a mirror image of the θ frame.
+      Fisher flattening is preserved either way.
     """
     y = np.asarray(y, dtype=np.float64).copy()
     theta = np.asarray(theta).copy()
@@ -387,7 +422,11 @@ def rotate_coords_v2(
     if align_mode == "procrustes":
         if dy_reference is None:
             raise ValueError("align_mode='procrustes' requires dy_reference.")
-        R_align = jacobian_procrustes(dy, dy_reference, sample_weights=sample_weights)
+        R_align = jacobian_procrustes(
+            dy, dy_reference,
+            sample_weights=sample_weights,
+            allow_reflection=not enforce_proper,
+        )
     elif align_mode == "kabsch":
         if y_reference is None:
             raise ValueError("align_mode='kabsch' requires y_reference.")
@@ -410,6 +449,7 @@ def rotate_coords_v2(
             dy_for_basis,
             sample_weights=sample_weights,
             prior_scales=prior_scales,
+            enforce_proper=enforce_proper,
         )
     else:
         R_nl = np.eye(D_out)
@@ -423,7 +463,14 @@ def rotate_coords_v2(
             R_total, dy, Fs,
             prior_scales=prior_scales if use_prior_normalization else None,
             mode="sign_only" if canonicalize == "sign_only" else "permute_and_sign",
+            enforce_proper=enforce_proper,
         )
+
+    # Final safety net: composition of proper rotations is proper, but composing
+    # with kabsch_jax (which may reflect) can leak a det = -1.  Catch it here.
+    if enforce_proper and np.linalg.det(R_total) < 0:
+        R_total = R_total.copy()
+        R_total[-1] *= -1.0
 
     # ---- Step 4: apply ------------------------------------------------------
     y = np.einsum("ij,bj->bi", R_total, y)
@@ -452,6 +499,7 @@ def process_ensemble_rotation_v2(
     canonicalize: Literal["none", "sign_only", "permute_and_sign"] = "sign_only",
     use_prior_normalization: bool = True,
     restore_reference_mean: bool = True,
+    enforce_proper: bool = True,
     Fisher_to_flatten: Literal["average", "best"] = "average",
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -471,6 +519,10 @@ def process_ensemble_rotation_v2(
       most nonlinear) η-components come first.
     * ``canonicalize`` fixes per-axis sign (and optionally permutation) using
       the mean θ-space Fisher.
+    * ``enforce_proper=True`` (default) guarantees every per-member ``rotmat``
+      is in ``SO(D_out)`` (proper rotation, det = +1) so the η frame has the
+      same handedness as the θ frame.  Disable to allow reflections; Fisher
+      flatness is preserved either way.
     """
     if Fisher_to_flatten not in ("average", "best"):
         raise ValueError(
@@ -518,6 +570,7 @@ def process_ensemble_rotation_v2(
             canonicalize=canonicalize,
             use_prior_normalization=use_prior_normalization,
             restore_reference_mean=restore_reference_mean,
+            enforce_proper=enforce_proper,
         )
 
         ys.append(y_rot)
@@ -612,6 +665,7 @@ def load_and_process_data_v2(
     canonicalize: Literal["none", "sign_only", "permute_and_sign"] = "sign_only",
     use_prior_normalization: bool = True,
     restore_reference_mean: bool = True,
+    enforce_proper: bool = True,
     Fisher_to_flatten: Literal["average", "best"] = "average",
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -628,8 +682,9 @@ def load_and_process_data_v2(
     process_ensemble : bool
         If False, only loads the file and returns the same "loading-only"
         dictionary as the legacy loader (X, Favg, datafile, etc.).
-    align_mode, separate_nonlinearity, canonicalize, use_prior_normalization, restore_reference_mean
-        Forwarded to :func:`process_ensemble_rotation_v2`.
+    align_mode, separate_nonlinearity, canonicalize, use_prior_normalization, restore_reference_mean, enforce_proper
+        Forwarded to :func:`process_ensemble_rotation_v2`.  ``enforce_proper``
+        defaults to True (guarantees ``det(R) = +1`` per member).
 
     Returns
     -------
@@ -664,6 +719,7 @@ def load_and_process_data_v2(
         canonicalize=canonicalize,
         use_prior_normalization=use_prior_normalization,
         restore_reference_mean=restore_reference_mean,
+        enforce_proper=enforce_proper,
         Fisher_to_flatten=Fisher_to_flatten,
         verbose=verbose,
     )

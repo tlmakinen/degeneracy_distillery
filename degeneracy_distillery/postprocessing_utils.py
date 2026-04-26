@@ -609,27 +609,87 @@ def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
     return np.column_stack(cols)
 
 
-def pruned_coordinate_is_degenerate(expr: str, X: np.ndarray, y_atol: float = 1e-10) -> bool:
+def pruned_coordinate_is_degenerate(
+    expr: str,
+    X: np.ndarray,
+    y_atol: float = 1e-10,
+    const_rel_atol: float = 1e-8,
+) -> bool:
     """
-    True if a pruned coordinate has no nontrivial signal (the Jacobian row is ~0).
+    True if a pruned coordinate has no nontrivial θ-signal.
 
-    Uses a cheap string/sympy check, then a numerical check via :func:`get_y_sr`
-    in case the expression is not exactly the symbol ``0`` after ``sympy.simplify``.
+    A coordinate is considered degenerate when its Jacobian row in θ is
+    (numerically) zero, which happens for **both**:
+
+    * **Identically zero** expressions (``y ≈ 0`` everywhere on ``X``).
+    * **Constant** expressions (``y ≈ c`` everywhere on ``X``, ``c`` independent
+      of θ).
+
+    Either case makes :math:`Q = (A J^+)^T F (A J^+)` rank-deficient downstream
+    and breaks the flattening operation, so we treat them the same — the
+    repair routine then patches both with a linear :math:`c X_j` term so
+    every coordinate has at least a linear dependence on one θ component.
+
+    Detection strategy (short-circuited):
+      1. Cheap string match for literal ``0``.
+      2. ``sympy.simplify`` reduction to ``0``.
+      3. **Symbolic constancy check**: ``∂expr/∂X_j == 0`` for every
+         ``X_j ∈ {X1, …, X_n}``.
+      4. Numerical fallback via :func:`get_y_sr`:
+
+         * ``max|y| < y_atol``                                      → zero, or
+         * ``range(y) < max(y_atol, const_rel_atol · max|y|)``      → constant.
+
+    Parameters
+    ----------
+    expr : str
+        Coordinate expression in ``X1..Xn``.
+    X : np.ndarray
+        ``(n_samples, n_params)`` parameter samples used for the numerical
+        fallback.  ``n_params`` is read from ``X.shape[1]``.
+    y_atol : float
+        Absolute tolerance for treating a coordinate as identically zero
+        (also a floor for the constant check).
+    const_rel_atol : float
+        Relative tolerance for treating a non-zero coordinate as constant:
+        ``range(y) < const_rel_atol · max|y|`` triggers a repair.  Default
+        ``1e-8``.  Set to ``0`` to disable constant detection (legacy
+        behaviour: only literal-zero coordinates are repaired).
     """
     s = str(expr).strip()
     if s in ("0", "0.0", "-0", "-0.0"):
         return True
+
+    n_pars = int(X.shape[1]) if X.ndim == 2 else 0
+    detect_constants = const_rel_atol > 0.0
     try:
-        if sympy.simplify(s) == 0:
+        simp = sympy.simplify(s)
+        if simp == 0:
             return True
+        if detect_constants and n_pars > 0:
+            # Match by symbol *name* rather than constructing fresh symbols:
+            # the parsed X1..Xn carry no assumptions while ``sympy.symbols``
+            # may attach ``real=True`` etc., so identity comparison is unsafe.
+            theta_names = {f"X{j}" for j in range(1, n_pars + 1)}
+            free_names = {sym.name for sym in simp.free_symbols}
+            if not (free_names & theta_names):
+                return True
     except Exception:
         pass
+
     if not ESR_AVAILABLE:
         return False
     try:
         y = get_y_sr([s], X)
-        if y.size and float(np.max(np.abs(y))) < y_atol:
+        if y.size == 0:
+            return False
+        y_abs_max = float(np.max(np.abs(y)))
+        if y_abs_max < y_atol:
             return True
+        if detect_constants:
+            y_range = float(np.max(y) - np.min(y))
+            if y_range < max(y_atol, const_rel_atol * y_abs_max):
+                return True
     except Exception:
         pass
     return False
@@ -655,32 +715,44 @@ def repair_degenerate_pruned_expressions(
     check_flattening_fn: Callable,
     flat_score_ref: float,
     y_atol: float = 1e-10,
+    const_rel_atol: float = 1e-8,
     rel_deviation_threshold: float = 0.05,
     scale: float = 1.0,
     verbose: bool = False,
 ) -> Tuple[List[str], List[int], List[Dict[str, Any]]]:
     """
-    If importance pruning drives a full coordinate to zero, restore a *single* linear
-    :math:`c X_j` term in :math:`\\theta` (notation ``X1..Xn``) so the Jacobian
-    is no longer rank-degenerate.
+    If importance pruning drives a full coordinate to a θ-independent value
+    (zero **or** any constant), restore a *single* linear :math:`c X_j` term in
+    :math:`\\theta` (notation ``X1..Xn``) so the Jacobian is no longer
+    rank-degenerate.
 
-    The flattening map uses :math:`Q = (A J^+)^T F (A J^+)`; a row of :math:`J`
-    that is identically zero makes the pseudoinverse pathological, so a literal
-    ``0`` or constant coordinate is not acceptable.
+    The flattening map uses :math:`Q = (A J^+)^T F (A J^+)`; any coordinate
+    whose Jacobian row is identically zero — whether the expression is
+    literally ``0`` or a non-trivial constant — makes the pseudoinverse
+    pathological, so neither is acceptable.  Both cases are detected by
+    :func:`pruned_coordinate_is_degenerate` and patched here.
 
     **Invariance:** There is in general *no* linear :math:`c^\\top X` for which the
-    flatness score is *exactly* unchanged after replacing a zero row—:math:`J^+` is
-    global. This routine picks :math:`(j, c=\\text{scale})` that *minimizes* the
-    change from ``flat_score_ref`` (the same idea as the pruning
-    :math:`\\Delta / \\text{ref}` test). If the best result still deviates by more
-    than ``rel_deviation_threshold``, it is kept anyway to avoid a dead output;
-    you can set ``scale`` small (e.g. ``1e-3``) to reduce impact on the score.
+    flatness score is *exactly* unchanged after replacing a zero/constant row
+    — :math:`J^+` is global. This routine picks :math:`(j, c=\\text{scale})`
+    that *minimizes* the change from ``flat_score_ref`` (the same idea as the
+    pruning :math:`\\Delta / \\text{ref}` test). If the best result still
+    deviates by more than ``rel_deviation_threshold``, it is kept anyway to
+    avoid a dead output; you can set ``scale`` small (e.g. ``1e-3``) to
+    reduce impact on the score.
 
     Parameters
     ----------
     flat_score_ref
         Reference from the un-pruned (or pre-repair) pipeline, e.g. from
         :func:`get_pruned_expressions_final` before the fix.
+    y_atol
+        Absolute tolerance for treating a coordinate as identically zero
+        (forwarded to :func:`pruned_coordinate_is_degenerate`).
+    const_rel_atol
+        Relative tolerance for treating a non-zero coordinate as constant in
+        ``θ`` (forwarded to :func:`pruned_coordinate_is_degenerate`).  Set to
+        ``0`` to disable constant detection (legacy zero-only behaviour).
     rel_deviation_threshold
         Maximum acceptable relative change ``|S - ref| / ref`` for logging only.
     scale
@@ -710,7 +782,9 @@ def repair_degenerate_pruned_expressions(
     details: List[Dict[str, Any]] = []
 
     for i in range(len(out)):
-        if not pruned_coordinate_is_degenerate(out[i], X, y_atol=y_atol):
+        if not pruned_coordinate_is_degenerate(
+            out[i], X, y_atol=y_atol, const_rel_atol=const_rel_atol
+        ):
             continue
         if n_params < 1:
             continue
@@ -1407,7 +1481,8 @@ def get_pruned_expressions_final(A: np.ndarray,
                                   batch_size: int = 5,
                                   repair_degenerate_linear: bool = True,
                                   repair_linear_scale: float = 1.0,
-                                  repair_y_atol: float = 1e-10) -> Tuple[List[str], List[List[float]]]:
+                                  repair_y_atol: float = 1e-10,
+                                  repair_const_rel_atol: float = 1e-8) -> Tuple[List[str], List[List[float]]]:
     """
     Generate final pruned expressions with loss-based coefficient removal.
     
@@ -1471,12 +1546,19 @@ def get_pruned_expressions_final(A: np.ndarray,
     batch_size : int
         Number of coefficients to attempt removing in each batch
     repair_degenerate_linear : bool
-        If True, any coordinate that collapses to 0 (dead Jacobian row) is patched
-        with a single :math:`c X_j` term; see :func:`repair_degenerate_pruned_expressions`.
+        If True, any coordinate whose Jacobian row is identically zero — i.e.
+        the expression collapses to ``0`` *or* to any θ-independent constant —
+        is patched with a single :math:`c X_j` term; see
+        :func:`repair_degenerate_pruned_expressions`.
     repair_linear_scale : float
         Coefficient ``c`` in that term (try ``1e-3`` if the score moves too much).
     repair_y_atol : float
-        Numerical tolerance for "all outputs zero" in :func:`pruned_coordinate_is_degenerate`.
+        Absolute tolerance for the "coordinate is identically zero" test in
+        :func:`pruned_coordinate_is_degenerate`.
+    repair_const_rel_atol : float
+        Relative tolerance for the "coordinate is constant in θ" test (default
+        ``1e-8``).  Set to ``0`` to disable constant detection (legacy
+        zero-only behaviour).
         
     Returns
     -------
@@ -1774,6 +1856,7 @@ def get_pruned_expressions_final(A: np.ndarray,
             check_flattening_fn,
             float(flat_score_reference),
             y_atol=repair_y_atol,
+            const_rel_atol=repair_const_rel_atol,
             rel_deviation_threshold=threshold,
             scale=repair_linear_scale,
             verbose=verbose,
@@ -2562,7 +2645,8 @@ def postprocess_eqs(coordinates: List[str],
                     module: str = "jax",
                     repair_degenerate_linear: bool = True,
                     repair_linear_scale: float = 1.0,
-                    repair_y_atol: float = 1e-10) -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
+                    repair_y_atol: float = 1e-10,
+                    repair_const_rel_atol: float = 1e-8) -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
     """
     High-level wrapper for postprocessing symbolic expressions.
     
@@ -2639,13 +2723,18 @@ def postprocess_eqs(coordinates: List[str],
     module : str, default="jax"
         Module for lambdify ("jax" or "numpy")
     repair_degenerate_linear : bool, default=True
-        If a pruned output is identically zero, append a linear :math:`c X_j` term
-        (see :func:`repair_degenerate_pruned_expressions`). Set False to disable.
+        If a pruned output is identically zero **or** collapses to a θ-independent
+        constant, append a linear :math:`c X_j` term so it has at least a linear
+        dependence on one θ component (see
+        :func:`repair_degenerate_pruned_expressions`). Set False to disable.
     repair_linear_scale : float, default=1.0
         Coefficient :math:`c` in the repair term; use a small value (e.g. ``1e-3``)
         if the flatness score moves too much.
     repair_y_atol : float, default=1e-10
-        Tolerance for treating a coordinate as numerically zero on ``X``.
+        Absolute tolerance for the "coordinate is identically zero" test on ``X``.
+    repair_const_rel_atol : float, default=1e-8
+        Relative tolerance for the "coordinate is constant in θ" test on ``X``.
+        Set to ``0`` to disable constant detection (legacy zero-only behaviour).
         
     Returns
     -------
@@ -2819,7 +2908,8 @@ def postprocess_eqs(coordinates: List[str],
         batch_size=batch_size,
         repair_degenerate_linear=repair_degenerate_linear,
         repair_linear_scale=repair_linear_scale,
-        repair_y_atol=repair_y_atol
+        repair_y_atol=repair_y_atol,
+        repair_const_rel_atol=repair_const_rel_atol
     )
     
     # Optional second pass: prune ALL constants (including nonlinear)

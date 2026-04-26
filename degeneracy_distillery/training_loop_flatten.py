@@ -627,13 +627,16 @@ def fit_flattening(F_network_ensemble, θs,
                    flattener_activation: Union[
                        Literal["sin_swish", "softplus"], Callable[[Any], Any]
                    ] = "sin_swish",
-                   loss_type: Literal["log_frob", "frob", "squared_frob"] = "log_frob",
+                   loss_type: Literal[
+                       "log_frob", "frob", "squared_frob", "squared_frob_det"
+                   ] = "log_frob",
                    do_plot: bool = True,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
                    loss_log_epsilon: float = 1e-12,
                    loss_log_tau: float = 0.1,
                    q_inv_jitter: float = 1e-8,
+                   beta_det: float = 0.1,
                    grad_clip_norm: Optional[float] = None,
                    lr_schedule_phase1: Optional[Any] = None,
                    lr_schedule_phase2: Optional[Any] = None,
@@ -736,6 +739,12 @@ def fit_flattening(F_network_ensemble, θs,
             Gives stronger gradients near the optimum.
             ``"squared_frob"`` — plain ``‖Q−I‖_F²`` with no reweighting, inverse term, or
             log. Simplest loss; most aggressive gradient signal near the optimum.
+            ``"squared_frob_det"`` — ``‖Q−I‖_F² + β · (log det Q)²``. Same as
+            ``"squared_frob"`` but adds a symmetric log-det barrier (``β = beta_det``)
+            that penalises ``det Q → 0`` and ``det Q → ∞`` equally. Use this when
+            ``"squared_frob"`` flattens nicely but ``det F_η`` collapses toward zero
+            (i.e. the network over-stretches the Jacobian). Logarithmic growth keeps
+            the gradient much gentler than a literal ``‖Q⁻¹−I‖`` term.
         do_plot: Whether to generate coordinate visualization plots
         loss_reweight_lambda: λ in the per-sample reweighting r = λ·loss / (loss + exp(-α·loss));
             larger values change how aggressively large residuals are up-weighted. Default matches
@@ -750,7 +759,12 @@ def fit_flattening(F_network_ensemble, θs,
             ``stall_log_loss`` is the printed loss value at which training plateaus.
         q_inv_jitter: Added to Q as ε·I before jnp.linalg.inv(Q) in the loss, so singular or
             nearly singular Q (e.g. rank-deficient predicted Fisher) does not produce NaN grads.
-            Set to 0 to restore the previous strict behavior (may NaN).
+            Set to 0 to restore the previous strict behavior (may NaN). Also used as the
+            jitter for ``slogdet(Q + ε·I)`` in ``loss_type="squared_frob_det"``.
+        beta_det: Weight of the ``(log det Q)²`` symmetric log-det barrier added by
+            ``loss_type="squared_frob_det"``. Ignored for all other loss types. Sensible
+            range is ``0.01``–``1.0``: tune so the barrier and ``‖Q−I‖_F²`` terms are
+            within an order of magnitude of each other late in training. Default ``0.1``.
         grad_clip_norm: If set, apply global norm clipping to gradients before Adam. Default None:
             no clipping (legacy behavior).
         lr_schedule_phase1: Optional Optax learning rate schedule (or scalar) for phase 1. None means
@@ -877,13 +891,15 @@ def fit_flattening(F_network_ensemble, θs,
             f"({sorted(_string_activations)}) or a callable, got "
             f"{type(flattener_activation).__name__}"
         )
-    if loss_type not in ("log_frob", "frob", "squared_frob"):
+    if loss_type not in ("log_frob", "frob", "squared_frob", "squared_frob_det"):
         raise ValueError(
-            "loss_type must be 'log_frob', 'frob', or 'squared_frob', "
-            f"got {loss_type!r}"
+            "loss_type must be 'log_frob', 'frob', 'squared_frob', or "
+            f"'squared_frob_det', got {loss_type!r}"
         )
     print(f"Flattener activation: {_flattener_act_name}")
     print(f"Loss type: {loss_type}")
+    if loss_type == "squared_frob_det":
+        print(f"  beta_det (log-det barrier weight): {beta_det}")
     print(f"Min-max input scaling: {minmax_scale_inputs}")
     print(f"Min-max post-scale offset: {offset}")
     if augment_log_inputs:
@@ -989,6 +1005,7 @@ def fit_flattening(F_network_ensemble, θs,
     _inv_pen_w = forward_backward_invertibility_weight
     _l1_alpha = l1_alpha
     _loss_type = loss_type
+    _beta_det = float(beta_det)
 
 
     if forward_backward_mlp:
@@ -1012,9 +1029,15 @@ def fit_flattening(F_network_ensemble, θs,
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                if _loss_type == "squared_frob":
+                if _loss_type in ("squared_frob", "squared_frob_det"):
                     loss = jnp.sum((Q - eye) ** 2)
                     loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                    if _loss_type == "squared_frob_det":
+                        Q_reg = Q + _q_jitter * eye
+                        _, logabsdet_q = jnp.linalg.slogdet(Q_reg)
+                        det_pen = logabsdet_q ** 2
+                        det_pen = jnp.nan_to_num(det_pen, nan=0.0, posinf=0.0, neginf=0.0)
+                        loss = loss + _beta_det * det_pen
                 else:
                     Q_reg = Q + _q_jitter * eye
                     inv_term = jnp.linalg.inv(Q_reg)
@@ -1053,9 +1076,15 @@ def fit_flattening(F_network_ensemble, θs,
                 det_q = jnp.linalg.det(Q)
                 det_q = jnp.nan_to_num(det_q, nan=0.0, posinf=0.0, neginf=0.0)
 
-                if _loss_type == "squared_frob":
+                if _loss_type in ("squared_frob", "squared_frob_det"):
                     loss = jnp.sum((Q - eye) ** 2)
                     loss = jnp.where(jnp.isfinite(loss), loss, jnp.asarray(1e6, dtype=loss.dtype))
+                    if _loss_type == "squared_frob_det":
+                        Q_reg = Q + _q_jitter * eye
+                        _, logabsdet_q = jnp.linalg.slogdet(Q_reg)
+                        det_pen = logabsdet_q ** 2
+                        det_pen = jnp.nan_to_num(det_pen, nan=0.0, posinf=0.0, neginf=0.0)
+                        loss = loss + _beta_det * det_pen
                 else:
                     Q_reg = Q + _q_jitter * eye
                     inv_term = jnp.linalg.inv(Q_reg)
@@ -1464,11 +1493,23 @@ if __name__ == '__main__':
         "--loss-type",
         type=str,
         default="log_frob",
-        choices=["log_frob", "frob", "squared_frob"],
+        choices=["log_frob", "frob", "squared_frob", "squared_frob_det"],
         help=(
             "Flattening loss form. 'log_frob': reweighted Frobenius + inverse with "
             "outer log (legacy). 'frob': same without log. 'squared_frob': plain "
-            "||Q-I||_F^2, no reweighting/inverse/log. Default: log_frob."
+            "||Q-I||_F^2, no reweighting/inverse/log. 'squared_frob_det': "
+            "||Q-I||_F^2 + beta_det * (log det Q)^2 — symmetric log-det barrier "
+            "to keep det F_eta from collapsing to zero. Default: log_frob."
+        ),
+    )
+    parser.add_argument(
+        "--beta-det",
+        type=float,
+        default=0.1,
+        help=(
+            "Weight of the (log det Q)^2 barrier used by --loss-type "
+            "squared_frob_det; ignored otherwise. Sensible range 0.01-1.0. "
+            "Default: 0.1."
         ),
     )
     parser.add_argument(
@@ -1571,5 +1612,6 @@ if __name__ == '__main__':
                    ),
                    flattener_activation=args.flattener_activation,
                    loss_type=args.loss_type,
+                   beta_det=args.beta_det,
                    do_plot=not args.no_plot,
                    Fisher_to_flatten=args.fisher_to_flatten)

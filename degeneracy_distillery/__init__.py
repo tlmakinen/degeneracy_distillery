@@ -10,14 +10,16 @@ Main modules:
     - fishnets: Neural network architectures
     - plot_utils: Plotting utilities for Fisher matrices and visualizations
     - io_utils: I/O utilities with FlexibleDict for flexible naming conventions
+    - diagnostics: Fisher-information diagnostics for low-information regions
 """
 
 __version__ = "0.1.0"
 
 # Import key utilities for convenient access
 from .io_utils import FlexibleDict, create_results_dict
+from .diagnostics import diagnose_low_information
 
-__all__ = ['FlexibleDict', 'create_results_dict']
+__all__ = ['FlexibleDict', 'create_results_dict', 'diagnose_low_information']
 
 # Note: Modules are available for direct import:
 # from degeneracy_distillery.training_loop_flatten import fit_flattening

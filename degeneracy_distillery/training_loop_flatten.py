@@ -793,6 +793,30 @@ def fit_flattening(F_network_ensemble, θs,
 
     key = jr.PRNGKey(seed)
 
+    # Ensure n_samples is divisible by batch_size up front. The pipeline
+    # reshapes θs/F_fishnets into batches of fixed size in three places
+    # (phase-1/2 training, ensemble fine-tuning, post-fit Jacobian eval),
+    # all of which require an exact multiple. Truncate randomly here so the
+    # dropped samples are not systematically the tail of the input order.
+    _n_in = int(θs.shape[0])
+    _n_drop = _n_in % int(batch_size)
+    if _n_drop:
+        key, _trunc_key = jr.split(key)
+        _trunc_idx = np.asarray(
+            jr.permutation(_trunc_key, _n_in)[: _n_in - _n_drop]
+        )
+        θs = θs[_trunc_idx]
+        F_network_ensemble = F_network_ensemble[:, _trunc_idx]
+        if F_avg is not None:
+            F_avg = F_avg[_trunc_idx]
+        print(
+            f"WARNING: n_samples ({_n_in}) is not divisible by batch_size "
+            f"({batch_size}); randomly dropping {_n_drop} samples "
+            f"({100.0 * _n_drop / _n_in:.2f}%) so per-batch reshape succeeds "
+            f"in training, fine-tuning, and Jacobian evaluation. "
+            f"Adjust batch_size to a divisor of n_samples to avoid this."
+        )
+
     if Fisher_to_flatten not in ("average", "best"):
         raise ValueError(
             f"Fisher_to_flatten must be 'average' or 'best', got {Fisher_to_flatten!r}"

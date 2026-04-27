@@ -350,6 +350,82 @@ def fisher_order_canonicalize(
 
 
 # =============================================================================
+# 3b. GLOBAL BASIS BUILDER
+# =============================================================================
+
+def build_global_basis(
+    dy_reference: np.ndarray,
+    Fs_reference: np.ndarray,
+    prior_scales: Optional[np.ndarray] = None,
+    sample_weights: Optional[np.ndarray] = None,
+    separate_nonlinearity: bool = True,
+    canonicalize: Literal["none", "sign_only", "permute_and_sign"] = "sign_only",
+    use_prior_normalization: bool = True,
+    enforce_proper: bool = True,
+) -> np.ndarray:
+    """Build the **member-independent** rotation applied to every ensemble member.
+
+    Combines :func:`nonlinearity_rotation` and (optionally)
+    :func:`fisher_order_canonicalize`, all evaluated on the **reference**
+    Jacobian / Fisher.  Calling this once and reusing the result across all
+    members guarantees that the η-axis ordering and signs are member-
+    independent — which is what keeps the ensemble distribution tight on the
+    near-degenerate (least-nonlinear) axes.
+
+    Parameters
+    ----------
+    dy_reference : np.ndarray
+        Reference Jacobian batch ``(B, D_out, D_in)``.
+    Fs_reference : np.ndarray
+        Fisher matrices used for canonicalization, ``(B, D_in, D_in)``
+        (or 2-D).  Pass the same ``Favg`` you intend to flatten against.
+    prior_scales, sample_weights
+        Forwarded to :func:`nonlinearity_rotation`.
+    separate_nonlinearity, canonicalize, use_prior_normalization, enforce_proper
+        Same semantics as in :func:`rotate_coords_v2`; see that function's
+        docstring for details.
+
+    Returns
+    -------
+    R_basis : np.ndarray
+        ``(D_out, D_out)`` orthogonal rotation that should be left-multiplied
+        on top of every member's per-member alignment ``R_align``:
+        ``R_total = R_basis @ R_align``.
+    """
+    dy_reference = np.asarray(dy_reference, dtype=np.float64)
+    D_out = dy_reference.shape[1]
+
+    if separate_nonlinearity:
+        R_nl, _ = nonlinearity_rotation(
+            dy_reference,
+            sample_weights=sample_weights,
+            prior_scales=prior_scales if use_prior_normalization else None,
+            enforce_proper=enforce_proper,
+        )
+    else:
+        R_nl = np.eye(D_out)
+
+    if canonicalize != "none":
+        # fisher_order_canonicalize uses J_rot_mean = R @ mean(dy); evaluating
+        # on the *reference* (rather than per-member) gives a single,
+        # member-independent sign/permutation fix.
+        R_basis = fisher_order_canonicalize(
+            R_nl, dy_reference, Fs_reference,
+            prior_scales=prior_scales if use_prior_normalization else None,
+            mode="sign_only" if canonicalize == "sign_only" else "permute_and_sign",
+            enforce_proper=enforce_proper,
+        )
+    else:
+        R_basis = R_nl
+
+    if enforce_proper and np.linalg.det(R_basis) < 0:
+        R_basis = R_basis.copy()
+        R_basis[-1] *= -1.0
+
+    return R_basis
+
+
+# =============================================================================
 # 4. SINGLE-MEMBER ROTATION (drop-in replacement for rotate_coords)
 # =============================================================================
 
@@ -367,6 +443,8 @@ def rotate_coords_v2(
     use_prior_normalization: bool = True,
     restore_reference_mean: bool = True,
     enforce_proper: bool = True,
+    align_allow_reflection: bool = True,
+    R_basis: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Improved coordinate/Jacobian rotation for a single ensemble member.
 
@@ -377,11 +455,14 @@ def rotate_coords_v2(
        * ``"procrustes"`` — Jacobian Procrustes (recommended), or
        * ``"kabsch"`` — legacy coordinate Kabsch, or
        * ``"none"`` — skip alignment (member is already in reference frame).
-    3. Optional **nonlinearity-separating** rotation on the **aligned reference
-       Jacobian**, applied identically to every member so the basis is shared.
-    4. Optional Fisher-eigenvalue **sign / permutation canonicalization** so
-       the axes have a reproducible orientation.
-    5. Apply the combined rotation ``R_total`` to ``y`` and ``dy``.
+    3. Optional **nonlinearity-separating** rotation derived **once on the
+       reference Jacobian** (or supplied via ``R_basis``).  Applied identically
+       to every ensemble member so the basis is shared.
+    4. Optional Fisher-eigenvalue **sign / permutation canonicalization**, also
+       computed on the **reference frame**, so the axes have a reproducible
+       orientation that is *member-independent*.
+    5. Apply the combined rotation ``R_total = R_basis @ R_align`` to ``y``
+       and ``dy``.
 
     Parameters mirror :func:`preprocessing_utils.rotate_coords` plus the new
     options.  Returns the same tuple ``(y_rotated, dy, dy_sr, rotmat, A)``.
@@ -393,10 +474,45 @@ def rotate_coords_v2(
       reference scale, matching the legacy behaviour.  Pure translation has no
       effect on Jacobians.
     * ``A`` is kept for signature compatibility (identity here).
-    * ``enforce_proper=True`` (default) guarantees ``det(R_total) = +1`` —
-      i.e. proper rotation, no parity flip relative to θ.  Disable only if
-      you accept that the η frame may be a mirror image of the θ frame.
-      Fisher flattening is preserved either way.
+
+    Per-member vs. global handedness — IMPORTANT
+    --------------------------------------------
+    Earlier versions of this routine forced ``det(R_total) = +1`` per member
+    (via ``enforce_proper=True``).  That choice deviates from the optimal
+    Procrustes alignment whenever a member relates to the reference by a
+    reflection, paying the cost in the **smallest-singular-value** direction
+    of the cross-covariance — i.e. exactly the **least-nonlinear** axes after
+    :func:`nonlinearity_rotation`.  Different members would also receive
+    *different* sign decisions in :func:`fisher_order_canonicalize` whenever
+    ``<J_rot_mean[i], eigvec[:, i]>`` was near zero, which again happens on
+    the most-degenerate (least-nonlinear) axes.  Both effects compound to
+    inflate ``y_std`` on the linear axes — visible as non-Gaussian
+    ``(y - ybar) / y_std`` distributions across ensemble members.
+
+    The fix:
+
+    * ``align_allow_reflection=True`` (default): per-member Procrustes uses
+      the **optimal** (possibly improper) rotation.  Fisher flatness is
+      invariant under O(D), so a member living in a mirrored frame is fine
+      — what matters is that all members land in the **same** frame.
+    * Sign / permutation canonicalization is computed once on the reference
+      and folded into ``R_basis``; every member multiplies by the same
+      ``R_basis``, so axes have a consistent orientation across the ensemble.
+    * ``enforce_proper`` now governs only ``R_basis`` (the global rotation),
+      not the per-member alignment.
+
+    Parameters
+    ----------
+    align_allow_reflection : bool, default True
+        Allow per-member Procrustes to return an improper rotation when that
+        is the optimal alignment.  Strongly recommended for ensembles; set
+        ``False`` only to reproduce the legacy behaviour for diagnostics.
+    R_basis : np.ndarray, optional
+        Pre-computed global ``(D_out, D_out)`` rotation to apply on top of the
+        member alignment.  If supplied, the internal ``R_nl`` /
+        ``fisher_order_canonicalize`` calls are skipped.  This is what
+        :func:`process_ensemble_rotation_v2` uses to guarantee a
+        member-independent basis.
     """
     y = np.asarray(y, dtype=np.float64).copy()
     theta = np.asarray(theta).copy()
@@ -422,10 +538,15 @@ def rotate_coords_v2(
     if align_mode == "procrustes":
         if dy_reference is None:
             raise ValueError("align_mode='procrustes' requires dy_reference.")
+        # IMPORTANT: allow reflections during per-member alignment.  Forcing
+        # det(R_align) = +1 deviates from the optimal Procrustes solution in
+        # the smallest-singular direction of the cross-covariance, which —
+        # composed with the nonlinearity rotation — systematically inflates
+        # ensemble dispersion on the *least-nonlinear* axes.
         R_align = jacobian_procrustes(
             dy, dy_reference,
             sample_weights=sample_weights,
-            allow_reflection=not enforce_proper,
+            allow_reflection=align_allow_reflection,
         )
     elif align_mode == "kabsch":
         if y_reference is None:
@@ -437,42 +558,41 @@ def rotate_coords_v2(
     else:
         raise ValueError(f"Unknown align_mode: {align_mode!r}")
 
-    # Intermediate: member Jacobian in the reference frame
-    dy_in_ref = np.einsum("ij,bjk->bik", R_align, dy)
-
-    # ---- Step 2: nonlinearity-separating rotation on the reference frame ---
-    if separate_nonlinearity:
-        # Prefer using the reference Jacobian to define the basis so every
-        # ensemble member ends up in *the same* "nonlinear first" frame.
-        dy_for_basis = dy_reference if dy_reference is not None else dy_in_ref
-        R_nl, sigma = nonlinearity_rotation(
-            dy_for_basis,
-            sample_weights=sample_weights,
-            prior_scales=prior_scales,
-            enforce_proper=enforce_proper,
-        )
-    else:
-        R_nl = np.eye(D_out)
+    # ---- Step 2: build / use the GLOBAL canonical basis --------------------
+    # The basis (nonlinearity rotation + sign/permutation fix) is computed
+    # once on the *reference* and applied identically to every member.  This
+    # is what guarantees consistent η-axis orientation across the ensemble.
+    if R_basis is not None:
+        R_basis_arr = np.asarray(R_basis, dtype=np.float64)
+        if R_basis_arr.shape != (D_out, D_out):
+            raise ValueError(
+                f"R_basis must have shape ({D_out}, {D_out}); got "
+                f"{R_basis_arr.shape}"
+            )
         sigma = None
-
-    R_total = R_nl @ R_align
-
-    # ---- Step 3: sign/permutation canonicalization -------------------------
-    if canonicalize != "none":
-        R_total = fisher_order_canonicalize(
-            R_total, dy, Fs,
-            prior_scales=prior_scales if use_prior_normalization else None,
-            mode="sign_only" if canonicalize == "sign_only" else "permute_and_sign",
+    else:
+        R_basis_arr = build_global_basis(
+            dy_reference=dy_reference if dy_reference is not None else dy,
+            Fs_reference=Fs,
+            prior_scales=prior_scales,
+            sample_weights=sample_weights,
+            separate_nonlinearity=separate_nonlinearity,
+            canonicalize=canonicalize,
+            use_prior_normalization=use_prior_normalization,
             enforce_proper=enforce_proper,
         )
+        sigma = None  # spectrum exposed via nonlinearity_spectrum() instead
 
-    # Final safety net: composition of proper rotations is proper, but composing
-    # with kabsch_jax (which may reflect) can leak a det = -1.  Catch it here.
-    if enforce_proper and np.linalg.det(R_total) < 0:
-        R_total = R_total.copy()
-        R_total[-1] *= -1.0
+    R_total = R_basis_arr @ R_align
 
-    # ---- Step 4: apply ------------------------------------------------------
+    # NOTE: we deliberately do NOT enforce det(R_total) = +1 here.  Doing so
+    # would re-introduce the per-member reflection bug we just fixed.  The
+    # global basis R_basis already has det = +1 when ``enforce_proper=True``;
+    # any sign of det(R_total) comes purely from det(R_align) and represents
+    # the genuine (member-specific) handedness relationship between the
+    # network's η-frame and the reference's.
+
+    # ---- Step 3: apply ------------------------------------------------------
     y = np.einsum("ij,bj->bi", R_total, y)
     dy_sr = np.einsum("ij,bjk->bik", R_total, dy)
 
@@ -550,6 +670,33 @@ def process_ensemble_rotation_v2(
 
     X = np.asarray(datafile["theta"][randidx])
 
+    # ---- Build the global basis ONCE on the reference -----------------------
+    # This is what guarantees a member-independent axis orientation: every
+    # member multiplies by the same R_basis, so per-member sign drift on the
+    # near-degenerate (least-nonlinear) axes is eliminated.
+    if use_prior_normalization:
+        prior_scales = np.abs(X.max(0) - X.min(0))
+        prior_scales = np.where(prior_scales > 0, prior_scales, 1.0)
+    else:
+        prior_scales = None
+
+    R_basis = build_global_basis(
+        dy_reference=dy_reference,
+        Fs_reference=Favg,
+        prior_scales=prior_scales,
+        separate_nonlinearity=separate_nonlinearity,
+        canonicalize=canonicalize,
+        use_prior_normalization=use_prior_normalization,
+        enforce_proper=enforce_proper,
+    )
+
+    if verbose:
+        det_basis = float(np.linalg.det(R_basis))
+        print(
+            f"Global basis R_basis: shape={R_basis.shape}, "
+            f"det={det_basis:+.6f} (proper rotation expected)"
+        )
+
     for k, i in enumerate(member_idx):
         y = np.asarray(datafile["eta_ensemble"][i][randidx])
         dy = np.asarray(datafile["Jbar_ensemble"][i][randidx])
@@ -571,6 +718,7 @@ def process_ensemble_rotation_v2(
             use_prior_normalization=use_prior_normalization,
             restore_reference_mean=restore_reference_mean,
             enforce_proper=enforce_proper,
+            R_basis=R_basis,
         )
 
         ys.append(y_rot)
@@ -775,6 +923,7 @@ __all__ = [
     "jacobian_procrustes",
     "mean_fisher_eigen",
     "fisher_order_canonicalize",
+    "build_global_basis",
     "rotate_coords_v2",
     "process_ensemble_rotation_v2",
     "load_and_process_data_v2",

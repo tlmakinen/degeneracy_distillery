@@ -28,14 +28,14 @@ try:
         batch_flatten_fisher,
         weighted_std,
     )
-    from .sr_utils import safe_lambdify
+    from .sr_utils import promote_jacrev_output, safe_lambdify
 except ImportError:
     from preprocessing_utils import (
         flatten_with_numerical_jacobian,
         batch_flatten_fisher,
         weighted_std,
     )
-    from sr_utils import safe_lambdify
+    from sr_utils import promote_jacrev_output, safe_lambdify
 
 # Try importing ESR (required for complexity calculations)
 try:
@@ -500,7 +500,9 @@ def check_flattening(coordinates: List[str], X: np.ndarray, Fs: np.ndarray,
         eq_jax = safe_lambdify(all_b + all_x, expr)
         
         def get_jac_row(p):
-            myeq = lambda *args: eq_jax(*p, *args)
+            def myeq(*args):
+                return promote_jacrev_output(eq_jax(*p, *args))
+
             yjac = jax.jacrev(myeq, argnums=list(range(0, X.shape[1])))
             Jpred = jnp.array(jax.vmap(yjac)(*X.T)).T
             return Jpred
@@ -1048,7 +1050,9 @@ def lossfn_jac_jax(A: jnp.ndarray,
             y_l = y_l + all_fns[i](*p, *X_jnp.T)
             
             # Compute Jacobian via autodiff
-            myeq = lambda *args: all_fns[i](*p, *args)
+            def myeq(*args):
+                return promote_jacrev_output(all_fns[i](*p, *args))
+
             yjac = jax.jacrev(myeq, argnums=list(range(X.shape[1])))
             Jpred_i = jnp.array(jax.vmap(yjac)(*X_jnp.T)).T
             dy_l = dy_l + Jpred_i

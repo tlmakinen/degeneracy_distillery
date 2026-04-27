@@ -161,6 +161,16 @@ def safe_lambdify(args, expr, preferred_modules=None):
     raise last_exc
 
 
+def promote_jacrev_output(y):
+    """Cast SR lambdify output to a floating dtype so ``jax.jacrev`` accepts it.
+
+    SymPy/JAX lambdify sometimes yields integer dtypes (e.g. from integer literals
+    in the parse tree), which triggers ``jacrev``'s real-floating requirement.
+    """
+    y = jnp.asarray(y)
+    return jnp.asarray(y, dtype=jnp.promote_types(jnp.float32, y.dtype))
+
+
 # =============================================================================
 # STRING PARSING UTILITIES
 # =============================================================================
@@ -672,7 +682,7 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
     # Define flattening loss
     def frob_loss(p):
         def get_jac_row(p):
-            myeq = lambda *args: eq_jax(*p, *args)
+            myeq = lambda *args: promote_jacrev_output(eq_jax(*p, *args))
             # Compute Jacobian for this component
             yjac = jax.jacrev(myeq, argnums=list(range(0, X.shape[1])))
             Jpred = jnp.array(jax.vmap(yjac)(*X.T)).T

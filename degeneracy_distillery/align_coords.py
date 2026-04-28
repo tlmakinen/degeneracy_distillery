@@ -469,10 +469,10 @@ def rotate_coords_v2(
 
     Notes
     -----
-    * ``rotmat @ ybar_reference`` is added back to ``y`` when
-      ``restore_reference_mean=True`` so the aligned member sits near the
-      reference scale, matching the legacy behaviour.  Pure translation has no
-      effect on Jacobians.
+    * ``R_basis @ ybar_reference`` is added back to ``y`` when
+      ``restore_reference_mean=True`` so every aligned member receives the same
+      reference-member mean in the shared output basis.  Pure translation has
+      no effect on Jacobians.
     * ``A`` is kept for signature compatibility (identity here).
 
     Per-member vs. global handedness — IMPORTANT
@@ -597,7 +597,12 @@ def rotate_coords_v2(
     dy_sr = np.einsum("ij,bjk->bik", R_total, dy)
 
     if restore_reference_mean and ybar_reference is not None:
-        y = y + R_total @ ybar_reference
+        # was before: y = y + R_basis_arr @ ybar_reference
+        # now: y = y + R_total @ ybar_reference
+        # The reference mean is defined by the principal member after the
+        # shared basis rotation.  Do not include the per-member alignment here,
+        # otherwise each ensemble member receives a different translation.
+        y = y + R_basis_arr @ ybar_reference
 
     A = np.eye(D_out)
     return y, dy, dy_sr, R_total, A

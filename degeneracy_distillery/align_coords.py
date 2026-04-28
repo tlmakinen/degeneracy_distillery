@@ -702,6 +702,10 @@ def process_ensemble_rotation_v2(
             f"det={det_basis:+.6f} (proper rotation expected)"
         )
 
+    reference_offset = None
+    if restore_reference_mean:
+        reference_offset = R_basis @ y_reference.mean(0)
+
     for k, i in enumerate(member_idx):
         y = np.asarray(datafile["eta_ensemble"][i][randidx])
         dy = np.asarray(datafile["Jbar_ensemble"][i][randidx])
@@ -721,7 +725,7 @@ def process_ensemble_rotation_v2(
             separate_nonlinearity=separate_nonlinearity,
             canonicalize=canonicalize,
             use_prior_normalization=use_prior_normalization,
-            restore_reference_mean=restore_reference_mean,
+            restore_reference_mean=False,
             enforce_proper=enforce_proper,
             R_basis=R_basis,
         )
@@ -748,6 +752,15 @@ def process_ensemble_rotation_v2(
     y_std = np.array(weighted_std(
         jnp.asarray(ys_arr), weights=jnp.asarray(ensemble_weights_arr), axis=0,
     ))
+
+    if reference_offset is not None:
+        # Keep the ensemble scatter estimate translation-free.  The principal
+        # member's mean is a shared coordinate origin in the new basis, so it is
+        # added only after y_std has been computed.
+        reference_offset = reference_offset / np.sqrt(n_d)
+        ys_arr = ys_arr + reference_offset[None, None, :]
+        y_mean = y_mean + reference_offset[None, :]
+
     rotmat_avg = np.average(rotmats_arr, weights=ensemble_weights_arr, axis=0)
 
     mask = y_std[:, 0] != 0

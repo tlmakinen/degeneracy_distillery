@@ -217,6 +217,7 @@ def degeneracy_structure_scores(
     Fs: np.ndarray,
     weights: Optional[np.ndarray] = None,
     prior_scales: Optional[np.ndarray] = None,
+    prior_fisher: Optional[np.ndarray] = None,
     names: Optional[Sequence[str]] = None,
     eps: float = 1e-30,
 ) -> Dict[str, Any]:
@@ -244,7 +245,20 @@ def degeneracy_structure_scores(
         prior-normalised (``F̃ = F / outer(Δθ, Δθ)``, matching the convention
         in :mod:`preprocessing_utils`) before scoring, so different
         parameters are compared on a common dimensionless footing.  If
-        ``None``, raw ``F`` is used.
+        ``None``, raw ``F`` is used.  Also used to put ``prior_fisher`` in the
+        same prior-normalised basis for ``info_strength``.  When
+        ``prior_fisher`` is not supplied, the prior reference is the identity
+        matrix in this basis.
+    prior_fisher : np.ndarray, optional
+        Prior Fisher matrix of shape ``(P, P)`` or prior Fisher stack
+        ``(B, P, P)``.  When supplied, ``info_strength`` compares the mean
+        Fisher row norm to the prior row norm in the same basis used for the
+        structural scores.  If ``prior_scales`` is supplied, both ``Fs`` and
+        ``prior_fisher`` are divided by ``outer(Δθ, Δθ)`` first; if
+        ``prior_fisher`` is omitted, the prior reference is the identity in
+        that dimensionless basis.  This prevents weakly constrained /
+        prior-limited parameters from ranking highly just because their
+        relative CV is large.
     names : Sequence[str], optional
         Parameter labels for the returned ``ranking_table`` string.
     eps : float
@@ -269,8 +283,14 @@ def degeneracy_structure_scores(
           parameter in the top-``k`` eigenvectors of ``mean_b F`` (where
           ``k = min(4, P)``); larger means the parameter is dominant in
           well-constrained directions.
+        - ``"info_strength"`` : ``(P,)`` row-L2 information strength relative
+          to the prior Fisher.  Values near 1 mean the parameter is only
+          prior-level constrained; values below 1 mean weaker than the prior;
+          values much larger than 1 mean data-dominated.  ``NaN`` if no prior
+          reference is available.
         - ``"composite"`` : ``(P,)`` rank-averaged composite of
-          ``row_l2_cv`` and ``corr_var`` (both descending).  Lower is better.
+          ``row_l2_cv``, ``corr_var``, and, when available,
+          ``info_strength`` (all descending).  Lower is better.
         - ``"ranking"`` : ``(P,)`` ``argsort`` of ``composite`` ascending —
           first entry is the *most* nonlinearly-constrained parameter.
         - ``"ranking_table"`` : pre-formatted string for printing.
@@ -292,11 +312,14 @@ def degeneracy_structure_scores(
         w = w / np.maximum(w.sum(), eps)
 
     F_use = F.copy()
+    d: Optional[np.ndarray] = None
+    prior_norm: Optional[np.ndarray] = None
     if prior_scales is not None:
         d = np.asarray(prior_scales, dtype=np.float64).ravel()
         if d.shape != (P,):
             raise ValueError(f"prior_scales must have shape ({P},); got {d.shape}")
-        F_use = F_use / np.outer(d, d)[None, :, :]
+        prior_norm = np.outer(d, d)
+        F_use = F_use / prior_norm[None, :, :]
 
     # Weighted mean / std along the sample axis.
     F_mean = np.einsum("b,bij->ij", w, F_use)
@@ -335,27 +358,64 @@ def degeneracy_structure_scores(
     k_top = min(4, P)
     eig_participation = (eigvecs[:, :k_top] ** 2)        # (P, k_top)
 
-    # ---- 6. Composite ranking (lower = more nonlinear / more interesting) --
+    # ---- 6. Data/prior information strength --------------------------------
+    prior_reference = None
+    if prior_fisher is not None:
+        PF = np.asarray(prior_fisher, dtype=np.float64)
+        if PF.shape == (P, P):
+            prior_reference = PF
+        elif PF.shape == (B, P, P):
+            prior_reference = np.einsum("b,bij->ij", w, PF)
+        else:
+            raise ValueError(
+                f"prior_fisher must have shape ({P}, {P}) or "
+                f"({B}, {P}, {P}); got {PF.shape}"
+            )
+        if prior_norm is not None:
+            prior_reference = prior_reference / prior_norm
+    elif d is not None:
+        prior_reference = np.eye(P)
+
+    if prior_reference is None:
+        info_strength = np.full(P, np.nan)
+        diag_info_strength = np.full(P, np.nan)
+    else:
+        mean_row_l2 = np.sqrt(np.sum(F_mean ** 2, axis=1))
+        prior_row_l2 = np.sqrt(np.sum(prior_reference ** 2, axis=1))
+        info_strength = mean_row_l2 / np.maximum(prior_row_l2, eps)
+
+        mean_diag = np.diagonal(F_mean)
+        prior_diag = np.abs(np.diagonal(prior_reference))
+        diag_info_strength = mean_diag / np.maximum(prior_diag, eps)
+
+    # ---- 7. Composite ranking (lower = more nonlinear / more interesting) --
     rank_row = (-row_l2_cv).argsort().argsort()          # high row_l2_cv -> low rank
     rank_corr = (-corr_var).argsort().argsort()
-    composite = (rank_row + rank_corr) / 2.0
+    rank_terms = [rank_row, rank_corr]
+    if prior_reference is not None:
+        rank_info = (-info_strength).argsort().argsort()
+        rank_terms.append(rank_info)
+    composite = np.mean(np.stack(rank_terms, axis=0), axis=0)
     ranking = np.argsort(composite)
 
-    # ---- 7. Pretty table ---------------------------------------------------
+    # ---- 8. Pretty table ---------------------------------------------------
     nm = list(names) if names is not None else [f"theta_{i}" for i in range(P)]
     if len(nm) != P:
         raise ValueError(f"names length {len(nm)} != P={P}")
     rows: List[str] = [
         f"{'rank':>4}  {'idx':>4}  {'name':<12s}  "
         f"{'diag_cv':>10s}  {'row_l2_cv':>10s}  {'corr_var':>10s}  "
+        f"{'info':>10s}  "
         + "  ".join([f"|v_{k+1}|^2" for k in range(k_top)])
     ]
     rows.append("-" * len(rows[0]))
     for r, i in enumerate(ranking):
         evec_part = "  ".join(f"{eig_participation[i, k]:7.3f}" for k in range(k_top))
+        info = "       nan" if np.isnan(info_strength[i]) else f"{info_strength[i]:>10.3e}"
         rows.append(
             f"{r:>4d}  {i:>4d}  {nm[i]:<12s}  "
             f"{diag_cv[i]:>10.3e}  {row_l2_cv[i]:>10.3e}  {corr_var[i]:>10.3e}  "
+            f"{info}  "
             + evec_part
         )
     table = "\n".join(rows)
@@ -365,6 +425,8 @@ def degeneracy_structure_scores(
         "diag_cv": diag_cv,
         "row_l2_cv": row_l2_cv,
         "corr_var": corr_var,
+        "info_strength": info_strength,
+        "diag_info_strength": diag_info_strength,
         "eig_participation_top_k": eig_participation,
         "eigvals_meanF": eigvals,
         "composite": composite,
@@ -381,6 +443,7 @@ def recommend_parameters_of_interest(
     k: int = 4,
     weights: Optional[np.ndarray] = None,
     prior_scales: Optional[np.ndarray] = None,
+    prior_fisher: Optional[np.ndarray] = None,
     names: Optional[Sequence[str]] = None,
     return_scores: bool = False,
 ) -> Any:
@@ -388,7 +451,8 @@ def recommend_parameters_of_interest(
 
     Parameters
     ----------
-    Fs, weights, prior_scales, names : see :func:`degeneracy_structure_scores`
+    Fs, weights, prior_scales, prior_fisher, names : see
+        :func:`degeneracy_structure_scores`
     k : int, default 4
         Number of parameters to recommend.
     return_scores : bool, default False
@@ -402,7 +466,8 @@ def recommend_parameters_of_interest(
         Same as :func:`degeneracy_structure_scores` output.
     """
     scores = degeneracy_structure_scores(
-        Fs, weights=weights, prior_scales=prior_scales, names=names
+        Fs, weights=weights, prior_scales=prior_scales,
+        prior_fisher=prior_fisher, names=names
     )
     indices = np.array(scores["ranking"][:k], dtype=int)
     if return_scores:

@@ -2659,7 +2659,11 @@ def postprocess_eqs(coordinates: List[str],
     2. (Optional) Optimizes rotation for sparsity and/or flattening
     3. Applies importance-based pruning of linear coefficients
     4. (Optional) Prunes ALL constants including nonlinear ones (e.g. inside exp/log)
-    5. Returns simplified expressions
+    5. If ``repair_degenerate_linear``, runs degenerate-output repair again so any
+       coordinate that became identically zero or θ-independent **after** constant
+       pruning gets a small ``+ c X_j`` term (the first repair runs after linear
+       pruning only).
+    6. Returns simplified expressions
     
     Parameters
     ----------
@@ -2730,7 +2734,11 @@ def postprocess_eqs(coordinates: List[str],
         If a pruned output is identically zero **or** collapses to a θ-independent
         constant, append a linear :math:`c X_j` term so it has at least a linear
         dependence on one θ component (see
-        :func:`repair_degenerate_pruned_expressions`). Set False to disable.
+        :func:`repair_degenerate_pruned_expressions`). This runs after linear
+        coefficient pruning inside :func:`get_pruned_expressions_final`, and
+        again at the end of :func:`postprocess_eqs` so coordinates that become
+        degenerate during optional constant pruning are also fixed. Set False to
+        disable both passes.
     repair_linear_scale : float, default=1.0
         Coefficient :math:`c` in the repair term; use a small value (e.g. ``1e-3``)
         if the flatness score moves too much.
@@ -2781,7 +2789,10 @@ def postprocess_eqs(coordinates: List[str],
             "ESR package is required for postprocessing. "
             "Please install it to use this function."
         )
-    
+
+    if check_flattening_fn is None:
+        check_flattening_fn = make_check_flattening_fn(X, Fs)
+
     if len(coordinates) != n_params:
         raise ValueError(
             f"Number of coordinates ({len(coordinates)}) must match "
@@ -2934,7 +2945,46 @@ def postprocess_eqs(coordinates: List[str],
             A=A_rotation,
             verbose=verbose
         )
-    
+
+    # Constant pruning can zero terms in a way that collapses a full coordinate
+    # to 0 or a θ-independent constant; repair after linear pruning does not see
+    # that. Re-run the same degenerate-output repair on the final strings.
+    if repair_degenerate_linear and ESR_AVAILABLE:
+        if verbose and prune_constants:
+            print("\n--- Final degenerate output repair (after constant pruning) ---")
+        flat_ref = _mean_flattening_score(
+            pruned_expressions,
+            check_flattening_fn,
+            np.asarray(A_rotation),
+            n_params,
+        )
+        pruned_expressions, _repaired, _rinfo = repair_degenerate_pruned_expressions(
+            pruned_expressions,
+            X,
+            n_params,
+            np.asarray(A_rotation),
+            check_flattening_fn,
+            flat_ref,
+            y_atol=repair_y_atol,
+            const_rel_atol=repair_const_rel_atol,
+            rel_deviation_threshold=threshold,
+            scale=repair_linear_scale,
+            verbose=verbose,
+        )
+        if _repaired:
+            if remove_floats:
+                paired = [
+                    replace_floats(str(sympy.simplify(str(e))))
+                    for e in pruned_expressions
+                ]
+                pruned_expressions = [p[0] for p in paired]
+                constants = [p[1] for p in paired]
+            else:
+                pruned_expressions = [
+                    str(sympy.simplify(str(e))) for e in pruned_expressions
+                ]
+                constants = [replace_floats(s)[1] for s in pruned_expressions]
+
     if verbose:
         print("\nPostprocessing complete!")
         print(f"Input expressions: {len(coordinates)}")

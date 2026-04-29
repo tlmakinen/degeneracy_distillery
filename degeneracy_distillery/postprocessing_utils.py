@@ -1536,7 +1536,11 @@ def get_pruned_expressions_final(A: np.ndarray,
     rational : bool
         Use rational simplification
     threshold : float
-        Relative loss threshold for removing coefficients
+        Relative loss threshold for removing coefficients. Coefficient ``k`` is
+        removed only if the relative increase in mean flatness is strictly below
+        this value (same test: ``delta < threshold``). Values ``<= 0`` disable
+        linear pruning entirely (``threshold == 0`` would otherwise mean
+        ``delta < 0``, which float noise treats as true for almost every term).
     verbose : bool
         Print progress
     update : bool
@@ -1589,8 +1593,22 @@ def get_pruned_expressions_final(A: np.ndarray,
     flats, _ = check_flattening_fn(new_expr, A=jnp.array(A))
     eye = jnp.eye(n_params)
     flat_score_reference = jax.vmap(norm)(flats - eye).mean()
-    
-    if importance_based:
+
+    # Removals use ``delta < threshold`` where ``delta`` is the relative change in
+    # mean flatness vs this reference. For threshold == 0 that becomes
+    # ``delta < 0`` (strict improvement only), but tiny negative ``delta`` from
+    # float noise is then accepted for almost every coefficient and wipes the
+    # model. threshold < 0 is treated the same (historically used as a hack).
+    skip_linear_prune = threshold <= 0
+
+    if skip_linear_prune:
+        if verbose:
+            print(
+                "threshold <= 0: skipping linear coefficient pruning "
+                "(no removals; use a small positive threshold to enable)."
+            )
+        linear_pars_export = deepcopy(linear_pars)
+    elif importance_based:
         # === IMPORTANCE-BASED PRUNING (PERMUTATION-INDEPENDENT) ===
         
         if verbose:
@@ -1804,7 +1822,7 @@ def get_pruned_expressions_final(A: np.ndarray,
     
     else:
         # === LEGACY SEQUENTIAL PRUNING (PERMUTATION-DEPENDENT) ===
-        
+        # (``skip_linear_prune`` is False here, so threshold > 0.)
         linear_pars_export = deepcopy(linear_pars)
         iterator = tqdm(enumerate(linear_pars)) if verbose else enumerate(linear_pars)
         
@@ -1914,7 +1932,9 @@ def prune_all_constants(expressions: List[str],
     check_flattening_fn : Callable, optional
         Function to check flattening quality. If None, creates from X, Fs.
     threshold : float, default=0.05
-        Relative loss increase tolerance for removing a constant
+        Relative loss increase tolerance for zeroing a constant (test is
+        ``delta < threshold`` vs the reference flatness score). Use ``<= 0`` to
+        skip removals (returns expressions unchanged).
     perturbation : float, default=1e-4
         Finite difference step for importance scoring
     A : np.ndarray, optional
@@ -1967,7 +1987,19 @@ def prune_all_constants(expressions: List[str],
     
     if len(all_const_info) == 0:
         return list(expressions), [[] for _ in expressions], []
-    
+
+    if threshold <= 0:
+        if verbose:
+            print(
+                "threshold <= 0: skipping constant removal "
+                "(same convention as linear pruning; use a small positive threshold)."
+            )
+        pruned_constants = []
+        for expr_str in expressions:
+            _, vals = replace_floats(str(expr_str))
+            pruned_constants.append(vals)
+        return list(expressions), pruned_constants, all_const_info
+
     # Phase 1: Compute importance scores for all constants
     if verbose:
         print("Computing importance scores...")
@@ -2700,7 +2732,10 @@ def postprocess_eqs(coordinates: List[str],
         legacy behaviour exactly.  For realistic SR output, prefer
         ``rotation_params={"param": "cayley", "loss": "reweighted_l1"}``.
     threshold : float, default=0.05
-        Relative loss threshold for removing linear coefficients.
+        Relative loss threshold for removing linear coefficients (strict
+        inequality ``delta < threshold`` on the relative flatness change).
+        Use ``<= 0`` to disable linear pruning (recommended when you want no
+        coefficient removal).
     importance_based : bool, default=True
         Use importance-based ordering (recommended). If False, uses legacy
         sequential pruning which is permutation-dependent.

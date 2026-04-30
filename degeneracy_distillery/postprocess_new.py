@@ -713,7 +713,7 @@ def regroup_like_terms(
     rotation_kwargs: Optional[Dict[str, Any]] = None,
     check_flattening_fn: Optional[Callable] = None,
     repair_rank_deficiency: bool = True,
-    rank_repair_scale: str = "median_diag",
+    rank_repair_scale: str = "mean_whitened",
     rank_repair_rtol: float = 1e-8,
     rank_repair_atol: float = 1e-10,
     verbose: bool = True,
@@ -761,9 +761,12 @@ def regroup_like_terms(
         dependent output rows are flagged and redundant rows are replaced with
         Fisher-scaled linear coordinates for missing input variables.
     rank_repair_scale
-        Scaling rule for injected ``c * Xj`` coordinates. ``"median_diag"``
-        (default) uses ``sqrt(median(Fs[:, j, j]))``; ``"mean_diag"`` uses
-        ``sqrt(mean(Fs[:, j, j]))``; ``"unit"`` uses ``1.0``.
+        Scaling / linear-map rule for injected repair coordinates.
+        ``"mean_whitened"`` (default) uses row ``j`` of the symmetric
+        square-root of ``mean(Fs)`` to account for off-diagonal Fisher
+        couplings. ``"median_diag"`` uses ``sqrt(median(Fs[:, j, j])) * Xj``;
+        ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j])) * Xj``; ``"unit"`` uses
+        ``1.0 * Xj``.
     rank_repair_rtol, rank_repair_atol
         Relative and absolute tolerances for detecting row-rank deficiency and
         missing input columns.

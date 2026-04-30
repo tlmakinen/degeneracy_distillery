@@ -895,21 +895,51 @@ def _independent_rows_greedy(row_vectors: np.ndarray, tol: float) -> List[int]:
     return keep
 
 
-def _linear_repair_scale(
+def _mean_fisher_sqrt(Fs: np.ndarray, eps: float = 1e-30) -> np.ndarray:
+    """Symmetric square-root of the mean Fisher over all leading axes."""
+    F = np.asarray(Fs, dtype=np.float64)
+    if F.ndim < 2 or F.shape[-1] != F.shape[-2]:
+        raise ValueError(f"Fs must end with a square block; got shape {F.shape}")
+    n = F.shape[-1]
+    F_stack = F.reshape(-1, n, n)
+    F_mean = np.mean(F_stack, axis=0)
+    F_mean = 0.5 * (F_mean + F_mean.T)
+    eigvals, eigvecs = np.linalg.eigh(F_mean)
+    eigvals = np.maximum(eigvals, eps)
+    return (eigvecs * np.sqrt(eigvals)[None, :]) @ eigvecs.T
+
+
+def _linear_repair_coefficients(
     Fs: np.ndarray,
     input_index: int,
+    n_params: int,
     scale_mode: str,
     eps: float = 1e-30,
-) -> float:
-    """Scale for an injected linear coordinate ``c * Xj``."""
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Coefficients for an injected linear repair coordinate."""
+    coeffs = np.zeros(n_params, dtype=np.float64)
     if scale_mode == "unit":
-        return 1.0
+        coeffs[input_index] = 1.0
+        return coeffs, {"scale_mode": scale_mode}
+
+    if scale_mode == "mean_whitened":
+        sqrtF = _mean_fisher_sqrt(Fs, eps=eps)
+        coeffs = np.asarray(sqrtF[input_index], dtype=np.float64)
+        # Sign is arbitrary for whitening; keep the target parameter's
+        # self-coefficient positive for more readable expressions.
+        if coeffs[input_index] < 0:
+            coeffs = -coeffs
+        return coeffs, {
+            "scale_mode": scale_mode,
+            "fisher_sqrt_row": [float(v) for v in coeffs],
+        }
 
     F = np.asarray(Fs, dtype=np.float64)
     diag_j = np.asarray(F[..., input_index, input_index], dtype=np.float64).ravel()
     diag_j = diag_j[np.isfinite(diag_j)]
     if diag_j.size == 0:
-        return 1.0
+        coeffs[input_index] = 1.0
+        return coeffs, {"scale_mode": scale_mode, "fallback": "unit_no_finite_diag"}
     diag_j = np.maximum(diag_j, 0.0)
 
     if scale_mode == "median_diag":
@@ -919,10 +949,22 @@ def _linear_repair_scale(
     else:
         raise ValueError(
             "rank_repair_scale must be one of "
-            "{'median_diag', 'mean_diag', 'unit'}; got "
+            "{'median_diag', 'mean_diag', 'mean_whitened', 'unit'}; got "
             f"{scale_mode!r}"
         )
-    return float(np.sqrt(max(val, eps)))
+    coeffs[input_index] = float(np.sqrt(max(val, eps)))
+    return coeffs, {"scale_mode": scale_mode, "diag_summary": val}
+
+
+def _format_linear_expression(coeffs: np.ndarray, decimal: int) -> str:
+    terms: List[sympy.Expr] = []
+    for k, coeff in enumerate(np.asarray(coeffs, dtype=np.float64)):
+        if not np.isfinite(coeff) or abs(float(coeff)) < 1e-14:
+            continue
+        terms.append(sympy.Float(round(float(coeff), decimal)) * sympy.Symbol(f"X{k + 1}"))
+    if not terms:
+        return "0"
+    return str(sympy.simplify(sympy.Add(*terms)))
 
 
 def diagnose_coordinate_rank_deficiency(
@@ -1034,7 +1076,7 @@ def repair_coordinate_rank_deficiency(
     n_params: int,
     check_flattening_fn: Optional[Callable] = None,
     A: Optional[np.ndarray] = None,
-    rank_repair_scale: str = "median_diag",
+    rank_repair_scale: str = "mean_whitened",
     rank_rtol: float = 1e-8,
     rank_atol: float = 1e-10,
     decimal: int = 6,
@@ -1042,10 +1084,12 @@ def repair_coordinate_rank_deficiency(
 ) -> Tuple[List[str], Dict[str, Any]]:
     """Replace redundant coordinates with Fisher-scaled linear missing axes.
 
-    The default injected scale is ``sqrt(median(Fs[:, j, j]))`` for missing
-    input ``X{j+1}``, which is robust to outlier Fisher samples.  Set
-    ``rank_repair_scale='mean_diag'`` to use ``sqrt(mean(Fs[:, j, j]))`` or
-    ``'unit'`` for ``1.0 * Xj``.
+    The default ``rank_repair_scale='mean_whitened'`` uses the corresponding
+    row of the symmetric square-root of ``mean(Fs)``: if every coordinate used
+    that linear map, ``J.T @ J = mean(Fs)`` and the mean Fisher would flatten
+    exactly.  Set ``'median_diag'`` for ``sqrt(median(Fs[:, j, j])) * Xj``
+    (robust, but diagonal-only), ``'mean_diag'`` for
+    ``sqrt(mean(Fs[:, j, j])) * Xj``, or ``'unit'`` for ``1.0 * Xj``.
     """
     info = diagnose_coordinate_rank_deficiency(
         coordinates,
@@ -1070,16 +1114,18 @@ def repair_coordinate_rank_deficiency(
 
     n_repairs = min(len(redundant_rows), len(missing_inputs))
     for row, input_idx in zip(redundant_rows[:n_repairs], missing_inputs[:n_repairs]):
-        scale = _linear_repair_scale(Fs, input_idx, rank_repair_scale)
-        scale_str = f"{round(scale, decimal):.{decimal}g}"
-        replacement = f"{scale_str}*X{input_idx + 1}"
+        coeffs, scale_info = _linear_repair_coefficients(
+            Fs, input_idx, n_params, rank_repair_scale
+        )
+        replacement = _format_linear_expression(coeffs, decimal)
         out[row] = replacement
         info["repairs"].append(
             {
                 "output_index": int(row),
                 "X_index": int(input_idx + 1),
-                "coeff": float(scale),
-                "scale_mode": rank_repair_scale,
+                "coeff": float(coeffs[input_idx]),
+                "coefficients": [float(v) for v in coeffs],
+                **scale_info,
                 "replacement": replacement,
             }
         )
@@ -2940,7 +2986,7 @@ def postprocess_eqs(coordinates: List[str],
                     repair_y_atol: float = 1e-10,
                     repair_const_rel_atol: float = 1e-8,
                     repair_rank_deficiency: bool = True,
-                    rank_repair_scale: str = "median_diag",
+                    rank_repair_scale: str = "mean_whitened",
                     rank_repair_rtol: float = 1e-8,
                     rank_repair_atol: float = 1e-10,
                     return_info: bool = False) -> Any:
@@ -3051,11 +3097,14 @@ def postprocess_eqs(coordinates: List[str],
         non-zero repeated coordinates such as several copies of the same atom:
         one copy is kept and redundant rows are replaced by linear coordinates
         for missing input variables.
-    rank_repair_scale : {"median_diag", "mean_diag", "unit"}, default="median_diag"
-        Scale for a repaired coordinate ``c * Xj``.  ``"median_diag"`` uses
-        ``sqrt(median(Fs[:, j, j]))`` and is robust to outlier Fisher samples.
-        ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j]))``.  ``"unit"`` uses
-        ``1.0``.
+    rank_repair_scale : {"mean_whitened", "median_diag", "mean_diag", "unit"}, default="mean_whitened"
+        Scaling / linear map for a repaired coordinate. ``"mean_whitened"``
+        uses row ``j`` of the symmetric square-root of ``mean(Fs)``; if all
+        coordinates used that linear map, the mean Fisher would flatten exactly.
+        ``"median_diag"`` uses ``sqrt(median(Fs[:, j, j])) * Xj`` and is
+        robust to outlier Fisher samples, but ignores off-diagonal Fisher
+        couplings. ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j])) * Xj``.
+        ``"unit"`` uses ``1.0 * Xj``.
     rank_repair_rtol, rank_repair_atol : float
         Relative and absolute tolerances for detecting zero Jacobian columns
         and row-rank deficiency.

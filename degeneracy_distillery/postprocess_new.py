@@ -78,6 +78,7 @@ try:
     from .postprocessing_utils import (
         make_check_flattening_fn,
         norm as _frob,
+        repair_coordinate_rank_deficiency,
         replace_floats,
     )
 except ImportError:
@@ -85,6 +86,7 @@ except ImportError:
     from postprocessing_utils import (  # type: ignore
         make_check_flattening_fn,
         norm as _frob,
+        repair_coordinate_rank_deficiency,
         replace_floats,
     )
 
@@ -710,6 +712,10 @@ def regroup_like_terms(
     orthogonal: bool = True,
     rotation_kwargs: Optional[Dict[str, Any]] = None,
     check_flattening_fn: Optional[Callable] = None,
+    repair_rank_deficiency: bool = True,
+    rank_repair_scale: str = "median_diag",
+    rank_repair_rtol: float = 1e-8,
+    rank_repair_atol: float = 1e-10,
     verbose: bool = True,
 ) -> Tuple[List[str], np.ndarray, Dict[str, Any]]:
     """End-to-end regrouping: atom extraction → sparsifying rotation → snap.
@@ -750,6 +756,17 @@ def regroup_like_terms(
         flexibility.
     rotation_kwargs
         Extra keyword arguments for the chosen optimiser.
+    repair_rank_deficiency
+        If True, run a final Jacobian-rank/coverage repair.  Duplicate or
+        dependent output rows are flagged and redundant rows are replaced with
+        Fisher-scaled linear coordinates for missing input variables.
+    rank_repair_scale
+        Scaling rule for injected ``c * Xj`` coordinates. ``"median_diag"``
+        (default) uses ``sqrt(median(Fs[:, j, j]))``; ``"mean_diag"`` uses
+        ``sqrt(mean(Fs[:, j, j]))``; ``"unit"`` uses ``1.0``.
+    rank_repair_rtol, rank_repair_atol
+        Relative and absolute tolerances for detecting row-rank deficiency and
+        missing input columns.
 
     Returns
     -------
@@ -851,6 +868,29 @@ def regroup_like_terms(
         )
         if verbose:
             print(f"final flatness: {info['final_flat']:.6f}")
+
+    if repair_rank_deficiency:
+        A_for_rank = A_new_for_check if info["rotation_accepted"] else A
+        current, rank_info = repair_coordinate_rank_deficiency(
+            current,
+            X,
+            Fs,
+            n_params,
+            check_flattening_fn=check_flattening_fn,
+            A=A_for_rank,
+            rank_repair_scale=rank_repair_scale,
+            rank_rtol=rank_repair_rtol,
+            rank_atol=rank_repair_atol,
+            decimal=decimal,
+            verbose=verbose,
+        )
+        info["rank_repair"] = rank_info
+        if rank_info.get("repaired", False):
+            info["final_flat"] = _flat_score(
+                current, X, Fs, n_params, check_flattening_fn, A_for_rank,
+            )
+            if verbose:
+                print(f"final flatness after rank repair: {info['final_flat']:.6f}")
 
     return current, R, info
 

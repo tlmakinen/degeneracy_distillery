@@ -868,6 +868,262 @@ def repair_degenerate_pruned_expressions(
     return out, repaired, details
 
 
+def _canonical_expression_key(expr: str) -> str:
+    """Canonical-ish string key for duplicate expression diagnostics."""
+    try:
+        return sympy.sstr(sympy.simplify(str(expr).replace("^", "**")))
+    except Exception:
+        return str(expr).strip()
+
+
+def _rank_tol(singular_values: np.ndarray, rtol: float, atol: float) -> float:
+    if singular_values.size == 0:
+        return float(atol)
+    return max(float(atol), float(rtol) * float(np.max(singular_values)))
+
+
+def _independent_rows_greedy(row_vectors: np.ndarray, tol: float) -> List[int]:
+    """Greedy row-basis selection preserving row order."""
+    keep: List[int] = []
+    current_rank = 0
+    for i in range(row_vectors.shape[0]):
+        trial = row_vectors[keep + [i]]
+        trial_rank = int(np.linalg.matrix_rank(trial, tol=tol))
+        if trial_rank > current_rank:
+            keep.append(i)
+            current_rank = trial_rank
+    return keep
+
+
+def _linear_repair_scale(
+    Fs: np.ndarray,
+    input_index: int,
+    scale_mode: str,
+    eps: float = 1e-30,
+) -> float:
+    """Scale for an injected linear coordinate ``c * Xj``."""
+    if scale_mode == "unit":
+        return 1.0
+
+    F = np.asarray(Fs, dtype=np.float64)
+    diag_j = np.asarray(F[..., input_index, input_index], dtype=np.float64).ravel()
+    diag_j = diag_j[np.isfinite(diag_j)]
+    if diag_j.size == 0:
+        return 1.0
+    diag_j = np.maximum(diag_j, 0.0)
+
+    if scale_mode == "median_diag":
+        val = float(np.median(diag_j))
+    elif scale_mode == "mean_diag":
+        val = float(np.mean(diag_j))
+    else:
+        raise ValueError(
+            "rank_repair_scale must be one of "
+            "{'median_diag', 'mean_diag', 'unit'}; got "
+            f"{scale_mode!r}"
+        )
+    return float(np.sqrt(max(val, eps)))
+
+
+def diagnose_coordinate_rank_deficiency(
+    coordinates: List[str],
+    X: np.ndarray,
+    Fs: np.ndarray,
+    n_params: int,
+    check_flattening_fn: Optional[Callable] = None,
+    A: Optional[np.ndarray] = None,
+    rank_rtol: float = 1e-8,
+    rank_atol: float = 1e-10,
+) -> Dict[str, Any]:
+    """Diagnose duplicate/dependent output coordinates and missing input axes.
+
+    This catches the failure mode where the expression list has length
+    ``n_params`` but its Jacobian spans fewer than ``n_params`` dimensions,
+    e.g. repeated copies of the same nonlinear atom and no dependence on some
+    ``Xj`` variables.
+    """
+    if check_flattening_fn is None:
+        check_flattening_fn = make_check_flattening_fn(X, Fs)
+
+    exprs = [str(e) for e in coordinates]
+    keys = [_canonical_expression_key(e) for e in exprs]
+    groups_by_key: Dict[str, List[int]] = {}
+    for i, key in enumerate(keys):
+        groups_by_key.setdefault(key, []).append(i)
+    duplicate_groups = [
+        {"expr": key, "rows": rows}
+        for key, rows in groups_by_key.items()
+        if len(rows) > 1
+    ]
+
+    Jpred = None
+    jacobian_error: Optional[str] = None
+    try:
+        _flats, Jpred_raw = check_flattening_fn(
+            exprs,
+            return_J=True,
+            A=jnp.eye(n_params) if A is None else jnp.array(A),
+        )
+        Jpred = np.asarray(Jpred_raw, dtype=np.float64)
+    except Exception as exc:
+        jacobian_error = str(exc)
+
+    row_rank: Optional[int] = None
+    singular_values: List[float] = []
+    independent_rows: List[int] = []
+    dependent_rows: List[int] = []
+    missing_inputs: List[int] = []
+    input_norms: List[float] = []
+
+    if Jpred is not None:
+        if Jpred.ndim != 3:
+            jacobian_error = f"expected Jpred ndim 3, got shape {Jpred.shape}"
+        else:
+            row_vectors = Jpred.transpose(1, 0, 2).reshape(Jpred.shape[1], -1)
+            _u, s, _vt = np.linalg.svd(row_vectors, full_matrices=False)
+            tol = _rank_tol(s, rank_rtol, rank_atol)
+            row_rank = int(np.sum(s > tol))
+            singular_values = [float(v) for v in s]
+            independent_rows = _independent_rows_greedy(row_vectors, tol)
+            independent_set = set(independent_rows)
+            dependent_rows = [
+                i for i in range(row_vectors.shape[0]) if i not in independent_set
+            ]
+
+            col_norm = np.linalg.norm(
+                Jpred.transpose(2, 0, 1).reshape(Jpred.shape[2], -1),
+                axis=1,
+            )
+            max_col_norm = float(np.max(col_norm)) if col_norm.size else 0.0
+            col_tol = max(float(rank_atol), float(rank_rtol) * max_col_norm)
+            missing_inputs = [
+                int(i) for i, val in enumerate(col_norm) if float(val) <= col_tol
+            ]
+            input_norms = [float(v) for v in col_norm]
+
+    redundant_from_duplicates: List[int] = []
+    for group in duplicate_groups:
+        redundant_from_duplicates.extend(group["rows"][1:])
+    redundant_rows = sorted(set(redundant_from_duplicates + dependent_rows))
+
+    rank_deficient = (
+        (row_rank is not None and row_rank < n_params)
+        or bool(missing_inputs)
+        or bool(duplicate_groups)
+    )
+
+    return {
+        "rank_deficient": bool(rank_deficient),
+        "row_rank": row_rank,
+        "n_params": int(n_params),
+        "singular_values": singular_values,
+        "duplicate_groups": duplicate_groups,
+        "independent_rows": independent_rows,
+        "dependent_rows": dependent_rows,
+        "redundant_rows": redundant_rows,
+        "missing_inputs": missing_inputs,
+        "input_norms": input_norms,
+        "jacobian_error": jacobian_error,
+    }
+
+
+def repair_coordinate_rank_deficiency(
+    coordinates: List[str],
+    X: np.ndarray,
+    Fs: np.ndarray,
+    n_params: int,
+    check_flattening_fn: Optional[Callable] = None,
+    A: Optional[np.ndarray] = None,
+    rank_repair_scale: str = "median_diag",
+    rank_rtol: float = 1e-8,
+    rank_atol: float = 1e-10,
+    decimal: int = 6,
+    verbose: bool = False,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Replace redundant coordinates with Fisher-scaled linear missing axes.
+
+    The default injected scale is ``sqrt(median(Fs[:, j, j]))`` for missing
+    input ``X{j+1}``, which is robust to outlier Fisher samples.  Set
+    ``rank_repair_scale='mean_diag'`` to use ``sqrt(mean(Fs[:, j, j]))`` or
+    ``'unit'`` for ``1.0 * Xj``.
+    """
+    info = diagnose_coordinate_rank_deficiency(
+        coordinates,
+        X,
+        Fs,
+        n_params,
+        check_flattening_fn=check_flattening_fn,
+        A=A,
+        rank_rtol=rank_rtol,
+        rank_atol=rank_atol,
+    )
+    info["repaired"] = False
+    info["repairs"] = []
+    info["unresolved_missing_inputs"] = list(info["missing_inputs"])
+
+    if not info["rank_deficient"]:
+        return list(map(str, coordinates)), info
+
+    out = list(map(str, coordinates))
+    redundant_rows = list(info["redundant_rows"])
+    missing_inputs = list(info["missing_inputs"])
+
+    n_repairs = min(len(redundant_rows), len(missing_inputs))
+    for row, input_idx in zip(redundant_rows[:n_repairs], missing_inputs[:n_repairs]):
+        scale = _linear_repair_scale(Fs, input_idx, rank_repair_scale)
+        scale_str = f"{round(scale, decimal):.{decimal}g}"
+        replacement = f"{scale_str}*X{input_idx + 1}"
+        out[row] = replacement
+        info["repairs"].append(
+            {
+                "output_index": int(row),
+                "X_index": int(input_idx + 1),
+                "coeff": float(scale),
+                "scale_mode": rank_repair_scale,
+                "replacement": replacement,
+            }
+        )
+
+    info["repaired"] = bool(info["repairs"])
+    info["unresolved_missing_inputs"] = [
+        int(i) for i in missing_inputs[n_repairs:]
+    ]
+
+    if verbose and info["rank_deficient"]:
+        print(
+            "rank repair: detected duplicate/dependent coordinates; "
+            f"row_rank={info['row_rank']}/{n_params}, "
+            f"missing X={[i + 1 for i in info['missing_inputs']]}, "
+            f"redundant rows={redundant_rows}"
+        )
+        for action in info["repairs"]:
+            print(
+                "  replaced output "
+                f"{action['output_index']} with {action['replacement']} "
+                f"({action['scale_mode']})"
+            )
+        if info["unresolved_missing_inputs"]:
+            print(
+                "  unresolved missing inputs: "
+                f"{[i + 1 for i in info['unresolved_missing_inputs']]}"
+            )
+
+    if info["repaired"]:
+        post = diagnose_coordinate_rank_deficiency(
+            out,
+            X,
+            Fs,
+            n_params,
+            check_flattening_fn=check_flattening_fn,
+            A=A,
+            rank_rtol=rank_rtol,
+            rank_atol=rank_atol,
+        )
+        info["post_repair"] = post
+
+    return out, info
+
+
 def get_missing_vars(coordinates, n_params, n_appearances=2):
     pars_to_append = []
 
@@ -2682,7 +2938,12 @@ def postprocess_eqs(coordinates: List[str],
                     repair_degenerate_linear: bool = True,
                     repair_linear_scale: float = 1.0,
                     repair_y_atol: float = 1e-10,
-                    repair_const_rel_atol: float = 1e-8) -> Tuple[List[str], List[List[float]], Optional[np.ndarray]]:
+                    repair_const_rel_atol: float = 1e-8,
+                    repair_rank_deficiency: bool = True,
+                    rank_repair_scale: str = "median_diag",
+                    rank_repair_rtol: float = 1e-8,
+                    rank_repair_atol: float = 1e-10,
+                    return_info: bool = False) -> Any:
     """
     High-level wrapper for postprocessing symbolic expressions.
     
@@ -2695,7 +2956,10 @@ def postprocess_eqs(coordinates: List[str],
        coordinate that became identically zero or θ-independent **after** constant
        pruning gets a small ``+ c X_j`` term (the first repair runs after linear
        pruning only).
-    6. Returns simplified expressions
+    6. If ``repair_rank_deficiency``, flags duplicate/dependent final
+       coordinates and replaces redundant rows with Fisher-scaled linear
+       coordinates for missing input parameters.
+    7. Returns simplified expressions
     
     Parameters
     ----------
@@ -2782,6 +3046,22 @@ def postprocess_eqs(coordinates: List[str],
     repair_const_rel_atol : float, default=1e-8
         Relative tolerance for the "coordinate is constant in θ" test on ``X``.
         Set to ``0`` to disable constant detection (legacy zero-only behaviour).
+    repair_rank_deficiency : bool, default=True
+        If True, run a final Jacobian-rank/coverage repair.  This catches
+        non-zero repeated coordinates such as several copies of the same atom:
+        one copy is kept and redundant rows are replaced by linear coordinates
+        for missing input variables.
+    rank_repair_scale : {"median_diag", "mean_diag", "unit"}, default="median_diag"
+        Scale for a repaired coordinate ``c * Xj``.  ``"median_diag"`` uses
+        ``sqrt(median(Fs[:, j, j]))`` and is robust to outlier Fisher samples.
+        ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j]))``.  ``"unit"`` uses
+        ``1.0``.
+    rank_repair_rtol, rank_repair_atol : float
+        Relative and absolute tolerances for detecting zero Jacobian columns
+        and row-rank deficiency.
+    return_info : bool, default=False
+        If True, return ``(pruned_expressions, constants, A_rotation, info)``.
+        Otherwise preserve the historical 3-tuple return shape.
         
     Returns
     -------
@@ -2791,6 +3071,8 @@ def postprocess_eqs(coordinates: List[str],
         Constants in the pruned expressions
     A_rotation : np.ndarray or None
         The rotation matrix used (either provided or optimized)
+    info : dict, optional
+        Only returned when ``return_info=True``. Contains ``rank_repair``.
         
     Examples
     --------
@@ -2824,6 +3106,8 @@ def postprocess_eqs(coordinates: List[str],
             "ESR package is required for postprocessing. "
             "Please install it to use this function."
         )
+
+    postprocess_info: Dict[str, Any] = {}
 
     if check_flattening_fn is None:
         check_flattening_fn = make_check_flattening_fn(X, Fs)
@@ -3020,11 +3304,44 @@ def postprocess_eqs(coordinates: List[str],
                 ]
                 constants = [replace_floats(s)[1] for s in pruned_expressions]
 
+    if repair_rank_deficiency:
+        if verbose:
+            print("\n--- Final coordinate rank/coverage repair ---")
+        pruned_expressions, rank_info = repair_coordinate_rank_deficiency(
+            pruned_expressions,
+            X,
+            Fs,
+            n_params,
+            check_flattening_fn=check_flattening_fn,
+            A=np.asarray(A_rotation),
+            rank_repair_scale=rank_repair_scale,
+            rank_rtol=rank_repair_rtol,
+            rank_atol=rank_repair_atol,
+            decimal=decimal,
+            verbose=verbose,
+        )
+        postprocess_info["rank_repair"] = rank_info
+        if rank_info.get("repaired", False):
+            if remove_floats:
+                paired = [
+                    replace_floats(str(sympy.simplify(str(e))))
+                    for e in pruned_expressions
+                ]
+                pruned_expressions = [p[0] for p in paired]
+                constants = [p[1] for p in paired]
+            else:
+                pruned_expressions = [
+                    str(sympy.simplify(str(e))) for e in pruned_expressions
+                ]
+                constants = [replace_floats(s)[1] for s in pruned_expressions]
+
     if verbose:
         print("\nPostprocessing complete!")
         print(f"Input expressions: {len(coordinates)}")
         print(f"Output expressions: {len(pruned_expressions)}")
-    
+
+    if return_info:
+        return pruned_expressions, constants, A_rotation, postprocess_info
     return pruned_expressions, constants, A_rotation
 
 

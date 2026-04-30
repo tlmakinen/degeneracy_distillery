@@ -21,7 +21,10 @@ Replaces the coordinate-Kabsch + varimax scheme in ``preprocessing_utils`` with:
    replacements for the functions in :mod:`preprocessing_utils` using the above.
    The returned dictionary has the same keys as
    ``preprocessing_utils.process_ensemble_rotation`` so the downstream SR /
-   plotting code does not need to change.
+   plotting code does not need to change.  After alignment and rotation,
+   :func:`process_ensemble_rotation_v2` optionally applies a **global** per-axis
+   translation so pooled η coordinates (all ensemble ``ys`` and the weighted
+   mean ``y``) have a configurable positive floor (``offset_delta``).
 
 All rotations act on the output (η) axis of the Jacobian, i.e.
 ``J'[b, i, j] = sum_k R[i, k] J[b, k, j]``, matching the convention of
@@ -425,8 +428,48 @@ def build_global_basis(
     return R_basis
 
 
+def _global_coordinate_floor_shift(
+    ys_arr: np.ndarray,
+    y_mean: np.ndarray,
+    offset_delta: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply one global translation per η-axis so pooled values sit above ``offset_delta``.
+
+    Pool all values in ``ys_arr`` (every ensemble member and sample) together
+    with ``y_mean``, take ``axis=0`` min per output dimension, then subtract
+    ``(y_min - offset_delta)`` from ``ys_arr`` and ``y_mean``.  Equivalently
+    ``y ← y - y.min(0) + offset_delta`` on that pooled set, so each axis's
+    global minimum becomes ``offset_delta`` (default 0.1).
+
+    Jacobians are unchanged by output translation and are not modified here.
+
+    Returns
+    -------
+    ys_shifted, y_mean_shifted, shift
+        ``shift`` has shape ``(D_out,)`` for optional diagnostics.
+    """
+    ys_arr = np.asarray(ys_arr, dtype=np.float64)
+    y_mean = np.asarray(y_mean, dtype=np.float64)
+    if ys_arr.ndim != 3:
+        raise ValueError(f"ys_arr must be 3-D; got shape {ys_arr.shape}")
+    if y_mean.ndim != 2:
+        raise ValueError(f"y_mean must be 2-D; got shape {y_mean.shape}")
+    D_out = ys_arr.shape[-1]
+    if y_mean.shape[-1] != D_out:
+        raise ValueError(
+            f"y_mean last dim {y_mean.shape[-1]} != ys_arr last dim {D_out}"
+        )
+    pooled = np.concatenate(
+        [ys_arr.reshape(-1, D_out), y_mean.reshape(-1, D_out)],
+        axis=0,
+    )
+    y_min_axis = pooled.min(axis=0)
+    shift = y_min_axis - float(offset_delta)
+    return ys_arr - shift, y_mean - shift, shift
+
+
 # =============================================================================
-# 4. SINGLE-MEMBER ROTATION (drop-in replacement for rotate_coords)
+# 5. SINGLE-MEMBER ROTATION (drop-in replacement for rotate_coords)
 # =============================================================================
 
 def rotate_coords_v2(
@@ -609,7 +652,7 @@ def rotate_coords_v2(
 
 
 # =============================================================================
-# 5. ENSEMBLE ORCHESTRATOR (drop-in replacement for process_ensemble_rotation)
+# 6. ENSEMBLE ORCHESTRATOR (drop-in replacement for process_ensemble_rotation)
 # =============================================================================
 
 def process_ensemble_rotation_v2(
@@ -627,6 +670,7 @@ def process_ensemble_rotation_v2(
     enforce_proper: bool = True,
     Fisher_to_flatten: Literal["average", "best"] = "average",
     verbose: bool = True,
+    offset_delta: Optional[float] = 0.1,
 ) -> Dict[str, Any]:
     """Ensemble alignment using Jacobian-Procrustes + nonlinearity rotation.
 
@@ -648,6 +692,13 @@ def process_ensemble_rotation_v2(
       is in ``SO(D_out)`` (proper rotation, det = +1) so the η frame has the
       same handedness as the θ frame.  Disable to allow reflections; Fisher
       flatness is preserved either way.
+    * After masking and averaging, a **global** per-axis translation (optional)
+      shifts ``ys`` and ``y`` so every η component, pooled over all ensemble
+      members and samples and the weighted mean, has global minimum
+      ``offset_delta`` (default ``0.1``).  Set ``offset_delta=None`` to skip.
+      The subtracted vector is ``y_global_min - offset_delta`` (shape
+      ``(D_out,)``); see :func:`_global_coordinate_floor_shift`.  When enabled,
+      the return dict may include ``eta_coordinate_shift`` with that vector.
     """
     if Fisher_to_flatten not in ("average", "best"):
         raise ValueError(
@@ -792,7 +843,18 @@ def process_ensemble_rotation_v2(
 
     eta_ensemble_masked = datafile["eta_ensemble"][member_idx][:, randidx, :][:, mask, :]
 
-    return {
+    eta_floor_shift: Optional[np.ndarray] = None
+    if offset_delta is not None:
+        ys_arr, y_mean, eta_floor_shift = _global_coordinate_floor_shift(
+            ys_arr, y_mean, float(offset_delta)
+        )
+        if verbose:
+            print(
+                f"\nGlobal η coordinate floor (last step): offset_delta={float(offset_delta):g}; "
+                f"subtracted per-axis shift = y_global_min - offset_delta = {eta_floor_shift}"
+            )
+
+    out: Dict[str, Any] = {
         "y": y_mean,
         "y_std": y_std,
         "dy": dy_mean,
@@ -812,10 +874,13 @@ def process_ensemble_rotation_v2(
         "eta_ensemble": eta_ensemble_masked,
         "norm_factor": datafile["norm_factor"],
     }
+    if eta_floor_shift is not None:
+        out["eta_coordinate_shift"] = eta_floor_shift
+    return out
 
 
 # =============================================================================
-# 6. CONVENIENCE: LOAD + PROCESS (drop-in for load_and_process_data)
+# 7. CONVENIENCE: LOAD + PROCESS (drop-in for load_and_process_data)
 # =============================================================================
 
 def load_and_process_data_v2(
@@ -834,6 +899,7 @@ def load_and_process_data_v2(
     enforce_proper: bool = True,
     Fisher_to_flatten: Literal["average", "best"] = "average",
     verbose: bool = True,
+    offset_delta: Optional[float] = 0.1,
 ) -> Dict[str, Any]:
     """Drop-in replacement for :func:`preprocessing_utils.load_and_process_data`.
 
@@ -851,6 +917,9 @@ def load_and_process_data_v2(
     align_mode, separate_nonlinearity, canonicalize, use_prior_normalization, restore_reference_mean, enforce_proper
         Forwarded to :func:`process_ensemble_rotation_v2`.  ``enforce_proper``
         defaults to True (guarantees ``det(R) = +1`` per member).
+    offset_delta
+        Forwarded to :func:`process_ensemble_rotation_v2` (global η coordinate
+        floor after alignment).  ``None`` disables that final translation.
 
     Returns
     -------
@@ -888,6 +957,7 @@ def load_and_process_data_v2(
         enforce_proper=enforce_proper,
         Fisher_to_flatten=Fisher_to_flatten,
         verbose=verbose,
+        offset_delta=offset_delta,
     )
 
     merged = dict(base)
@@ -896,7 +966,7 @@ def load_and_process_data_v2(
 
 
 # =============================================================================
-# 7. DIAGNOSTICS
+# 8. DIAGNOSTICS
 # =============================================================================
 
 def nonlinearity_spectrum(

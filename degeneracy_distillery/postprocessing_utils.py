@@ -967,6 +967,168 @@ def _format_linear_expression(coeffs: np.ndarray, decimal: int) -> str:
     return str(sympy.simplify(sympy.Add(*terms)))
 
 
+def _coordinate_jacobian(
+    coordinates: List[str],
+    n_params: int,
+    check_flattening_fn: Callable,
+    A: Optional[np.ndarray] = None,
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    """Evaluate SR coordinate Jacobians using the same path as flatness checks."""
+    try:
+        _flats, Jpred_raw = check_flattening_fn(
+            list(map(str, coordinates)),
+            return_J=True,
+            A=jnp.eye(n_params) if A is None else jnp.array(A),
+        )
+        return np.asarray(Jpred_raw, dtype=np.float64), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _jacobian_invertibility_metrics(
+    Jpred: np.ndarray,
+    rank_rtol: float = 1e-8,
+    rank_atol: float = 1e-10,
+    eps: float = 1e-30,
+) -> Dict[str, Any]:
+    """Per-sample local invertibility diagnostics for ``J[b]``."""
+    J = np.asarray(Jpred, dtype=np.float64)
+    if J.ndim != 3:
+        return {"error": f"expected Jpred ndim 3, got shape {J.shape}"}
+    s = np.linalg.svd(J, compute_uv=False)
+    if s.size == 0:
+        return {
+            "min_sigma_min": 0.0,
+            "median_sigma_min": 0.0,
+            "max_condition": float("inf"),
+            "median_condition": float("inf"),
+            "n_rank_deficient_samples": int(J.shape[0]),
+            "sample_ranks": [],
+        }
+    sigma_max = s[:, 0]
+    sigma_min = s[:, -1]
+    sample_tols = np.maximum(float(rank_atol), float(rank_rtol) * sigma_max)
+    sample_ranks = np.sum(s > sample_tols[:, None], axis=1)
+    target_rank = min(J.shape[1], J.shape[2])
+    cond = sigma_max / np.maximum(sigma_min, eps)
+    return {
+        "min_sigma_min": float(np.min(sigma_min)),
+        "median_sigma_min": float(np.median(sigma_min)),
+        "max_condition": float(np.max(cond)),
+        "median_condition": float(np.median(cond)),
+        "n_rank_deficient_samples": int(np.sum(sample_ranks < target_rank)),
+        "sample_ranks": [int(v) for v in sample_ranks],
+    }
+
+
+def _score_jacobian_invertibility(
+    Jpred: np.ndarray,
+    rank_rtol: float,
+    rank_atol: float,
+    condition_weight: float,
+    eps: float = 1e-30,
+) -> Tuple[float, Dict[str, Any]]:
+    """Higher-is-better score for candidate repaired Jacobians."""
+    metrics = _jacobian_invertibility_metrics(Jpred, rank_rtol, rank_atol, eps)
+    if "error" in metrics:
+        return -float("inf"), metrics
+    n_samples = max(int(Jpred.shape[0]), 1)
+    rank_bad_frac = float(metrics["n_rank_deficient_samples"]) / n_samples
+    score = (
+        np.log(max(float(metrics["min_sigma_min"]), eps))
+        + 0.25 * np.log(max(float(metrics["median_sigma_min"]), eps))
+        - float(condition_weight) * np.log(max(float(metrics["max_condition"]), 1.0))
+        - 10.0 * rank_bad_frac
+    )
+    return float(score), metrics
+
+
+def _candidate_repair_coefficients(
+    Fs: np.ndarray,
+    input_index: int,
+    n_params: int,
+    requested_scale: str,
+) -> List[Tuple[np.ndarray, Dict[str, Any]]]:
+    """Deterministic candidate rows for a missing input repair."""
+    candidates: List[Tuple[np.ndarray, Dict[str, Any]]] = []
+    for mode in [requested_scale, "mean_whitened", "median_diag", "mean_diag", "unit"]:
+        try:
+            coeffs, meta = _linear_repair_coefficients(Fs, input_index, n_params, mode)
+        except Exception as exc:
+            continue
+        if not np.all(np.isfinite(coeffs)):
+            continue
+        duplicate = any(np.allclose(coeffs, c, rtol=1e-10, atol=1e-12) for c, _ in candidates)
+        if not duplicate:
+            meta = dict(meta)
+            meta["candidate_kind"] = "deterministic"
+            candidates.append((coeffs, meta))
+    return candidates
+
+
+def _optimize_linear_repair_coefficients(
+    J_work: np.ndarray,
+    row: int,
+    input_idx: int,
+    Fs: np.ndarray,
+    n_params: int,
+    requested_scale: str,
+    rank_rtol: float,
+    rank_atol: float,
+    condition_weight: float,
+    n_candidates: int,
+    noise_scale: float,
+    seed: Optional[int],
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Choose a linear repair row by direct Jacobian conditioning score."""
+    candidates = _candidate_repair_coefficients(Fs, input_idx, n_params, requested_scale)
+    rng = np.random.default_rng(seed)
+    centers = [c for c, _ in candidates[:2]] or [np.eye(n_params)[input_idx]]
+    for center in centers:
+        norm = max(float(np.linalg.norm(center)), 1.0)
+        for _ in range(max(int(n_candidates), 0)):
+            perturb = rng.normal(size=n_params)
+            perturb = perturb / max(float(np.linalg.norm(perturb)), 1e-30)
+            coeffs = np.asarray(center + float(noise_scale) * norm * perturb, dtype=np.float64)
+            if coeffs[input_idx] < 0:
+                coeffs = -coeffs
+            candidates.append((
+                coeffs,
+                {
+                    "scale_mode": requested_scale,
+                    "candidate_kind": "random_perturbation",
+                    "center_norm": norm,
+                    "noise_scale": float(noise_scale),
+                },
+            ))
+
+    best_score = -float("inf")
+    best_coeffs: Optional[np.ndarray] = None
+    best_meta: Dict[str, Any] = {}
+    best_metrics: Dict[str, Any] = {}
+    for coeffs, meta in candidates:
+        J_trial = np.array(J_work, copy=True)
+        J_trial[:, row, :] = coeffs[None, :]
+        score, metrics = _score_jacobian_invertibility(
+            J_trial, rank_rtol, rank_atol, condition_weight
+        )
+        if score > best_score:
+            best_score = score
+            best_coeffs = coeffs
+            best_meta = dict(meta)
+            best_metrics = metrics
+
+    if best_coeffs is None:
+        best_coeffs, best_meta = _linear_repair_coefficients(
+            Fs, input_idx, n_params, requested_scale
+        )
+        best_metrics = {}
+    best_meta["optimized"] = True
+    best_meta["invertibility_score"] = float(best_score)
+    best_meta["invertibility_metrics"] = best_metrics
+    return best_coeffs, best_meta
+
+
 def diagnose_coordinate_rank_deficiency(
     coordinates: List[str],
     X: np.ndarray,
@@ -998,17 +1160,9 @@ def diagnose_coordinate_rank_deficiency(
         if len(rows) > 1
     ]
 
-    Jpred = None
-    jacobian_error: Optional[str] = None
-    try:
-        _flats, Jpred_raw = check_flattening_fn(
-            exprs,
-            return_J=True,
-            A=jnp.eye(n_params) if A is None else jnp.array(A),
-        )
-        Jpred = np.asarray(Jpred_raw, dtype=np.float64)
-    except Exception as exc:
-        jacobian_error = str(exc)
+    Jpred, jacobian_error = _coordinate_jacobian(
+        exprs, n_params, check_flattening_fn, A=A
+    )
 
     row_rank: Optional[int] = None
     singular_values: List[float] = []
@@ -1065,6 +1219,10 @@ def diagnose_coordinate_rank_deficiency(
         "redundant_rows": redundant_rows,
         "missing_inputs": missing_inputs,
         "input_norms": input_norms,
+        "invertibility": (
+            _jacobian_invertibility_metrics(Jpred, rank_rtol, rank_atol)
+            if Jpred is not None else None
+        ),
         "jacobian_error": jacobian_error,
     }
 
@@ -1077,6 +1235,11 @@ def repair_coordinate_rank_deficiency(
     check_flattening_fn: Optional[Callable] = None,
     A: Optional[np.ndarray] = None,
     rank_repair_scale: str = "mean_whitened",
+    rank_repair_optimize: bool = True,
+    rank_repair_optimize_n_candidates: int = 64,
+    rank_repair_optimize_noise: float = 0.25,
+    rank_repair_condition_weight: float = 0.1,
+    rank_repair_seed: Optional[int] = 0,
     rank_rtol: float = 1e-8,
     rank_atol: float = 1e-10,
     decimal: int = 6,
@@ -1090,6 +1253,9 @@ def repair_coordinate_rank_deficiency(
     exactly.  Set ``'median_diag'`` for ``sqrt(median(Fs[:, j, j])) * Xj``
     (robust, but diagonal-only), ``'mean_diag'`` for
     ``sqrt(mean(Fs[:, j, j])) * Xj``, or ``'unit'`` for ``1.0 * Xj``.
+    If ``rank_repair_optimize`` is True, deterministic Fisher candidates and
+    random perturbations are scored against the actual repaired Jacobian; the
+    chosen row maximizes a singular-value/condition-number objective.
     """
     info = diagnose_coordinate_rank_deficiency(
         coordinates,
@@ -1111,14 +1277,45 @@ def repair_coordinate_rank_deficiency(
     out = list(map(str, coordinates))
     redundant_rows = list(info["redundant_rows"])
     missing_inputs = list(info["missing_inputs"])
+    J_work, J_error = _coordinate_jacobian(
+        out,
+        n_params,
+        check_flattening_fn if check_flattening_fn is not None else make_check_flattening_fn(X, Fs),
+        A=A,
+    )
+    if J_error is not None:
+        info["repair_jacobian_error"] = J_error
 
     n_repairs = min(len(redundant_rows), len(missing_inputs))
-    for row, input_idx in zip(redundant_rows[:n_repairs], missing_inputs[:n_repairs]):
-        coeffs, scale_info = _linear_repair_coefficients(
-            Fs, input_idx, n_params, rank_repair_scale
-        )
+    for repair_idx, (row, input_idx) in enumerate(
+        zip(redundant_rows[:n_repairs], missing_inputs[:n_repairs])
+    ):
+        if rank_repair_optimize and J_work is not None:
+            seed = None if rank_repair_seed is None else int(rank_repair_seed) + repair_idx
+            coeffs, scale_info = _optimize_linear_repair_coefficients(
+                J_work,
+                row,
+                input_idx,
+                Fs,
+                n_params,
+                rank_repair_scale,
+                rank_rtol,
+                rank_atol,
+                rank_repair_condition_weight,
+                rank_repair_optimize_n_candidates,
+                rank_repair_optimize_noise,
+                seed,
+            )
+        else:
+            coeffs, scale_info = _linear_repair_coefficients(
+                Fs, input_idx, n_params, rank_repair_scale
+            )
+            scale_info = dict(scale_info)
+            scale_info["optimized"] = False
         replacement = _format_linear_expression(coeffs, decimal)
         out[row] = replacement
+        if J_work is not None:
+            J_work[:, row, :] = coeffs[None, :]
         info["repairs"].append(
             {
                 "output_index": int(row),
@@ -2987,6 +3184,11 @@ def postprocess_eqs(coordinates: List[str],
                     repair_const_rel_atol: float = 1e-8,
                     repair_rank_deficiency: bool = True,
                     rank_repair_scale: str = "mean_whitened",
+                    rank_repair_optimize: bool = True,
+                    rank_repair_optimize_n_candidates: int = 64,
+                    rank_repair_optimize_noise: float = 0.25,
+                    rank_repair_condition_weight: float = 0.1,
+                    rank_repair_seed: Optional[int] = 0,
                     rank_repair_rtol: float = 1e-8,
                     rank_repair_atol: float = 1e-10,
                     return_info: bool = False) -> Any:
@@ -3105,6 +3307,20 @@ def postprocess_eqs(coordinates: List[str],
         robust to outlier Fisher samples, but ignores off-diagonal Fisher
         couplings. ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j])) * Xj``.
         ``"unit"`` uses ``1.0 * Xj``.
+    rank_repair_optimize : bool, default=True
+        If True, choose each repaired linear row by directly scoring the
+        candidate repaired Jacobian's per-sample singular values.  The candidate
+        pool includes deterministic Fisher rows plus random perturbations.
+    rank_repair_optimize_n_candidates : int, default=64
+        Number of random perturbations per center used by the optimization.
+    rank_repair_optimize_noise : float, default=0.25
+        Relative perturbation scale around deterministic candidate rows.
+    rank_repair_condition_weight : float, default=0.1
+        Penalty weight on worst-case Jacobian condition number in the optimizer
+        objective.
+    rank_repair_seed : int or None, default=0
+        Seed for deterministic candidate perturbations.  Set ``None`` for
+        non-deterministic search.
     rank_repair_rtol, rank_repair_atol : float
         Relative and absolute tolerances for detecting zero Jacobian columns
         and row-rank deficiency.
@@ -3364,6 +3580,11 @@ def postprocess_eqs(coordinates: List[str],
             check_flattening_fn=check_flattening_fn,
             A=np.asarray(A_rotation),
             rank_repair_scale=rank_repair_scale,
+            rank_repair_optimize=rank_repair_optimize,
+            rank_repair_optimize_n_candidates=rank_repair_optimize_n_candidates,
+            rank_repair_optimize_noise=rank_repair_optimize_noise,
+            rank_repair_condition_weight=rank_repair_condition_weight,
+            rank_repair_seed=rank_repair_seed,
             rank_rtol=rank_repair_rtol,
             rank_atol=rank_repair_atol,
             decimal=decimal,

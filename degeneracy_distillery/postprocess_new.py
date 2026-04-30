@@ -714,6 +714,11 @@ def regroup_like_terms(
     check_flattening_fn: Optional[Callable] = None,
     repair_rank_deficiency: bool = True,
     rank_repair_scale: str = "mean_whitened",
+    rank_repair_optimize: bool = True,
+    rank_repair_optimize_n_candidates: int = 64,
+    rank_repair_optimize_noise: float = 0.25,
+    rank_repair_condition_weight: float = 0.1,
+    rank_repair_seed: Optional[int] = 0,
     rank_repair_rtol: float = 1e-8,
     rank_repair_atol: float = 1e-10,
     verbose: bool = True,
@@ -767,6 +772,18 @@ def regroup_like_terms(
         couplings. ``"median_diag"`` uses ``sqrt(median(Fs[:, j, j])) * Xj``;
         ``"mean_diag"`` uses ``sqrt(mean(Fs[:, j, j])) * Xj``; ``"unit"`` uses
         ``1.0 * Xj``.
+    rank_repair_optimize
+        If True, choose each repaired linear row by directly scoring the
+        candidate repaired Jacobian's per-sample singular values.  The candidate
+        pool includes deterministic Fisher rows plus random perturbations.
+    rank_repair_optimize_n_candidates, rank_repair_optimize_noise
+        Random-search controls for the conditioning objective.
+    rank_repair_condition_weight
+        Penalty weight on worst-case Jacobian condition number in the optimizer
+        objective.
+    rank_repair_seed
+        Seed for deterministic perturbations; ``None`` gives non-deterministic
+        search.
     rank_repair_rtol, rank_repair_atol
         Relative and absolute tolerances for detecting row-rank deficiency and
         missing input columns.
@@ -882,6 +899,11 @@ def regroup_like_terms(
             check_flattening_fn=check_flattening_fn,
             A=A_for_rank,
             rank_repair_scale=rank_repair_scale,
+            rank_repair_optimize=rank_repair_optimize,
+            rank_repair_optimize_n_candidates=rank_repair_optimize_n_candidates,
+            rank_repair_optimize_noise=rank_repair_optimize_noise,
+            rank_repair_condition_weight=rank_repair_condition_weight,
+            rank_repair_seed=rank_repair_seed,
             rank_rtol=rank_repair_rtol,
             rank_atol=rank_repair_atol,
             decimal=decimal,

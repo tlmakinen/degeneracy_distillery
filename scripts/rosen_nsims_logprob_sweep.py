@@ -97,6 +97,35 @@ def parse_args() -> argparse.Namespace:
         default=1000,
         help="Simulation count at which to save the theta-vs-eta FoM comparison.",
     )
+    parser.add_argument(
+        "--run-coverage",
+        action="store_true",
+        help="Optionally export posterior coverage diagnostics for the coverage nsims case.",
+    )
+    parser.add_argument(
+        "--coverage-nsims",
+        type=int,
+        default=None,
+        help="Simulation count for coverage export; defaults to --fom-nsims.",
+    )
+    parser.add_argument(
+        "--coverage-n-test",
+        type=int,
+        default=1000,
+        help="Number of held-out test observations for coverage export.",
+    )
+    parser.add_argument(
+        "--coverage-num-samples",
+        type=int,
+        default=1000,
+        help="Posterior samples per test observation for coverage export.",
+    )
+    parser.add_argument(
+        "--coverage-seed",
+        type=int,
+        default=None,
+        help="Seed for selecting coverage test observations; defaults to seed + 20000.",
+    )
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument(
         "--validation-smoothing-window",
@@ -432,6 +461,85 @@ def save_metrics_outputs(
         dataframe_to_npz(out_dir / "fom_comparison.npz", fom_comparison)
 
 
+
+def compute_coverage_diagnostics(
+    posterior_samples: np.ndarray,
+    theta_true: np.ndarray,
+    seed: int,
+    nbins: int = 10,
+) -> dict[str, np.ndarray]:
+    """Compute exportable data behind ltu-ili's one-dimensional coverage plots.
+
+    Parameters
+    ----------
+    posterior_samples
+        Array with shape (num_samples, n_data, n_params), matching ltu-ili.
+    theta_true
+        True parameters with shape (n_data, n_params).
+    seed
+        Seed used only for the reference uniform coverage bands.
+    nbins
+        Rank-histogram bins.
+    """
+    posterior_samples = np.asarray(posterior_samples, dtype=np.float32)
+    theta_true = np.asarray(theta_true, dtype=np.float32)
+    num_samples, n_data, n_params = posterior_samples.shape
+
+    finite = np.isfinite(posterior_samples).all(axis=-1)
+    valid_counts = finite.sum(axis=0).astype(np.int64)
+    ranks = np.zeros((n_data, n_params), dtype=np.int64)
+    percentiles = np.full((n_data, n_params), np.nan, dtype=np.float32)
+
+    for data_idx in range(n_data):
+        valid = finite[:, data_idx]
+        if valid.sum() == 0:
+            continue
+        ranks[data_idx] = (posterior_samples[valid, data_idx, :] < theta_true[data_idx]).sum(axis=0)
+        percentiles[data_idx] = ranks[data_idx] / valid.sum()
+
+    empirical_cdf = np.linspace(0.0, 1.0, n_data, dtype=np.float32)
+    predicted_percentiles = np.full((n_data, n_params), np.nan, dtype=np.float32)
+    rank_hist_counts = np.zeros((n_params, nbins), dtype=np.int64)
+    rank_hist_edges = np.linspace(0.0, 1.0, nbins + 1, dtype=np.float32)
+
+    for param_idx in range(n_params):
+        finite_pct = percentiles[np.isfinite(percentiles[:, param_idx]), param_idx]
+        if finite_pct.size:
+            predicted_percentiles[: finite_pct.size, param_idx] = np.sort(finite_pct)
+            rank_hist_counts[param_idx], _ = np.histogram(finite_pct, bins=rank_hist_edges)
+
+    rng = np.random.default_rng(seed)
+    uniform_curves = np.sort(rng.uniform(0.0, 1.0, size=(200, n_data)), axis=1)
+    uniform_bands = np.percentile(uniform_curves, [5, 16, 84, 95], axis=0).astype(np.float32)
+
+    sample_mean = np.nanmean(posterior_samples, axis=0).astype(np.float32)
+    sample_std = np.nanstd(posterior_samples, axis=0).astype(np.float32)
+
+    return {
+        "posterior_samples": posterior_samples,
+        "theta_true": theta_true,
+        "ranks": ranks,
+        "percentiles": percentiles,
+        "predicted_percentiles": predicted_percentiles,
+        "empirical_cdf": empirical_cdf,
+        "uniform_bands_percentiles": np.array([5, 16, 84, 95], dtype=np.int64),
+        "uniform_bands": uniform_bands,
+        "rank_hist_counts": rank_hist_counts,
+        "rank_hist_edges": rank_hist_edges,
+        "sample_mean": sample_mean,
+        "sample_std": sample_std,
+        "valid_counts": valid_counts,
+    }
+
+
+def save_coverage_outputs(
+    out_dir: Path,
+    coverage_arrays: dict[str, np.ndarray],
+) -> None:
+    if coverage_arrays:
+        np.savez_compressed(out_dir / "coverage_outputs.npz", **coverage_arrays)
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -456,6 +564,16 @@ def main() -> None:
     example_rng = np.random.default_rng(args.seed + 10_000)
     example_indices = example_rng.choice(args.n_test, size=args.n_examples, replace=False)
 
+    coverage_nsims = args.fom_nsims if args.coverage_nsims is None else args.coverage_nsims
+    if args.run_coverage and coverage_nsims not in args.nsims:
+        raise ValueError("Coverage nsims must be included in --nsims.")
+    coverage_indices = np.array([], dtype=np.int64)
+    if args.run_coverage:
+        coverage_n_test = min(args.coverage_n_test, args.n_test)
+        coverage_seed = args.seed + 20_000 if args.coverage_seed is None else args.coverage_seed
+        coverage_rng = np.random.default_rng(coverage_seed)
+        coverage_indices = coverage_rng.choice(args.n_test, size=coverage_n_test, replace=False)
+
     np.savez_compressed(
         args.out_dir / "dataset_reference.npz",
         theta_test=theta_test.astype(np.float32),
@@ -467,6 +585,16 @@ def main() -> None:
 
     metrics_rows: list[dict[str, Any]] = []
     history_arrays: dict[str, np.ndarray] = {}
+    coverage_arrays: dict[str, np.ndarray] = {}
+    if args.run_coverage:
+        coverage_arrays = {
+            "coverage_nsims": np.asarray(coverage_nsims, dtype=np.int64),
+            "coverage_indices": coverage_indices.astype(np.int64),
+            "coverage_num_samples": np.asarray(args.coverage_num_samples, dtype=np.int64),
+            "theta_true": theta_test[coverage_indices].astype(np.float32),
+            "data_obs": data_test[coverage_indices].astype(np.float32),
+        }
+
     posterior_arrays: dict[str, np.ndarray] = {
         "theta_true": theta_test[example_indices].astype(np.float32),
         "data_obs": data_test[example_indices].astype(np.float32),
@@ -530,6 +658,41 @@ def main() -> None:
                     validation_log_probs, args.validation_smoothing_window
                 ).astype(np.float32)
 
+
+            if args.run_coverage and nsims == coverage_nsims:
+                coverage_theta_samples = []
+                coverage_valid_masks = []
+                for idx in tqdm(coverage_indices, desc=f"coverage samples {method} n={nsims}"):
+                    raw_samples = sample_one_observation(
+                        posterior,
+                        data_test[idx],
+                        args.coverage_num_samples,
+                        device,
+                    )
+                    if method == "theta":
+                        theta_samples = raw_samples
+                        valid_mask = in_theta_prior(theta_samples, cfg)
+                    else:
+                        theta_samples = eta_to_theta(raw_samples)
+                        valid_mask = in_theta_prior(theta_samples, cfg)
+                    theta_samples = theta_samples.copy()
+                    theta_samples[~valid_mask] = np.nan
+                    coverage_theta_samples.append(theta_samples.astype(np.float32))
+                    coverage_valid_masks.append(valid_mask)
+
+                coverage_samples_ltu = np.stack(coverage_theta_samples, axis=1).astype(np.float32)
+                coverage_valid_ltu = np.stack(coverage_valid_masks, axis=1)
+                diagnostics = compute_coverage_diagnostics(
+                    coverage_samples_ltu,
+                    theta_test[coverage_indices],
+                    seed=run_seed,
+                )
+                coverage_prefix = f"n{nsims}_{method}"
+                coverage_arrays[f"{coverage_prefix}_coverage_valid_mask"] = coverage_valid_ltu
+                for diag_name, diag_value in diagnostics.items():
+                    coverage_arrays[f"{coverage_prefix}_coverage_{diag_name}"] = diag_value
+                save_coverage_outputs(args.out_dir, coverage_arrays)
+
             raw_examples = []
             theta_examples = []
             valid_masks = []
@@ -560,6 +723,7 @@ def main() -> None:
 
             elapsed = time.time() - start
             save_metrics_outputs(args.out_dir, metrics_rows, posterior_arrays, args.fom_nsims)
+            save_coverage_outputs(args.out_dir, coverage_arrays)
             np.savez_compressed(args.out_dir / "training_histories.npz", **history_arrays)
             np.savez_compressed(args.out_dir / "posterior_samples.npz", **posterior_arrays)
             print(f"Finished method={method}, nsims={nsims} in {elapsed / 60.0:.1f} min")
@@ -585,6 +749,7 @@ def main() -> None:
             "training_histories_npz": "training_histories.npz",
             "posterior_samples_npz": "posterior_samples.npz",
             "dataset_reference_npz": "dataset_reference.npz",
+            "coverage_outputs_npz": "coverage_outputs.npz",
         },
         "notes": [
             "For eta runs, best_validation_log_prob_raw is in eta density units.",
@@ -593,6 +758,8 @@ def main() -> None:
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical theta coordinates.",
             "Invalid eta->theta samples outside the original theta prior are set to NaN.",
+            "Coverage outputs are saved only when --run-coverage is set.",
+            "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(mu0, mu1))) for --fom-nsims, default 1000.",
         ],
     }

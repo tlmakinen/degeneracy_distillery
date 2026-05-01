@@ -290,6 +290,133 @@ def replace_floats(s: str) -> Tuple[str, List[float]]:
     return replaced, values
 
 
+def check_symbolic_invertibility(
+    expressions: List[str],
+    input_symbols: Optional[List[Any]] = None,
+    output_symbols: Optional[List[Any]] = None,
+    input_prefix: str = "X",
+    output_prefix: str = "Y",
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Try to symbolically invert SR coordinate expressions with SymPy.
+
+    Parameters
+    ----------
+    expressions : list[str]
+        Coordinate expressions, e.g. ``["X1 * X2", "5.6 * X2"]``.
+    input_symbols : list, optional
+        Symbols to solve for. If omitted, symbols with names like ``X1``,
+        ``X2``, ... are inferred from the expressions.
+    output_symbols : list, optional
+        Symbols for the transformed coordinates. If omitted, uses ``Y1``,
+        ``Y2``, ... with one output per expression.
+    input_prefix, output_prefix : str
+        Prefixes used when inferring/generating symbols.
+    verbose : bool
+        If True, print the forward equations and any inverse solutions.
+
+    Returns
+    -------
+    dict
+        Contains parsed expressions, equations, solutions, Jacobian, Jacobian
+        determinant, and boolean summaries for square/local/global checks.
+    """
+    local_dict = {
+        "exp": sympy.exp,
+        "log": sympy.log,
+        "sqrt": sympy.sqrt,
+        "cos": sympy.cos,
+        "Abs": sympy.Abs,
+        "abs": sympy.Abs,
+        "logAbs": lambda x: sympy.log(sympy.Abs(x)),
+        "inv": lambda x: 1 / x,
+        "square": lambda x: x**2,
+        "cube": lambda x: x**3,
+    }
+    parsed_exprs = [sympy.sympify(expr, locals=local_dict) for expr in expressions]
+
+    def _symbol_sort_key(symbol):
+        name = str(symbol)
+        prefix = "".join(ch for ch in name if not ch.isdigit())
+        suffix = name[len(prefix):]
+        return prefix, int(suffix) if suffix.isdigit() else suffix
+
+    if input_symbols is None:
+        input_symbols = sorted(
+            {
+                symbol
+                for expr in parsed_exprs
+                for symbol in expr.free_symbols
+                if str(symbol).startswith(input_prefix)
+            },
+            key=_symbol_sort_key,
+        )
+    else:
+        input_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in input_symbols]
+
+    if output_symbols is None:
+        output_symbols = list(sympy.symbols(f"{output_prefix}1:{len(parsed_exprs) + 1}"))
+    else:
+        output_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in output_symbols]
+
+    if len(output_symbols) != len(parsed_exprs):
+        raise ValueError(
+            f"Expected {len(parsed_exprs)} output symbols, got {len(output_symbols)}."
+        )
+
+    equations = [
+        sympy.Eq(output_symbol, expr)
+        for output_symbol, expr in zip(output_symbols, parsed_exprs)
+    ]
+    solutions = sympy.solve(equations, input_symbols, dict=True, simplify=True)
+
+    jacobian = None
+    jacobian_det = None
+    is_square = len(parsed_exprs) == len(input_symbols)
+    if is_square:
+        jacobian = sympy.Matrix(parsed_exprs).jacobian(input_symbols)
+        jacobian_det = sympy.simplify(jacobian.det())
+
+    is_locally_invertible = bool(is_square and jacobian_det is not None and jacobian_det != 0)
+    is_symbolically_invertible = bool(
+        is_square
+        and len(solutions) == 1
+        and all(symbol in solutions[0] for symbol in input_symbols)
+    )
+
+    if verbose:
+        print("Forward map:")
+        for equation in equations:
+            print(f"  {equation.lhs} = {equation.rhs}")
+
+        print(f"\nSolving for {input_symbols} in terms of {output_symbols}:")
+        if solutions:
+            for i, solution in enumerate(solutions, start=1):
+                label = f"Solution {i}" if len(solutions) > 1 else "Solution"
+                print(f"  {label}:")
+                for symbol in input_symbols:
+                    print(f"    {symbol} = {solution.get(symbol, '<unsolved>')}")
+        else:
+            print("  No symbolic inverse found by sympy.solve.")
+
+        if jacobian_det is not None:
+            print(f"\nJacobian determinant: {jacobian_det}")
+            print(f"Locally invertible where determinant != 0: {is_locally_invertible}")
+
+    return {
+        "expressions": parsed_exprs,
+        "input_symbols": input_symbols,
+        "output_symbols": output_symbols,
+        "equations": equations,
+        "solutions": solutions,
+        "jacobian": jacobian,
+        "jacobian_det": jacobian_det,
+        "is_square": is_square,
+        "is_locally_invertible": is_locally_invertible,
+        "is_symbolically_invertible": is_symbolically_invertible,
+    }
+
+
 # =============================================================================
 # DESCRIPTION LENGTH AND FLATTENING
 # =============================================================================

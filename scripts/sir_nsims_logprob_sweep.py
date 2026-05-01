@@ -95,6 +95,12 @@ def parse_args() -> argparse.Namespace:
         help="Simulation count at which to save the theta-vs-eta FoM comparison.",
     )
     parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument(
+        "--validation-smoothing-window",
+        type=int,
+        default=10,
+        help="Moving-average window for selecting the best validation epoch; set to 1 to disable smoothing.",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--repeats-maf", type=int, default=2)
@@ -328,25 +334,45 @@ def sample_one_observation(
     return samples.detach().cpu().numpy().astype(np.float32)
 
 
+def smooth_curve(values: np.ndarray, window: int) -> np.ndarray:
+    """Centered moving average with edge padding; window=1 returns values unchanged."""
+    values = np.asarray(values, dtype=np.float64)
+    if window <= 1:
+        return values.copy()
+    if window > values.size:
+        window = values.size
+    left = window // 2
+    right = window - 1 - left
+    padded = np.pad(values, (left, right), mode="edge")
+    kernel = np.ones(window, dtype=np.float64) / window
+    return np.convolve(padded, kernel, mode="valid")
+
+
 def summarize_curves(
     summaries: list[dict[str, Any]],
     nsims: int,
     method: str,
     logdet_correction: float,
+    validation_smoothing_window: int,
 ) -> list[dict[str, Any]]:
     rows = []
     for member, summary in enumerate(summaries):
         val = np.asarray(summary["validation_log_probs"], dtype=np.float64)
         train = np.asarray(summary["training_log_probs"], dtype=np.float64)
-        best_epoch = int(np.nanargmax(val))
+        val_smooth = smooth_curve(val, validation_smoothing_window)
+        best_epoch = int(np.nanargmax(val_smooth))
+        best_smoothed = float(val_smooth[best_epoch])
         rows.append(
             {
                 "nsims": nsims,
                 "method": method,
                 "ensemble_member": member,
                 "best_epoch": best_epoch,
+                "validation_smoothing_window": validation_smoothing_window,
                 "best_validation_log_prob_raw": float(val[best_epoch]),
-                "best_validation_log_prob_theta_density": float(val[best_epoch] - logdet_correction),
+                "best_validation_log_prob_smoothed": best_smoothed,
+                "best_validation_log_prob_raw_theta_density": float(val[best_epoch] - logdet_correction),
+                "best_validation_log_prob_theta_density": float(best_smoothed - logdet_correction),
                 "final_validation_log_prob_raw": float(val[-1]),
                 "final_training_log_prob_raw": float(train[-1]),
                 "logdet_dtheta_deta_correction": logdet_correction,
@@ -490,6 +516,7 @@ def main() -> None:
                     nsims=nsims,
                     method=method,
                     logdet_correction=logdet_correction,
+                    validation_smoothing_window=args.validation_smoothing_window,
                 )
             )
 
@@ -498,9 +525,11 @@ def main() -> None:
                 history_arrays[f"{prefix}_training_log_probs"] = np.asarray(
                     summary["training_log_probs"], dtype=np.float32
                 )
-                history_arrays[f"{prefix}_validation_log_probs"] = np.asarray(
-                    summary["validation_log_probs"], dtype=np.float32
-                )
+                validation_log_probs = np.asarray(summary["validation_log_probs"], dtype=np.float32)
+                history_arrays[f"{prefix}_validation_log_probs"] = validation_log_probs
+                history_arrays[f"{prefix}_validation_log_probs_smoothed"] = smooth_curve(
+                    validation_log_probs, args.validation_smoothing_window
+                ).astype(np.float32)
 
             raw_examples = []
             theta_examples = []
@@ -586,6 +615,8 @@ def main() -> None:
         },
         "notes": [
             "For eta runs, best_validation_log_prob_raw is in eta density units.",
+            "best_validation_log_prob_theta_density uses the smoothed validation curve when --validation-smoothing-window > 1.",
+            "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical theta coordinates.",
             "Invalid eta->theta samples outside the original theta prior are set to NaN.",

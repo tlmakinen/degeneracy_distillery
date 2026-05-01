@@ -1,0 +1,538 @@
+"""Train SIR NPEs in theta and eta coordinates over a simulation-count sweep.
+
+This script is adapted from ``notebooks/sir_sampling.ipynb`` and is intended to
+be run as a command-line job, for example in Google Colab:
+
+    python sir_nsims_logprob_sweep.py --out-dir sir_sweep_results
+
+It saves:
+  * ``metrics.csv``: best validation log_prob by nsims, method, and ensemble member.
+  * ``metrics.npz``: the same metrics table as NumPy arrays.
+  * ``metrics_aggregate.csv``: mean/std best validation log_prob by nsims and method.
+  * ``metrics_aggregate.npz``: the same aggregate table as NumPy arrays.
+  * ``training_histories.npz``: full train/validation curves for every run.
+  * ``posterior_samples.npz``: seed-matched posterior samples for example test cases.
+  * ``manifest.json``: configuration and file descriptions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import torch
+from scipy.integrate import odeint
+from tqdm import tqdm
+
+try:
+    import ili
+    from ili.dataloaders import NumpyLoader
+    from ili.inference import InferenceRunner
+except ImportError as exc:  # pragma: no cover - this is a runtime environment check.
+    raise SystemExit(
+        "This script requires ltu-ili. In Colab, install it with:\n"
+        "  pip install -q git+https://github.com/maho3/ltu-ili\n"
+        "  pip install -q 'ltu-ili[pytorch]'"
+    ) from exc
+
+
+THETA_LABELS = (r"$\beta$", r"$\gamma$", r"$I_0 / 10$")
+ETA_LABELS = (r"$\eta_0$", r"$\eta_1$", r"$\eta_2$")
+
+THETA_PRIOR_LOW = np.array([0.1, 0.05, 0.0], dtype=np.float32)
+THETA_PRIOR_HIGH = np.array([1.0, 0.5, 5.0], dtype=np.float32)
+
+DEFAULT_THETA_TO_ETA_EXPRS = (
+    "(-0.061*X1 + 0.823*X2 + 0.072)/(0.434*X1 + 0.923*sqrt(X2))",
+    "0.713*sqrt(X2)",
+    "X3",
+)
+DEFAULT_ETA_TO_THETA_EXPRS = (
+    "(1.6189*X2**2 - 1.2945*X1*X2 + 0.072)/(0.434*X1 + 0.061)",
+    "1.9671*X2**2",
+    "X3",
+)
+
+
+@dataclass
+class SirConfig:
+    n_pop: int = 1000
+    i0_mean: float = 8.0
+    r0_init: float = 0.0
+    n_timepoints: int = 30
+    t_max: float = 50.0
+    noise_std: float = 0.05
+    delta: float = 0.15
+    beta_min: float = 0.1
+    beta_max: float = 1.0
+    gamma_min: float = 0.05
+    gamma_max: float = 0.5
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Sweep SIR NPE validation log_prob versus number of simulations."
+    )
+    parser.add_argument("--nsims", nargs="+", type=int, default=[100, 500, 1000, 5000, 10000])
+    parser.add_argument("--out-dir", type=Path, default=Path("sir_nsims_logprob_sweep"))
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-test", type=int, default=1000)
+    parser.add_argument("--n-examples", type=int, default=8)
+    parser.add_argument("--n-posterior-samples", type=int, default=10000)
+    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--repeats-maf", type=int, default=2)
+    parser.add_argument("--hidden-features", type=int, default=50)
+    parser.add_argument("--num-transforms", type=int, default=5)
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument(
+        "--theta-to-eta",
+        nargs=3,
+        default=DEFAULT_THETA_TO_ETA_EXPRS,
+        metavar=("ETA0", "ETA1", "ETA2"),
+        help="Three coordinate expressions using X1, X2, X3 for theta=(beta,gamma,I0/10).",
+    )
+    parser.add_argument(
+        "--eta-to-theta",
+        nargs=3,
+        default=DEFAULT_ETA_TO_THETA_EXPRS,
+        metavar=("THETA0", "THETA1", "THETA2"),
+        help="Three inverse expressions using X1, X2, X3 for eta coordinates.",
+    )
+    parser.add_argument(
+        "--jacobian-correction-samples",
+        type=int,
+        default=512,
+        help="Number of eta training points used to estimate the mean log|dtheta/deta|.",
+    )
+    return parser.parse_args()
+
+
+def make_expression_transform(expressions: tuple[str, str, str] | list[str]):
+    """Build a NumPy vectorized transform from expressions in variables X1, X2, X3."""
+    allowed_names = {
+        "abs": np.abs,
+        "arccos": np.arccos,
+        "arcsin": np.arcsin,
+        "arctan": np.arctan,
+        "cos": np.cos,
+        "exp": np.exp,
+        "log": np.log,
+        "maximum": np.maximum,
+        "minimum": np.minimum,
+        "pi": np.pi,
+        "sin": np.sin,
+        "sqrt": np.sqrt,
+        "tan": np.tan,
+    }
+    compiled = [compile(expr, f"<coordinate:{idx}>", "eval") for idx, expr in enumerate(expressions)]
+
+    def transform(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        local_names = {"X1": x[:, 0], "X2": x[:, 1], "X3": x[:, 2]}
+        cols = [
+            eval(code, {"__builtins__": {}}, allowed_names | local_names)
+            for code in compiled
+        ]
+        return np.column_stack(cols).astype(np.float32)
+
+    return transform
+
+
+def sir_odes(y: np.ndarray, _t: np.ndarray, beta: float, gamma: float, n_pop: int) -> list[float]:
+    s, i, r = y
+    dsdt = -beta * s * i / n_pop
+    didt = beta * s * i / n_pop - gamma * i
+    drdt = gamma * i
+    return [dsdt, didt, drdt]
+
+
+def simulate_sir(
+    beta: float,
+    gamma: float,
+    i0: float,
+    rng: np.random.Generator,
+    t_obs: np.ndarray,
+    cfg: SirConfig,
+) -> np.ndarray:
+    s0 = cfg.n_pop - i0
+    y0 = [s0, i0, cfg.r0_init]
+    solution = odeint(sir_odes, y0, t_obs, args=(beta, gamma, cfg.n_pop))
+    infected = solution[:, 1] / cfg.n_pop
+    return infected + rng.normal(0.0, cfg.noise_std, size=infected.shape)
+
+
+def generate_sir_dataset(
+    n_keep: int,
+    rng: np.random.Generator,
+    cfg: SirConfig,
+    desc: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate supercritical SIR simulations, with I0 normalized as in the notebook."""
+    t_obs = np.linspace(0.0, cfg.t_max, cfg.n_timepoints)
+    theta_chunks = []
+    data_chunks = []
+    pbar = tqdm(total=n_keep, desc=desc)
+
+    while sum(chunk.shape[0] for chunk in theta_chunks) < n_keep:
+        n_remaining = n_keep - sum(chunk.shape[0] for chunk in theta_chunks)
+        n_draw = max(4 * n_remaining, 2048)
+        beta = rng.uniform(cfg.beta_min, cfg.beta_max, n_draw)
+        gamma = rng.uniform(cfg.gamma_min, cfg.gamma_max, n_draw)
+        i0 = rng.poisson(cfg.i0_mean, n_draw).astype(np.float64)
+        theta = np.stack([beta, gamma, i0], axis=1)
+        keep = beta / gamma >= 1.0 + cfg.delta
+        theta = theta[keep][:n_remaining]
+
+        if theta.size == 0:
+            continue
+
+        data = np.array(
+            [
+                simulate_sir(row[0], row[1], row[2], rng, t_obs, cfg)
+                for row in theta
+            ],
+            dtype=np.float32,
+        )
+        theta[:, 2] /= 10.0
+        theta_chunks.append(theta.astype(np.float32))
+        data_chunks.append(data)
+        pbar.update(theta.shape[0])
+
+    pbar.close()
+    return np.concatenate(theta_chunks, axis=0), np.concatenate(data_chunks, axis=0)
+
+
+def in_theta_prior(theta: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(theta).all(axis=1)
+    above = (theta >= THETA_PRIOR_LOW).all(axis=1)
+    below = (theta <= THETA_PRIOR_HIGH).all(axis=1)
+    return finite & above & below
+
+
+def inverse_logdet_jacobian(
+    eta: np.ndarray,
+    eta_to_theta_fn,
+    max_points: int,
+    seed: int,
+) -> float:
+    """Estimate mean log|det(dtheta/deta)| for converting eta log_prob to theta log_prob."""
+    rng = np.random.default_rng(seed)
+    if eta.shape[0] > max_points:
+        eta = eta[rng.choice(eta.shape[0], size=max_points, replace=False)]
+
+    logdets = []
+    for point in eta:
+        jac = np.empty((3, 3), dtype=np.float64)
+        for dim in range(3):
+            step = 1e-4 * max(1.0, abs(float(point[dim])))
+            plus = point.astype(np.float64).copy()
+            minus = point.astype(np.float64).copy()
+            plus[dim] += step
+            minus[dim] -= step
+            jac[:, dim] = (
+                eta_to_theta_fn(plus[None, :])[0].astype(np.float64)
+                - eta_to_theta_fn(minus[None, :])[0].astype(np.float64)
+            ) / (2.0 * step)
+        det = np.linalg.det(jac)
+        if np.isfinite(det) and abs(det) > 0.0:
+            logdets.append(math.log(abs(det)))
+
+    if not logdets:
+        raise RuntimeError("Could not compute any finite eta inverse-Jacobian determinants.")
+    return float(np.mean(logdets))
+
+
+def make_runner(
+    low: np.ndarray,
+    high: np.ndarray,
+    args: argparse.Namespace,
+    device: str,
+) -> InferenceRunner:
+    prior = ili.utils.Uniform(low=low.tolist(), high=high.tolist(), device=device)
+    nets = [
+        ili.utils.load_nde_lampe(
+            engine="NPE",
+            model="maf",
+            hidden_features=args.hidden_features,
+            num_transforms=args.num_transforms,
+            repeats=args.repeats_maf,
+        )
+    ]
+    train_args = {
+        "training_batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "max_num_epochs": args.epochs,
+    }
+    return InferenceRunner.load(
+        backend="lampe",
+        engine="NPE",
+        prior=prior,
+        nets=nets,
+        device=device,
+        train_args=train_args,
+        proposal=None,
+        out_dir=None,
+    )
+
+
+def train_posterior(
+    data: np.ndarray,
+    params: np.ndarray,
+    prior_low: np.ndarray,
+    prior_high: np.ndarray,
+    args: argparse.Namespace,
+    device: str,
+    seed: int,
+) -> tuple[Any, list[dict[str, Any]]]:
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    runner = make_runner(prior_low, prior_high, args, device)
+    loader = NumpyLoader(x=data.astype(np.float32), theta=params.astype(np.float32))
+    posterior, summaries = runner(loader=loader)
+    return posterior, summaries
+
+
+def sample_one_observation(
+    posterior: Any,
+    x_obs: np.ndarray,
+    n_samples: int,
+    device: str,
+) -> np.ndarray:
+    x_tensor = torch.as_tensor(x_obs.astype(np.float32), device=device)
+    with torch.no_grad():
+        try:
+            samples = posterior.sample((n_samples,), x=x_tensor, show_progress_bars=False)
+        except TypeError:
+            samples = posterior.sample((n_samples,), x=x_tensor)
+    return samples.detach().cpu().numpy().astype(np.float32)
+
+
+def summarize_curves(
+    summaries: list[dict[str, Any]],
+    nsims: int,
+    method: str,
+    logdet_correction: float,
+) -> list[dict[str, Any]]:
+    rows = []
+    for member, summary in enumerate(summaries):
+        val = np.asarray(summary["validation_log_probs"], dtype=np.float64)
+        train = np.asarray(summary["training_log_probs"], dtype=np.float64)
+        best_epoch = int(np.nanargmax(val))
+        rows.append(
+            {
+                "nsims": nsims,
+                "method": method,
+                "ensemble_member": member,
+                "best_epoch": best_epoch,
+                "best_validation_log_prob_raw": float(val[best_epoch]),
+                "best_validation_log_prob_theta_density": float(val[best_epoch] - logdet_correction),
+                "final_validation_log_prob_raw": float(val[-1]),
+                "final_training_log_prob_raw": float(train[-1]),
+                "logdet_dtheta_deta_correction": logdet_correction,
+            }
+        )
+    return rows
+
+
+def dataframe_to_npz(path: Path, frame: pd.DataFrame) -> None:
+    arrays = {column: frame[column].to_numpy() for column in frame.columns}
+    np.savez_compressed(path, **arrays)
+
+
+def main() -> None:
+    args = parse_args()
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+    if device == "auto":
+        device = "cpu"
+
+    cfg = SirConfig()
+    theta_to_eta = make_expression_transform(args.theta_to_eta)
+    eta_to_theta = make_expression_transform(args.eta_to_theta)
+    max_nsims = max(args.nsims)
+    rng = np.random.default_rng(args.seed)
+
+    print(f"Using device: {device}")
+    print(f"Generating {max_nsims} training simulations and {args.n_test} test simulations.")
+    theta_pool, data_pool = generate_sir_dataset(max_nsims, rng, cfg, "train sims")
+    theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
+
+    if args.n_examples > args.n_test:
+        raise ValueError("--n-examples cannot exceed --n-test.")
+    example_rng = np.random.default_rng(args.seed + 10_000)
+    example_indices = example_rng.choice(args.n_test, size=args.n_examples, replace=False)
+
+    np.savez_compressed(
+        args.out_dir / "dataset_reference.npz",
+        theta_test=theta_test.astype(np.float32),
+        data_test=data_test.astype(np.float32),
+        example_indices=example_indices.astype(np.int64),
+        theta_examples=theta_test[example_indices].astype(np.float32),
+        data_examples=data_test[example_indices].astype(np.float32),
+    )
+
+    metrics_rows: list[dict[str, Any]] = []
+    history_arrays: dict[str, np.ndarray] = {}
+    posterior_arrays: dict[str, np.ndarray] = {
+        "theta_true": theta_test[example_indices].astype(np.float32),
+        "data_obs": data_test[example_indices].astype(np.float32),
+        "example_indices": example_indices.astype(np.int64),
+        "nsims": np.asarray(args.nsims, dtype=np.int64),
+    }
+
+    for nsims in args.nsims:
+        train_theta = theta_pool[:nsims]
+        train_data = data_pool[:nsims]
+
+        for method in ("theta", "eta"):
+            start = time.time()
+            run_seed = args.seed + nsims * 10 + (0 if method == "theta" else 1)
+            print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
+
+            if method == "theta":
+                train_params = train_theta
+                prior_low = THETA_PRIOR_LOW
+                prior_high = THETA_PRIOR_HIGH
+                logdet_correction = 0.0
+            else:
+                train_params = theta_to_eta(train_theta)
+                prior_low = train_params.min(axis=0)
+                prior_high = train_params.max(axis=0)
+                logdet_correction = inverse_logdet_jacobian(
+                    train_params,
+                    eta_to_theta_fn=eta_to_theta,
+                    max_points=args.jacobian_correction_samples,
+                    seed=run_seed,
+                )
+
+            posterior, summaries = train_posterior(
+                train_data,
+                train_params,
+                prior_low,
+                prior_high,
+                args,
+                device,
+                seed=run_seed,
+            )
+
+            metrics_rows.extend(
+                summarize_curves(
+                    summaries=summaries,
+                    nsims=nsims,
+                    method=method,
+                    logdet_correction=logdet_correction,
+                )
+            )
+
+            for member, summary in enumerate(summaries):
+                prefix = f"n{nsims}_{method}_member{member}"
+                history_arrays[f"{prefix}_training_log_probs"] = np.asarray(
+                    summary["training_log_probs"], dtype=np.float32
+                )
+                history_arrays[f"{prefix}_validation_log_probs"] = np.asarray(
+                    summary["validation_log_probs"], dtype=np.float32
+                )
+
+            raw_examples = []
+            theta_examples = []
+            valid_masks = []
+            for idx in tqdm(example_indices, desc=f"posterior samples {method} n={nsims}"):
+                raw_samples = sample_one_observation(
+                    posterior,
+                    data_test[idx],
+                    args.n_posterior_samples,
+                    device,
+                )
+                if method == "theta":
+                    theta_samples = raw_samples
+                    valid_mask = np.isfinite(theta_samples).all(axis=1)
+                else:
+                    theta_samples = eta_to_theta(raw_samples)
+                    valid_mask = in_theta_prior(theta_samples)
+                    theta_samples = theta_samples.copy()
+                    theta_samples[~valid_mask] = np.nan
+
+                raw_examples.append(raw_samples)
+                theta_examples.append(theta_samples.astype(np.float32))
+                valid_masks.append(valid_mask)
+
+            prefix = f"n{nsims}_{method}"
+            posterior_arrays[f"{prefix}_raw_samples"] = np.stack(raw_examples).astype(np.float32)
+            posterior_arrays[f"{prefix}_theta_samples"] = np.stack(theta_examples).astype(np.float32)
+            posterior_arrays[f"{prefix}_valid_mask"] = np.stack(valid_masks)
+
+            elapsed = time.time() - start
+            metrics = pd.DataFrame(metrics_rows)
+            metrics.to_csv(args.out_dir / "metrics.csv", index=False)
+            dataframe_to_npz(args.out_dir / "metrics.npz", metrics)
+            aggregate = (
+                metrics.groupby(["nsims", "method"], as_index=False)
+                .agg(
+                    best_validation_log_prob_theta_density_mean=(
+                        "best_validation_log_prob_theta_density",
+                        "mean",
+                    ),
+                    best_validation_log_prob_theta_density_std=(
+                        "best_validation_log_prob_theta_density",
+                        "std",
+                    ),
+                    best_validation_log_prob_raw_mean=("best_validation_log_prob_raw", "mean"),
+                    best_validation_log_prob_raw_std=("best_validation_log_prob_raw", "std"),
+                    n_ensemble_members=("ensemble_member", "count"),
+                )
+            )
+            aggregate.to_csv(args.out_dir / "metrics_aggregate.csv", index=False)
+            dataframe_to_npz(args.out_dir / "metrics_aggregate.npz", aggregate)
+            np.savez_compressed(args.out_dir / "training_histories.npz", **history_arrays)
+            np.savez_compressed(args.out_dir / "posterior_samples.npz", **posterior_arrays)
+            print(f"Finished method={method}, nsims={nsims} in {elapsed / 60.0:.1f} min")
+
+    manifest = {
+        "config": {
+            "args": vars(args) | {"out_dir": str(args.out_dir), "device_resolved": device},
+            "sir": asdict(cfg),
+            "theta_labels": THETA_LABELS,
+            "eta_labels": ETA_LABELS,
+            "theta_prior_low": THETA_PRIOR_LOW.tolist(),
+            "theta_prior_high": THETA_PRIOR_HIGH.tolist(),
+            "theta_to_eta_expressions": list(args.theta_to_eta),
+            "eta_to_theta_expressions": list(args.eta_to_theta),
+        },
+        "outputs": {
+            "metrics_csv": "metrics.csv",
+            "metrics_npz": "metrics.npz",
+            "metrics_aggregate_csv": "metrics_aggregate.csv",
+            "metrics_aggregate_npz": "metrics_aggregate.npz",
+            "training_histories_npz": "training_histories.npz",
+            "posterior_samples_npz": "posterior_samples.npz",
+            "dataset_reference_npz": "dataset_reference.npz",
+        },
+        "notes": [
+            "For eta runs, best_validation_log_prob_raw is in eta density units.",
+            "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
+            "posterior *_theta_samples arrays are mapped to physical theta coordinates.",
+            "Invalid eta->theta samples outside the original theta prior are set to NaN.",
+        ],
+    }
+    with open(args.out_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"\nDone. Results written to: {args.out_dir.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

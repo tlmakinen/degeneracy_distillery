@@ -229,20 +229,48 @@ def make_expression_transform(expressions: tuple[str, str] | list[str]):
 def make_numerical_inverse_transform(
     theta_to_eta_expressions: tuple[str, str] | list[str],
     initial_guess: np.ndarray,
+    cfg: GwWaveformConfig,
+    residual_tol: float,
 ):
     """Build an eta->theta transform by numerically inverting theta->eta expressions."""
     from degeneracy_distillery.sr_utils import get_inv_y_sr
 
-    input_symbols = ["m1", "m2"]
+    joined_exprs = " ".join(theta_to_eta_expressions)
+    input_symbols = ["m1", "m2"] if ("m1" in joined_exprs or "m2" in joined_exprs) else ["X1", "X2"]
     initial_guess = np.asarray(initial_guess, dtype=np.float64)
+    lower = cfg.prior_low.astype(np.float64)
+    upper = cfg.prior_high.astype(np.float64)
+    first_expr_compact = theta_to_eta_expressions[0].replace(" ", "")
 
     def transform(eta: np.ndarray) -> np.ndarray:
-        return get_inv_y_sr(
+        eta = np.asarray(eta, dtype=np.float64)
+        if eta.ndim == 1:
+            eta = eta.reshape(1, -1)
+
+        guesses = np.repeat(initial_guess.reshape(1, -1), eta.shape[0], axis=0)
+        # The default first GW coordinate is linear in m1:
+        # eta0 = 0.001*m1 - 0.123. This keeps the nonlinear solve in the
+        # positive-mass basin and avoids fractional powers of negative masses.
+        if first_expr_compact in {"0.001*m1-0.123", "0.001*X1-0.123"}:
+            guesses[:, 0] = np.clip((eta[:, 0] + 0.123) / 0.001, lower[0], upper[0])
+
+        theta, diagnostics = get_inv_y_sr(
             theta_to_eta_expressions,
             eta,
-            initial_guess=initial_guess,
+            initial_guess=guesses,
             input_symbols=input_symbols,
-        ).astype(np.float32)
+            method="least_squares",
+            bounds=(lower, upper),
+            warm_start=False,
+            solver_options={"max_nfev": 200, "xtol": 1e-10, "ftol": 1e-10, "gtol": 1e-10},
+            residual_tol=residual_tol,
+            raise_on_fail=False,
+            full_output=True,
+        )
+        failed = np.array([not diag["success"] for diag in diagnostics], dtype=bool)
+        theta = theta.astype(np.float32)
+        theta[failed] = np.nan
+        return theta
 
     return transform
 
@@ -768,6 +796,8 @@ def main() -> None:
         eta_to_theta = make_numerical_inverse_transform(
             args.theta_to_eta,
             initial_guess=inv_initial_guess,
+            cfg=cfg,
+            residual_tol=args.inv_function_delta,
         )
         if not args.skip_inv_function_check:
             inv_check = check_numerical_inverse_transform(

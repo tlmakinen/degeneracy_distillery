@@ -79,7 +79,7 @@ from tqdm import tqdm
 
 from sklearn.model_selection import train_test_split
 from pyoperon.sklearn import SymbolicRegressor
-from scipy.optimize import root
+from scipy.optimize import least_squares, root
 import sympy
 import inspect
 
@@ -523,8 +523,10 @@ def get_inv_y_sr(
     input_symbols: Optional[List[Any]] = None,
     input_prefix: str = "X",
     method: str = "hybr",
+    bounds: Optional[Tuple[Any, Any]] = None,
     warm_start: bool = True,
     solver_options: Optional[Dict[str, Any]] = None,
+    residual_tol: Optional[float] = None,
     raise_on_fail: bool = True,
     full_output: bool = False,
 ) -> np.ndarray:
@@ -551,12 +553,19 @@ def get_inv_y_sr(
     input_prefix : str
         Prefix used when inferring input symbols.
     method : str
-        Method passed to ``scipy.optimize.root``.
+        Method passed to ``scipy.optimize.root``. Use ``"least_squares"`` for
+        bounded nonlinear least-squares via ``scipy.optimize.least_squares``.
+    bounds : tuple, optional
+        Lower and upper bounds for ``method="least_squares"``.
     warm_start : bool
         If True and ``initial_guess`` is one-dimensional, each row uses the
         previous row's solution as its next initial guess.
     solver_options : dict, optional
-        Options passed to ``scipy.optimize.root``.
+        Options passed to ``scipy.optimize.root`` or keyword arguments passed
+        to ``scipy.optimize.least_squares``.
+    residual_tol : float, optional
+        If provided, mark solutions with residual norm above this value as
+        failed even when the optimizer reports convergence.
     raise_on_fail : bool
         If True, raise ``RuntimeError`` when any row does not converge.
     full_output : bool
@@ -654,6 +663,18 @@ def get_inv_y_sr(
 
     forward_fn = sympy.lambdify(input_symbols, parsed_exprs, modules="numpy")
     solver_options = {} if solver_options is None else dict(solver_options)
+    if bounds is None:
+        lower_bounds = np.full(n_inputs, -np.inf, dtype=float)
+        upper_bounds = np.full(n_inputs, np.inf, dtype=float)
+    else:
+        lower_bounds = np.asarray(bounds[0], dtype=float)
+        upper_bounds = np.asarray(bounds[1], dtype=float)
+        if lower_bounds.shape != (n_inputs,) or upper_bounds.shape != (n_inputs,):
+            raise ValueError(
+                "bounds must be a tuple of arrays with shape "
+                f"{(n_inputs,)}, got {lower_bounds.shape} and {upper_bounds.shape}."
+            )
+
     results = np.empty((target.shape[0], n_inputs), dtype=float)
     diagnostics = []
     current_guess = guesses[0].copy()
@@ -670,19 +691,34 @@ def get_inv_y_sr(
         def residuals(x):
             return _evaluate(x) - target_row
 
-        sol = root(residuals, current_guess, method=method, options=solver_options)
+        if method == "least_squares":
+            current_guess = np.clip(current_guess, lower_bounds, upper_bounds)
+            sol = least_squares(
+                residuals,
+                current_guess,
+                bounds=(lower_bounds, upper_bounds),
+                **solver_options,
+            )
+        else:
+            sol = root(residuals, current_guess, method=method, options=solver_options)
+
+        residual_norm = float(np.linalg.norm(residuals(sol.x)))
+        success = bool(sol.success)
+        if residual_tol is not None and residual_norm > residual_tol:
+            success = False
+
         results[i] = sol.x
         diagnostics.append(
             {
-                "success": bool(sol.success),
+                "success": success,
                 "status": sol.status,
                 "message": sol.message,
                 "nfev": getattr(sol, "nfev", None),
-                "residual_norm": float(np.linalg.norm(residuals(sol.x))),
+                "residual_norm": residual_norm,
             }
         )
 
-        if raise_on_fail and not sol.success:
+        if raise_on_fail and not success:
             raise RuntimeError(
                 f"Failed to invert row {i}: {sol.message}. "
                 f"Residual norm={diagnostics[-1]['residual_norm']:.3e}."

@@ -79,6 +79,7 @@ from tqdm import tqdm
 
 from sklearn.model_selection import train_test_split
 from pyoperon.sklearn import SymbolicRegressor
+from scipy.optimize import root
 import sympy
 import inspect
 
@@ -415,6 +416,284 @@ def check_symbolic_invertibility(
         "is_locally_invertible": is_locally_invertible,
         "is_symbolically_invertible": is_symbolically_invertible,
     }
+
+
+def _lambdify_ordered_symbols(
+    expr: sympy.Expr, n_params: int, n_b_params: int
+) -> Tuple[List[sympy.Symbol], List[sympy.Symbol]]:
+    """
+    Build (b0..b{n-1}, X1..X{n_params}) symbol lists for lambdify.
+
+    Parser-created symbols must be reused: ``Symbol('b0')`` and
+    ``Symbol('b0', real=True)`` are not equal in SymPy, so passing fresh
+    ``symbols(..., real=True)`` to lambdify leaves ``b*`` unbound in the
+    generated code (globals), which breaks ``jax.jacrev`` (tracers hit SymPy).
+    """
+    by_name = {s.name: s for s in expr.free_symbols}
+    bs: List[sympy.Symbol] = []
+    for i in range(n_b_params):
+        name = f"b{i}"
+        if name not in by_name:
+            raise ValueError(
+                f"Expression missing parameter {name!r} after parse; "
+                f"have symbols {sorted(by_name)}"
+            )
+        bs.append(by_name[name])
+    xs: List[sympy.Symbol] = []
+    for i in range(1, n_params + 1):
+        name = f"X{i}"
+        if name in by_name:
+            xs.append(by_name[name])
+        else:
+            xs.append(sympy.Symbol(name))
+    return bs, xs
+
+
+def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
+    """
+    Evaluate symbolic-regression coordinate strings on ``X`` (NumPy only).
+
+    Uses the same ESR parse, ``replace_floats``, ``_lambdify_ordered_symbols``,
+    and argument order as :func:`check_flattening` (constants ``pars`` then
+    ``X1``..``X{n_params}``), but returns the coordinate values instead of a
+    Jacobian.
+
+    Parameters
+    ----------
+    coordinates : list of str
+        One SR expression per output dimension.
+    X : np.ndarray, shape (n_samples, n_params)
+        Parameter samples.
+
+    Returns
+    -------
+    y : np.ndarray, shape (n_samples, len(coordinates))
+        Predicted coordinates, column ``k`` is expression ``coordinates[k]``.
+    """
+    if len(coordinates) == 0:
+        return np.empty((X.shape[0], 0), dtype=float)
+
+    basis_functions = [
+        ["X", "b"],
+        ["square", "exp", "inv", "sqrt", "log", "cos"],
+        ["+", "*", "-", "/", "^"],
+    ]
+
+    a, b = sympy.symbols("a b", real=True)
+    inv = sympy.Lambda(a, 1 / a)
+    square = sympy.Lambda(a, a * a)
+    sqrt = sympy.Lambda(a, sympy.sqrt(a))
+    log = sympy.Lambda(a, sympy.log(a))
+    power = sympy.Lambda((a, b), sympy.Pow(a, b))
+
+    sympy_locs = {
+        "inv": inv,
+        "square": square,
+        "cos": sympy.cos,
+        "^": power,
+        "Abs": sympy.Abs,
+        "sqrt": sqrt,
+        "log": log,
+    }
+
+    cols: List[np.ndarray] = []
+    for eq in coordinates:
+        expr_str, pars = replace_floats(eq)
+        expr, nodes, c = esr.generation.generator.string_to_node(
+            expr_str,
+            basis_functions,
+            evalf=True,
+            allow_eval=True,
+            check_ops=True,
+            locs=sympy_locs,
+        )
+        all_b, all_x = _lambdify_ordered_symbols(expr, X.shape[1], len(pars))
+        eq_fn = safe_lambdify(all_b + all_x, expr, ["numpy"])
+        y = np.asarray(eq_fn(*pars, *X.T))
+        y = np.reshape(y, (X.shape[0],))
+        cols.append(y)
+
+    return np.column_stack(cols)
+
+
+def get_inv_y_sr(
+    expressions: List[str],
+    y: np.ndarray,
+    initial_guess: Optional[np.ndarray] = None,
+    input_symbols: Optional[List[Any]] = None,
+    input_prefix: str = "X",
+    method: str = "hybr",
+    warm_start: bool = True,
+    solver_options: Optional[Dict[str, Any]] = None,
+    raise_on_fail: bool = True,
+    full_output: bool = False,
+) -> np.ndarray:
+    """Numerically invert symbolic-regression coordinates row-by-row.
+
+    This is the inverse analogue of ``get_y_sr(expressions, data)``: given
+    target coordinates ``y``, it solves ``expressions(X) = y`` for ``X`` using
+    SciPy's nonlinear root finder. This is useful when SymPy cannot provide a
+    closed-form inverse, e.g. for transcendental SR expressions.
+
+    Parameters
+    ----------
+    expressions : list[str]
+        One SR expression per output dimension, written in terms of ``X1``,
+        ``X2``, ...
+    y : np.ndarray, shape (n_samples, n_outputs) or (n_outputs,)
+        Target coordinate values to invert.
+    initial_guess : np.ndarray, optional
+        Initial guess for the original coordinates. May be shape ``(n_inputs,)``
+        or ``(n_samples, n_inputs)``. If omitted, zeros are used.
+    input_symbols : list, optional
+        Symbols to solve for. If omitted, they are inferred from expressions by
+        ``input_prefix`` and sorted as ``X1, X2, ...``.
+    input_prefix : str
+        Prefix used when inferring input symbols.
+    method : str
+        Method passed to ``scipy.optimize.root``.
+    warm_start : bool
+        If True and ``initial_guess`` is one-dimensional, each row uses the
+        previous row's solution as its next initial guess.
+    solver_options : dict, optional
+        Options passed to ``scipy.optimize.root``.
+    raise_on_fail : bool
+        If True, raise ``RuntimeError`` when any row does not converge.
+    full_output : bool
+        If True, return ``(x, diagnostics)`` instead of just ``x``.
+
+    Returns
+    -------
+    x : np.ndarray, shape (n_samples, n_inputs)
+        Numerically recovered input coordinates.
+    diagnostics : list[dict], optional
+        Returned only when ``full_output=True``. Contains solver status per row.
+    """
+    target = np.asarray(y, dtype=float)
+    if target.ndim == 1:
+        if len(expressions) == 1:
+            target = target.reshape(-1, 1)
+        else:
+            target = target.reshape(1, -1)
+    elif target.ndim != 2:
+        raise ValueError("y must have shape (n_samples, n_outputs) or (n_outputs,).")
+
+    if len(expressions) != target.shape[1]:
+        raise ValueError(
+            f"Expected y to have {len(expressions)} columns, got {target.shape[1]}."
+        )
+
+    local_dict = {
+        "exp": sympy.exp,
+        "log": sympy.log,
+        "sqrt": sympy.sqrt,
+        "cos": sympy.cos,
+        "sin": sympy.sin,
+        "tan": sympy.tan,
+        "Abs": sympy.Abs,
+        "abs": sympy.Abs,
+        "logAbs": lambda x: sympy.log(sympy.Abs(x)),
+        "inv": lambda x: 1 / x,
+        "square": lambda x: x**2,
+        "cube": lambda x: x**3,
+    }
+    parsed_exprs = [
+        sympy.sympify(expr, locals=local_dict, convert_xor=True)
+        for expr in expressions
+    ]
+
+    def _symbol_sort_key(symbol):
+        name = str(symbol)
+        prefix = "".join(ch for ch in name if not ch.isdigit())
+        suffix = name[len(prefix):]
+        return prefix, int(suffix) if suffix.isdigit() else suffix
+
+    if input_symbols is None:
+        input_symbols = sorted(
+            {
+                symbol
+                for expr in parsed_exprs
+                for symbol in expr.free_symbols
+                if str(symbol).startswith(input_prefix)
+            },
+            key=_symbol_sort_key,
+        )
+    else:
+        input_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in input_symbols]
+
+    n_inputs = len(input_symbols)
+    if n_inputs == 0:
+        raise ValueError("No input symbols found to solve for.")
+    if len(expressions) != n_inputs:
+        raise ValueError(
+            "Numerical inversion requires a square system: "
+            f"{len(expressions)} expressions for {n_inputs} inputs."
+        )
+
+    if initial_guess is None:
+        guesses = np.zeros((target.shape[0], n_inputs), dtype=float)
+        use_single_warm_guess = True
+    else:
+        guesses = np.asarray(initial_guess, dtype=float)
+        if guesses.ndim == 1:
+            if guesses.shape[0] != n_inputs:
+                raise ValueError(
+                    f"initial_guess must have length {n_inputs}, got {guesses.shape[0]}."
+                )
+            guesses = np.repeat(guesses.reshape(1, -1), target.shape[0], axis=0)
+            use_single_warm_guess = True
+        elif guesses.ndim == 2:
+            if guesses.shape != (target.shape[0], n_inputs):
+                raise ValueError(
+                    "2D initial_guess must have shape "
+                    f"{(target.shape[0], n_inputs)}, got {guesses.shape}."
+                )
+            use_single_warm_guess = False
+        else:
+            raise ValueError("initial_guess must be one- or two-dimensional.")
+
+    forward_fn = sympy.lambdify(input_symbols, parsed_exprs, modules="numpy")
+    solver_options = {} if solver_options is None else dict(solver_options)
+    results = np.empty((target.shape[0], n_inputs), dtype=float)
+    diagnostics = []
+    current_guess = guesses[0].copy()
+
+    def _evaluate(x):
+        value = forward_fn(*x)
+        value = np.asarray(value, dtype=float)
+        return np.reshape(value, (len(expressions),))
+
+    for i, target_row in enumerate(target):
+        if not (warm_start and use_single_warm_guess):
+            current_guess = guesses[i].copy()
+
+        def residuals(x):
+            return _evaluate(x) - target_row
+
+        sol = root(residuals, current_guess, method=method, options=solver_options)
+        results[i] = sol.x
+        diagnostics.append(
+            {
+                "success": bool(sol.success),
+                "status": sol.status,
+                "message": sol.message,
+                "nfev": getattr(sol, "nfev", None),
+                "residual_norm": float(np.linalg.norm(residuals(sol.x))),
+            }
+        )
+
+        if raise_on_fail and not sol.success:
+            raise RuntimeError(
+                f"Failed to invert row {i}: {sol.message}. "
+                f"Residual norm={diagnostics[-1]['residual_norm']:.3e}."
+            )
+
+        if warm_start:
+            current_guess = sol.x
+
+    if full_output:
+        return results, diagnostics
+    return results
 
 
 # =============================================================================

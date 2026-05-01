@@ -10,6 +10,7 @@ It saves:
   * ``metrics.npz``: the same metrics table as NumPy arrays.
   * ``metrics_aggregate.csv``: mean/std best validation log_prob by nsims and method.
   * ``metrics_aggregate.npz``: the same aggregate table as NumPy arrays.
+  * ``fom_comparison.csv/.npz``: theta-vs-eta FoM comparison for the target nsims case.
   * ``training_histories.npz``: full train/validation curves for every run.
   * ``posterior_samples.npz``: seed-matched posterior samples for example test cases.
   * ``manifest.json``: configuration and file descriptions.
@@ -87,6 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-test", type=int, default=1000)
     parser.add_argument("--n-examples", type=int, default=8)
     parser.add_argument("--n-posterior-samples", type=int, default=10000)
+    parser.add_argument(
+        "--fom-nsims",
+        type=int,
+        default=1000,
+        help="Simulation count at which to save the theta-vs-eta FoM comparison.",
+    )
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -353,6 +360,54 @@ def dataframe_to_npz(path: Path, frame: pd.DataFrame) -> None:
     np.savez_compressed(path, **arrays)
 
 
+def beta_gamma_fom(samples: np.ndarray) -> tuple[float, int]:
+    """Return 1/sqrt(det(cov(beta, gamma))) after dropping invalid samples."""
+    samples_2d = samples[:, :2]
+    valid = np.isfinite(samples_2d).all(axis=1)
+    samples_2d = samples_2d[valid]
+    if samples_2d.shape[0] < 3:
+        return np.nan, int(samples_2d.shape[0])
+
+    cov = np.cov(samples_2d, rowvar=False)
+    det = np.linalg.det(cov)
+    if not np.isfinite(det) or det <= 0.0:
+        return np.nan, int(samples_2d.shape[0])
+    return float(1.0 / np.sqrt(det)), int(samples_2d.shape[0])
+
+
+def build_fom_comparison(
+    posterior_arrays: dict[str, np.ndarray],
+    nsims: int,
+) -> pd.DataFrame:
+    theta_key = f"n{nsims}_theta_theta_samples"
+    eta_key = f"n{nsims}_eta_theta_samples"
+    theta_samples = posterior_arrays[theta_key]
+    eta_samples = posterior_arrays[eta_key]
+    theta_true = posterior_arrays["theta_true"]
+    example_indices = posterior_arrays["example_indices"]
+
+    rows = []
+    for example_number in range(theta_samples.shape[0]):
+        fom_theta, n_valid_theta = beta_gamma_fom(theta_samples[example_number])
+        fom_eta, n_valid_eta = beta_gamma_fom(eta_samples[example_number])
+        rows.append(
+            {
+                "nsims": nsims,
+                "example_number": example_number,
+                "example_index": int(example_indices[example_number]),
+                "theta_true_beta": float(theta_true[example_number, 0]),
+                "theta_true_gamma": float(theta_true[example_number, 1]),
+                "theta_true_i0_over_10": float(theta_true[example_number, 2]),
+                "fom_theta": fom_theta,
+                "fom_eta": fom_eta,
+                "fom_eta_over_theta": float(fom_eta / fom_theta),
+                "n_valid_theta_samples": n_valid_theta,
+                "n_valid_eta_samples": n_valid_eta,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -497,6 +552,12 @@ def main() -> None:
             )
             aggregate.to_csv(args.out_dir / "metrics_aggregate.csv", index=False)
             dataframe_to_npz(args.out_dir / "metrics_aggregate.npz", aggregate)
+            fom_theta_key = f"n{args.fom_nsims}_theta_theta_samples"
+            fom_eta_key = f"n{args.fom_nsims}_eta_theta_samples"
+            if fom_theta_key in posterior_arrays and fom_eta_key in posterior_arrays:
+                fom_comparison = build_fom_comparison(posterior_arrays, args.fom_nsims)
+                fom_comparison.to_csv(args.out_dir / "fom_comparison.csv", index=False)
+                dataframe_to_npz(args.out_dir / "fom_comparison.npz", fom_comparison)
             np.savez_compressed(args.out_dir / "training_histories.npz", **history_arrays)
             np.savez_compressed(args.out_dir / "posterior_samples.npz", **posterior_arrays)
             print(f"Finished method={method}, nsims={nsims} in {elapsed / 60.0:.1f} min")
@@ -517,6 +578,8 @@ def main() -> None:
             "metrics_npz": "metrics.npz",
             "metrics_aggregate_csv": "metrics_aggregate.csv",
             "metrics_aggregate_npz": "metrics_aggregate.npz",
+            "fom_comparison_csv": "fom_comparison.csv",
+            "fom_comparison_npz": "fom_comparison.npz",
             "training_histories_npz": "training_histories.npz",
             "posterior_samples_npz": "posterior_samples.npz",
             "dataset_reference_npz": "dataset_reference.npz",
@@ -526,6 +589,7 @@ def main() -> None:
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical theta coordinates.",
             "Invalid eta->theta samples outside the original theta prior are set to NaN.",
+            "FoM is 1/sqrt(det(cov(beta, gamma))) for --fom-nsims, default 1000.",
         ],
     }
     with open(args.out_dir / "manifest.json", "w", encoding="utf-8") as f:

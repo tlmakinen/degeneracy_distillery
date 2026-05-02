@@ -57,6 +57,15 @@ DEFAULT_ETA_TO_THETA_EXPRS = (
     '-5.0*X1 + 2.5*sqrt(3.40949618447685 - 2.0*logAbs(X2))'
 )
 
+CONVENTIONAL_COORDS = (
+    "(X1 * X2) ** (3./5.) / ((X1 + X2) ** (1./5.))",
+    "X2 / X1",
+)
+INV_CONVENTIONAL_COORDS = (
+    "(X1**5*X2**2*(X2 + 1.0))**(1/5)/X2",
+    "(X1**5*X2**2*(X2 + 1.0))**(1/5)",
+)
+
 
 
 
@@ -97,7 +106,7 @@ def parse_args() -> argparse.Namespace:
         "--fom-nsims",
         type=int,
         default=1000,
-        help="Simulation count at which to save the theta-vs-eta FoM comparison.",
+        help="Simulation count at which to save posterior FoM comparisons.",
     )
     parser.add_argument(
         "--run-coverage",
@@ -159,6 +168,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--compare_conventional_coords",
+        action="store_true",
+        help="Also train/evaluate a conventional-coordinate baseline using chirp mass and mass ratio.",
+    )
+    parser.add_argument(
         "--jacobian-correction-samples",
         type=int,
         default=512,
@@ -187,7 +201,10 @@ def make_expression_transform(expressions: tuple[str, str] | list[str]):
         "sqrt": np.sqrt,
         "tan": np.tan,
     }
-    compiled = [compile(expr, f"<coordinate:{idx}>", "eval") for idx, expr in enumerate(expressions)]
+    compiled = [
+        compile(expr.replace("^", "**"), f"<coordinate:{idx}>", "eval")
+        for idx, expr in enumerate(expressions)
+    ]
 
     def transform(x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
@@ -551,30 +568,34 @@ def build_fom_comparison(
     nsims: int,
 ) -> pd.DataFrame:
     theta_key = f"n{nsims}_theta_theta_samples"
-    eta_key = f"n{nsims}_eta_theta_samples"
     theta_samples = posterior_arrays[theta_key]
-    eta_samples = posterior_arrays[eta_key]
     theta_true = posterior_arrays["theta_true"]
     example_indices = posterior_arrays["example_indices"]
+    comparison_methods = [
+        method
+        for method in ("eta", "conventional_coordinates")
+        if f"n{nsims}_{method}_theta_samples" in posterior_arrays
+    ]
 
     rows = []
     for example_number in range(theta_samples.shape[0]):
         fom_theta, n_valid_theta = theta_fom(theta_samples[example_number])
-        fom_eta, n_valid_eta = theta_fom(eta_samples[example_number])
-        rows.append(
-            {
-                "nsims": nsims,
-                "example_number": example_number,
-                "example_index": int(example_indices[example_number]),
-                "theta_true_m1": float(theta_true[example_number, 0]),
-                "theta_true_m2": float(theta_true[example_number, 1]),
-                "fom_theta": fom_theta,
-                "fom_eta": fom_eta,
-                "fom_eta_over_theta": float(fom_eta / fom_theta),
-                "n_valid_theta_samples": n_valid_theta,
-                "n_valid_eta_samples": n_valid_eta,
-            }
-        )
+        row = {
+            "nsims": nsims,
+            "example_number": example_number,
+            "example_index": int(example_indices[example_number]),
+            "theta_true_m1": float(theta_true[example_number, 0]),
+            "theta_true_m2": float(theta_true[example_number, 1]),
+            "fom_theta": fom_theta,
+            "n_valid_theta_samples": n_valid_theta,
+        }
+        for method in comparison_methods:
+            method_samples = posterior_arrays[f"n{nsims}_{method}_theta_samples"]
+            fom_method, n_valid_method = theta_fom(method_samples[example_number])
+            row[f"fom_{method}"] = fom_method
+            row[f"fom_{method}_over_theta"] = float(fom_method / fom_theta)
+            row[f"n_valid_{method}_samples"] = n_valid_method
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -727,12 +748,25 @@ def main() -> None:
     def eta_to_theta(eta: np.ndarray) -> np.ndarray:
         return inverse_scale_theta(eta_to_theta_scaled(eta), theta_scaler)
 
+    conventional_to_coords = make_expression_transform(CONVENTIONAL_COORDS)
+    conventional_to_theta_scaled = make_expression_transform(INV_CONVENTIONAL_COORDS)
+
+    def conventional_to_theta(coords: np.ndarray) -> np.ndarray:
+        return inverse_scale_theta(conventional_to_theta_scaled(coords), theta_scaler)
+
     check_scaled_eta_inverse(
         theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
         theta_scaler=theta_scaler,
         theta_to_eta_fn=theta_to_eta,
         eta_to_theta_mass_fn=eta_to_theta,
     )
+    if args.compare_conventional_coords:
+        check_scaled_eta_inverse(
+            theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
+            theta_scaler=theta_scaler,
+            theta_to_eta_fn=conventional_to_coords,
+            eta_to_theta_mass_fn=conventional_to_theta,
+        )
 
     theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
     print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")
@@ -816,15 +850,18 @@ def main() -> None:
         "example_indices": example_indices.astype(np.int64),
         "nsims": np.asarray(args.nsims, dtype=np.int64),
     }
+    methods = ["theta", "eta"]
+    if args.compare_conventional_coords:
+        methods.append("conventional_coordinates")
 
     for nsims in args.nsims:
         train_theta = theta_pool[:nsims]
         train_theta_scaled = scale_theta(train_theta, theta_scaler)
         train_data = data_pool[:nsims]
 
-        for method in ("theta", "eta"):
+        for method_idx, method in enumerate(methods):
             start = time.time()
-            run_seed = args.seed + nsims * 10 + (0 if method == "theta" else 1)
+            run_seed = args.seed + nsims * 10 + method_idx
             print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
 
             if method == "theta":
@@ -832,13 +869,23 @@ def main() -> None:
                 prior_low = theta_scaled_prior_low
                 prior_high = theta_scaled_prior_high
                 logdet_correction = theta_scale_logdet
-            else:
+            elif method == "eta":
                 train_params = theta_to_eta(train_theta_scaled)
                 prior_low = train_params.min(axis=0)
                 prior_high = train_params.max(axis=0)
                 logdet_correction = inverse_logdet_jacobian(
                     train_params,
                     eta_to_theta_fn=eta_to_theta,
+                    max_points=args.jacobian_correction_samples,
+                    seed=run_seed,
+                )
+            elif method == "conventional_coordinates":
+                train_params = conventional_to_coords(train_theta_scaled)
+                prior_low = train_params.min(axis=0)
+                prior_high = train_params.max(axis=0)
+                logdet_correction = inverse_logdet_jacobian(
+                    train_params,
+                    eta_to_theta_fn=conventional_to_theta,
                     max_points=args.jacobian_correction_samples,
                     seed=run_seed,
                 )
@@ -887,8 +934,10 @@ def main() -> None:
                     )
                     if method == "theta":
                         theta_samples_scaled = raw_samples
-                    else:
+                    elif method == "eta":
                         theta_samples_scaled = eta_to_theta_scaled(raw_samples)
+                    elif method == "conventional_coordinates":
+                        theta_samples_scaled = conventional_to_theta_scaled(raw_samples)
                     # Coverage ranks should use the sampled posterior as-is.
                     # Filtering is applied to true coverage test cases above,
                     # not by truncating posterior samples to the prior box.
@@ -924,8 +973,11 @@ def main() -> None:
                 if method == "theta":
                     theta_samples = inverse_scale_theta(raw_samples, theta_scaler)
                     valid_mask = in_theta_prior(theta_samples, cfg)
-                else:
+                elif method == "eta":
                     theta_samples = eta_to_theta(raw_samples)
+                    valid_mask = in_theta_prior(theta_samples, cfg)
+                elif method == "conventional_coordinates":
+                    theta_samples = conventional_to_theta(raw_samples)
                     valid_mask = in_theta_prior(theta_samples, cfg)
                 theta_samples = theta_samples.copy()
                 theta_samples[~valid_mask] = np.nan
@@ -965,6 +1017,10 @@ def main() -> None:
             "theta_to_eta_expressions": list(args.theta_to_eta),
             "eta_to_theta_expressions": list(args.eta_to_theta),
             "eta_to_theta_mode": "expression",
+            "compare_conventional_coords": bool(args.compare_conventional_coords),
+            "conventional_coordinate_expressions": list(CONVENTIONAL_COORDS),
+            "inverse_conventional_coordinate_expressions": list(INV_CONVENTIONAL_COORDS),
+            "methods": methods,
             "frequency_bins": int(len(freqs)),
             "pca_cumulative_variance_final": float(cumvar[-1]),
             "snr_train_min_median_max": [
@@ -991,6 +1047,7 @@ def main() -> None:
             "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical (m1, m2) coordinates.",
+            "Set --compare_conventional_coords to add a conventional chirp-mass/mass-ratio coordinate baseline.",
             "Training and test masses are generated on the triangular domain m1 >= m2.",
             "Invalid posterior samples outside m1/m2 bounds or with m1 < m2 are set to NaN for plots/FoM.",
             "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",

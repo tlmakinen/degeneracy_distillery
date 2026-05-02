@@ -445,6 +445,7 @@ def inverse_solution_to_sr_coords(
     input_symbols: List[Any],
     output_symbols: List[Any],
     output_prefix: str = "X",
+    log_to_logabs: bool = True,
 ) -> List[str]:
     """Convert one SymPy inverse solution to ``get_y_sr``-style expressions.
 
@@ -452,17 +453,29 @@ def inverse_solution_to_sr_coords(
     expressions for the original inputs in terms of output symbols ``Y1``,
     ``Y2``, ... . This helper rewrites those output symbols as ``X1``, ``X2``,
     ... so the inverse can be passed directly to ``get_y_sr(inv_coords, eta)``.
+    By default, plain ``log(...)`` terms are emitted as ``logAbs(...)`` for
+    better portability on sampled coordinates that may cross sign boundaries.
     """
     input_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in input_symbols]
     output_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in output_symbols]
     coord_symbols = list(sympy.symbols(f"{output_prefix}1:{len(output_symbols) + 1}"))
     substitutions = dict(zip(output_symbols, coord_symbols))
+    logAbs = sympy.Function("logAbs")
+
+    def _format_expr(expr: sympy.Expr) -> str:
+        expr = sympy.simplify(expr)
+        if log_to_logabs:
+            expr = expr.replace(
+                lambda node: node.func == sympy.log and len(node.args) == 1,
+                lambda node: logAbs(node.args[0]),
+            )
+        return str(expr)
 
     coords = []
     for symbol in input_symbols:
         if symbol not in solution:
             raise ValueError(f"Solution is missing inverse expression for {symbol}.")
-        coords.append(str(sympy.simplify(solution[symbol].subs(substitutions))))
+        coords.append(_format_expr(solution[symbol].subs(substitutions)))
     return coords
 
 
@@ -523,7 +536,7 @@ def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
 
     basis_functions = [
         ["X", "b"],
-        ["square", "exp", "inv", "sqrt", "log", "cos"],
+        ["square", "exp", "inv", "sqrt", "log", "cos", "logAbs"],
         ["+", "*", "-", "/", "^"],
     ]
 
@@ -532,6 +545,7 @@ def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
     square = sympy.Lambda(a, a * a)
     sqrt = sympy.Lambda(a, sympy.sqrt(a))
     log = sympy.Lambda(a, sympy.log(a))
+    logAbs = sympy.Lambda(a, sympy.log(sympy.Abs(a)))
     power = sympy.Lambda((a, b), sympy.Pow(a, b))
 
     sympy_locs = {
@@ -542,6 +556,7 @@ def get_y_sr(coordinates: List[str], X: np.ndarray) -> np.ndarray:
         "Abs": sympy.Abs,
         "sqrt": sqrt,
         "log": log,
+        "logAbs": logAbs,
     }
 
     cols: List[np.ndarray] = []

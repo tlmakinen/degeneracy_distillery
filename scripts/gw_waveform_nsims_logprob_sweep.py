@@ -53,7 +53,7 @@ DEFAULT_THETA_TO_ETA_EXPRS = (
 )
 DEFAULT_ETA_TO_THETA_EXPRS = (
     '5.0*X1', 
-    '-5.0*X1 - 2.5*sqrt(3.40949618447685 - 2.0*log(X2))'
+    '-5.0*X1 - 2.5*sqrt(3.40949618447685 - 2.0*logAbs(X2))'
 )
 
 

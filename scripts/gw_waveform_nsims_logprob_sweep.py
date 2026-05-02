@@ -54,7 +54,7 @@ DEFAULT_THETA_TO_ETA_EXPRS = (
 )
 DEFAULT_ETA_TO_THETA_EXPRS = (
     '5.0*X1', 
-    '-5.0*X1 - 2.5*sqrt(3.40949618447685 - 2.0*logAbs(X2))'
+    '-5.0*X1 + 2.5*sqrt(3.40949618447685 - 2.0*logAbs(X2))'
 )
 
 
@@ -219,6 +219,27 @@ def inverse_scale_theta(theta_scaled: np.ndarray, scaler: MinMaxScaler) -> np.nd
 def theta_scaler_logdet_mass_per_scaled(scaler: MinMaxScaler) -> float:
     """Constant log|d theta_mass / d theta_scaled| for density conversion."""
     return float(np.sum(np.log(1.0 / scaler.scale_)))
+
+
+def check_scaled_eta_inverse(
+    theta_mass: np.ndarray,
+    theta_scaler: MinMaxScaler,
+    theta_to_eta_fn,
+    eta_to_theta_mass_fn,
+    atol: float = 1e-5,
+) -> None:
+    """Verify eta_to_theta(theta_to_eta(scaled theta)) returns mass-unit theta."""
+    theta_scaled = scale_theta(theta_mass, theta_scaler)
+    eta = theta_to_eta_fn(theta_scaled)
+    theta_recovered = eta_to_theta_mass_fn(eta)
+    rel_err = np.abs(theta_recovered - theta_mass) / np.maximum(np.abs(theta_mass), 1e-12)
+    max_rel_err = float(np.nanmax(rel_err))
+    if not np.isfinite(max_rel_err) or max_rel_err > atol:
+        raise ValueError(
+            "theta_to_eta/eta_to_theta consistency check failed after scaling: "
+            f"max relative error={max_rel_err:.3e}, threshold={atol:.3e}. "
+            "Check the inverse branch and log/logAbs domain."
+        )
 
 
 def chirp_mass(m1: np.ndarray | float, m2: np.ndarray | float) -> np.ndarray | float:
@@ -695,6 +716,13 @@ def main() -> None:
 
     def eta_to_theta(eta: np.ndarray) -> np.ndarray:
         return inverse_scale_theta(eta_to_theta_scaled(eta), theta_scaler)
+
+    check_scaled_eta_inverse(
+        theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
+        theta_scaler=theta_scaler,
+        theta_to_eta_fn=theta_to_eta,
+        eta_to_theta_mass_fn=eta_to_theta,
+    )
 
     theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
     print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")

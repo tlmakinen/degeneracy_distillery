@@ -178,6 +178,7 @@ def make_expression_transform(expressions: tuple[str, str] | list[str]):
         "e": math.e,
         "exp": np.exp,
         "log": np.log,
+        "logAbs": lambda x: np.log(np.abs(x)),
         "maximum": np.maximum,
         "minimum": np.minimum,
         "pi": np.pi,
@@ -264,11 +265,9 @@ def sample_masses(n_sims: int, rng: np.random.Generator, cfg: GwWaveformConfig) 
     chunks = []
     while sum(chunk.shape[0] for chunk in chunks) < n_sims:
         n_remaining = n_sims - sum(chunk.shape[0] for chunk in chunks)
-        n_draw = max(4 * n_remaining, 2048)
-        m1 = rng.uniform(cfg.m1_min, cfg.m1_max, n_draw)
-        m2 = rng.uniform(cfg.m2_min, cfg.m2_max, n_draw)
-        keep = m1 >= m2
-        theta = np.stack([m1[keep], m2[keep]], axis=1)[:n_remaining]
+        m1 = rng.uniform(cfg.m1_min, cfg.m1_max, n_remaining)
+        m2 = rng.uniform(cfg.m2_min, cfg.m2_max, n_remaining)
+        theta = np.stack([m1, m2], axis=1)
         if theta.size:
             chunks.append(theta.astype(np.float32))
     return np.concatenate(chunks, axis=0)
@@ -324,8 +323,7 @@ def in_theta_prior(theta: np.ndarray, cfg: GwWaveformConfig) -> np.ndarray:
     finite = np.isfinite(theta).all(axis=1)
     above = (theta >= cfg.prior_low).all(axis=1)
     below = (theta <= cfg.prior_high).all(axis=1)
-    ordered = theta[:, 0] >= theta[:, 1]
-    return finite & above & below & ordered
+    return finite & above & below
 
 
 def inverse_logdet_jacobian(

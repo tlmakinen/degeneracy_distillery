@@ -114,10 +114,15 @@ def parse_args() -> argparse.Namespace:
         help="Optionally export posterior coverage diagnostics for the coverage nsims case.",
     )
     parser.add_argument(
+        "--coverage-all-nsims",
+        action="store_true",
+        help="When --run-coverage is set, run coverage diagnostics at every --nsims value.",
+    )
+    parser.add_argument(
         "--coverage-nsims",
         type=int,
         default=None,
-        help="Simulation count for coverage export; defaults to --fom-nsims.",
+        help="Simulation count for coverage export; defaults to --fom-nsims. Ignored by --coverage-all-nsims.",
     )
     parser.add_argument(
         "--coverage-n-test",
@@ -782,8 +787,11 @@ def main() -> None:
     example_indices = example_rng.choice(args.n_test, size=args.n_examples, replace=False)
 
     coverage_nsims = args.fom_nsims if args.coverage_nsims is None else args.coverage_nsims
-    if args.run_coverage and coverage_nsims not in args.nsims:
-        raise ValueError("Coverage nsims must be included in --nsims.")
+    coverage_nsims_values = list(args.nsims) if args.coverage_all_nsims else [coverage_nsims]
+    if args.run_coverage:
+        missing_coverage_nsims = sorted(set(coverage_nsims_values) - set(args.nsims))
+        if missing_coverage_nsims:
+            raise ValueError(f"Coverage nsims must be included in --nsims: {missing_coverage_nsims}")
     coverage_indices = np.array([], dtype=np.int64)
     if args.run_coverage:
         coverage_n_test = min(args.coverage_n_test, args.n_test)
@@ -833,7 +841,8 @@ def main() -> None:
     coverage_arrays: dict[str, np.ndarray] = {}
     if args.run_coverage:
         coverage_arrays = {
-            "coverage_nsims": np.asarray(coverage_nsims, dtype=np.int64),
+            "coverage_nsims": np.asarray(coverage_nsims_values, dtype=np.int64),
+            "coverage_all_nsims": np.asarray(args.coverage_all_nsims),
             "coverage_indices": coverage_indices.astype(np.int64),
             "coverage_candidate_indices": coverage_candidate_indices.astype(np.int64),
             "coverage_filter_m1_ge_m2": np.asarray(True),
@@ -922,7 +931,7 @@ def main() -> None:
                 ).astype(np.float32)
 
 
-            if args.run_coverage and nsims == coverage_nsims:
+            if args.run_coverage and nsims in coverage_nsims_values:
                 coverage_theta_samples = []
                 coverage_valid_masks = []
                 for idx in tqdm(coverage_indices, desc=f"coverage samples {method} n={nsims}"):
@@ -1021,6 +1030,8 @@ def main() -> None:
             "conventional_coordinate_expressions": list(CONVENTIONAL_COORDS),
             "inverse_conventional_coordinate_expressions": list(INV_CONVENTIONAL_COORDS),
             "methods": methods,
+            "coverage_nsims_values": coverage_nsims_values if args.run_coverage else [],
+            "coverage_all_nsims": bool(args.coverage_all_nsims),
             "frequency_bins": int(len(freqs)),
             "pca_cumulative_variance_final": float(cumvar[-1]),
             "snr_train_min_median_max": [
@@ -1053,7 +1064,7 @@ def main() -> None:
             "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",
             "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
             "Coverage posterior samples are not truncated to the prior box; only non-finite samples are dropped.",
-            "Coverage outputs are saved only when --run-coverage is set.",
+            "Coverage outputs are saved only when --run-coverage is set; --coverage-all-nsims runs them at every nsims.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(m1, m2))) for --fom-nsims, default 1000.",
         ],

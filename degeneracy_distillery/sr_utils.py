@@ -319,8 +319,9 @@ def check_symbolic_invertibility(
     Returns
     -------
     dict
-        Contains parsed expressions, equations, solutions, Jacobian, Jacobian
-        determinant, and boolean summaries for square/local/global checks.
+        Contains parsed expressions, equations, solutions, inverse coordinate
+        expressions, Jacobian, Jacobian determinant, and boolean summaries for
+        square/local/global checks.
     """
     local_dict = {
         "exp": sympy.exp,
@@ -384,6 +385,16 @@ def check_symbolic_invertibility(
         and len(solutions) == 1
         and all(symbol in solutions[0] for symbol in input_symbols)
     )
+    complete_solutions = [
+        solution
+        for solution in solutions
+        if all(symbol in solution for symbol in input_symbols)
+    ]
+    inv_coord_solutions = [
+        inverse_solution_to_sr_coords(solution, input_symbols, output_symbols)
+        for solution in complete_solutions
+    ]
+    inv_coords = inv_coord_solutions[0] if inv_coord_solutions else None
 
     if verbose:
         print("Forward map:")
@@ -400,6 +411,14 @@ def check_symbolic_invertibility(
         else:
             print("  No symbolic inverse found by sympy.solve.")
 
+        if inv_coord_solutions:
+            label = "Inverse coordinates for get_y_sr/in terms of X"
+            if len(inv_coord_solutions) > 1:
+                label += " (first branch shown; see inv_coord_solutions for all branches)"
+            print(f"\n{label}:")
+            for i, coord in enumerate(inv_coords, start=1):
+                print(f"  X{i} = {coord}")
+
         if jacobian_det is not None:
             print(f"\nJacobian determinant: {jacobian_det}")
             print(f"Locally invertible where determinant != 0: {is_locally_invertible}")
@@ -410,12 +429,41 @@ def check_symbolic_invertibility(
         "output_symbols": output_symbols,
         "equations": equations,
         "solutions": solutions,
+        "inv_coords": inv_coords,
+        "inv_coord_solutions": inv_coord_solutions,
         "jacobian": jacobian,
         "jacobian_det": jacobian_det,
         "is_square": is_square,
         "is_locally_invertible": is_locally_invertible,
+        "has_symbolic_inverse": bool(inv_coord_solutions),
         "is_symbolically_invertible": is_symbolically_invertible,
     }
+
+
+def inverse_solution_to_sr_coords(
+    solution: Dict[Any, Any],
+    input_symbols: List[Any],
+    output_symbols: List[Any],
+    output_prefix: str = "X",
+) -> List[str]:
+    """Convert one SymPy inverse solution to ``get_y_sr``-style expressions.
+
+    ``check_symbolic_invertibility`` solves ``Y = f(X)`` and SymPy returns
+    expressions for the original inputs in terms of output symbols ``Y1``,
+    ``Y2``, ... . This helper rewrites those output symbols as ``X1``, ``X2``,
+    ... so the inverse can be passed directly to ``get_y_sr(inv_coords, eta)``.
+    """
+    input_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in input_symbols]
+    output_symbols = [sympy.Symbol(symbol) if isinstance(symbol, str) else symbol for symbol in output_symbols]
+    coord_symbols = list(sympy.symbols(f"{output_prefix}1:{len(output_symbols) + 1}"))
+    substitutions = dict(zip(output_symbols, coord_symbols))
+
+    coords = []
+    for symbol in input_symbols:
+        if symbol not in solution:
+            raise ValueError(f"Solution is missing inverse expression for {symbol}.")
+        coords.append(str(sympy.simplify(solution[symbol].subs(substitutions))))
+    return coords
 
 
 def _lambdify_ordered_symbols(

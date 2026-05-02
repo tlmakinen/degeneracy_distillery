@@ -48,13 +48,15 @@ THETA_LABELS = (r"$m_1$", r"$m_2$")
 ETA_LABELS = (r"$\eta_0$", r"$\eta_1$")
 
 DEFAULT_THETA_TO_ETA_EXPRS = (
-    "0.001*m1 - 0.123",
-    "(0.369*m1*(0.026*m1)**(0.187*m1) + 0.16*m2)"
-    "/((0.026*m1)**(0.187*m1)*(0.128*m2)**(0.051*m2))",
+    "0.2*X1",
+    "5.5*exp(-0.08*(X1 + X2)**2)",
 )
-DEFAULT_ETA_TO_THETA_EXPRS = None
-DEFAULT_INV_FUNCTION_DELTA = 1e-4
-DEFAULT_INV_FUNCTION_CHECK_N = 256
+DEFAULT_ETA_TO_THETA_EXPRS = (
+    '5.0*X1', 
+    '-5.0*X1 - 2.5*sqrt(3.40949618447685 - 2.0*log(X2))'
+)
+
+
 
 
 @dataclass
@@ -152,37 +154,8 @@ def parse_args() -> argparse.Namespace:
         metavar=("THETA0", "THETA1"),
         help=(
             "Two inverse expressions using m1,m2 or X1,X2 for eta coordinates. "
-            "If omitted, numerically invert --theta-to-eta with get_inv_y_sr."
+            "Required; the sweep does not numerically solve inverse functions."
         ),
-    )
-    parser.add_argument(
-        "--inv-initial-guess",
-        nargs=2,
-        type=float,
-        default=None,
-        metavar=("M1", "M2"),
-        help=(
-            "Initial mass guess for numerical eta->theta inversion. "
-            "Defaults to the median sampled training mass; this is usually "
-            "more stable than [0, 0] for fractional-power GW expressions."
-        ),
-    )
-    parser.add_argument(
-        "--inv-function-delta",
-        type=float,
-        default=DEFAULT_INV_FUNCTION_DELTA,
-        help="Maximum allowed relative theta reconstruction error for the numerical inverse check.",
-    )
-    parser.add_argument(
-        "--inv-function-check-n",
-        type=int,
-        default=DEFAULT_INV_FUNCTION_CHECK_N,
-        help="Number of sampled theta points used to validate numerical eta->theta inversion.",
-    )
-    parser.add_argument(
-        "--skip-inv-function-check",
-        action="store_true",
-        help="Skip the numerical inverse validation check.",
     )
     parser.add_argument(
         "--jacobian-correction-samples",
@@ -224,98 +197,6 @@ def make_expression_transform(expressions: tuple[str, str] | list[str]):
         return np.column_stack(cols).astype(np.float32)
 
     return transform
-
-
-def make_numerical_inverse_transform(
-    theta_to_eta_expressions: tuple[str, str] | list[str],
-    initial_guess: np.ndarray,
-    cfg: GwWaveformConfig,
-    residual_tol: float,
-):
-    """Build an eta->theta transform by numerically inverting theta->eta expressions."""
-    from degeneracy_distillery.sr_utils import get_inv_y_sr
-
-    joined_exprs = " ".join(theta_to_eta_expressions)
-    input_symbols = ["m1", "m2"] if ("m1" in joined_exprs or "m2" in joined_exprs) else ["X1", "X2"]
-    initial_guess = np.asarray(initial_guess, dtype=np.float64)
-    lower = cfg.prior_low.astype(np.float64)
-    upper = cfg.prior_high.astype(np.float64)
-    first_expr_compact = theta_to_eta_expressions[0].replace(" ", "")
-
-    def transform(eta: np.ndarray) -> np.ndarray:
-        eta = np.asarray(eta, dtype=np.float64)
-        if eta.ndim == 1:
-            eta = eta.reshape(1, -1)
-
-        guesses = np.repeat(initial_guess.reshape(1, -1), eta.shape[0], axis=0)
-        # The default first GW coordinate is linear in m1:
-        # eta0 = 0.001*m1 - 0.123. This keeps the nonlinear solve in the
-        # positive-mass basin and avoids fractional powers of negative masses.
-        if first_expr_compact in {"0.001*m1-0.123", "0.001*X1-0.123"}:
-            guesses[:, 0] = np.clip((eta[:, 0] + 0.123) / 0.001, lower[0], upper[0])
-
-        theta, diagnostics = get_inv_y_sr(
-            theta_to_eta_expressions,
-            eta,
-            initial_guess=guesses,
-            input_symbols=input_symbols,
-            method="least_squares",
-            bounds=(lower, upper),
-            warm_start=False,
-            solver_options={"max_nfev": 200, "xtol": 1e-10, "ftol": 1e-10, "gtol": 1e-10},
-            residual_tol=residual_tol,
-            raise_on_fail=False,
-            full_output=True,
-        )
-        failed = np.array([not diag["success"] for diag in diagnostics], dtype=bool)
-        theta = theta.astype(np.float32)
-        theta[failed] = np.nan
-        return theta
-
-    return transform
-
-
-def check_numerical_inverse_transform(
-    theta_to_eta_fn,
-    eta_to_theta_fn,
-    theta_reference: np.ndarray,
-    max_delta: float,
-    n_check: int,
-    seed: int,
-) -> dict[str, float | int]:
-    """Validate eta->theta(theta->eta(theta)) on representative theta samples."""
-    if n_check <= 0:
-        return {"n_checked": 0, "max_abs_delta": 0.0, "median_abs_delta": 0.0}
-
-    rng = np.random.default_rng(seed)
-    n_check = min(n_check, theta_reference.shape[0])
-    idx = rng.choice(theta_reference.shape[0], size=n_check, replace=False)
-    theta_check = theta_reference[idx].astype(np.float64)
-    eta_check = theta_to_eta_fn(theta_check)
-    theta_recovered = eta_to_theta_fn(eta_check).astype(np.float64)
-
-    denom = np.maximum(np.abs(theta_check), 1e-12)
-    deltas = np.abs((theta_recovered - theta_check) / denom)
-    finite = np.isfinite(deltas).all(axis=1)
-    max_abs_delta = float(np.nanmax(deltas)) if deltas.size else 0.0
-    median_abs_delta = float(np.nanmedian(deltas)) if deltas.size else 0.0
-    n_failed = int(np.count_nonzero(~finite))
-
-    if n_failed or max_abs_delta > max_delta:
-        raise RuntimeError(
-            "Numerical inverse validation failed: "
-            f"n_failed={n_failed}/{n_check}, "
-            f"max_abs_delta={max_abs_delta:.3e}, "
-            f"median_abs_delta={median_abs_delta:.3e}, "
-            f"threshold={max_delta:.3e}."
-        )
-
-    return {
-        "n_checked": int(n_check),
-        "n_failed": n_failed,
-        "max_abs_delta": max_abs_delta,
-        "median_abs_delta": median_abs_delta,
-    }
 
 
 def chirp_mass(m1: np.ndarray | float, m2: np.ndarray | float) -> np.ndarray | float:
@@ -782,40 +663,12 @@ def main() -> None:
 
     theta_pool = sample_masses(max_nsims, rng, cfg)
     theta_test = sample_masses(args.n_test, rng, cfg)
-    inv_initial_guess = None
     if args.eta_to_theta is None:
-        inv_initial_guess = (
-            np.median(theta_pool, axis=0)
-            if args.inv_initial_guess is None
-            else np.asarray(args.inv_initial_guess, dtype=np.float64)
+        raise ValueError(
+            "eta-to-theta expressions are required. Set DEFAULT_ETA_TO_THETA_EXPRS "
+            "or pass --eta-to-theta; this script no longer numerically solves inverses."
         )
-        print(
-            "Using numerical eta->theta inverse with initial guess "
-            f"{inv_initial_guess.tolist()}."
-        )
-        eta_to_theta = make_numerical_inverse_transform(
-            args.theta_to_eta,
-            initial_guess=inv_initial_guess,
-            cfg=cfg,
-            residual_tol=args.inv_function_delta,
-        )
-        if not args.skip_inv_function_check:
-            inv_check = check_numerical_inverse_transform(
-                theta_to_eta_fn=theta_to_eta,
-                eta_to_theta_fn=eta_to_theta,
-                theta_reference=np.concatenate([theta_pool, theta_test], axis=0),
-                max_delta=args.inv_function_delta,
-                n_check=args.inv_function_check_n,
-                seed=args.seed + 30_000,
-            )
-            print(
-                "Numerical inverse check passed: "
-                f"n={inv_check['n_checked']}, "
-                f"max_abs_delta={inv_check['max_abs_delta']:.3e}, "
-                f"median_abs_delta={inv_check['median_abs_delta']:.3e}."
-            )
-    else:
-        eta_to_theta = make_expression_transform(args.eta_to_theta)
+    eta_to_theta = make_expression_transform(args.eta_to_theta)
 
     theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
     print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")
@@ -1010,11 +863,8 @@ def main() -> None:
             "theta_prior_low": cfg.prior_low.tolist(),
             "theta_prior_high": cfg.prior_high.tolist(),
             "theta_to_eta_expressions": list(args.theta_to_eta),
-            "eta_to_theta_expressions": None if args.eta_to_theta is None else list(args.eta_to_theta),
-            "eta_to_theta_mode": "numerical_root" if args.eta_to_theta is None else "expression",
-            "inv_initial_guess": None if inv_initial_guess is None else inv_initial_guess.tolist(),
-            "inv_function_delta": float(args.inv_function_delta),
-            "inv_function_check_n": int(args.inv_function_check_n),
+            "eta_to_theta_expressions": list(args.eta_to_theta),
+            "eta_to_theta_mode": "expression",
             "frequency_bins": int(len(freqs)),
             "pca_cumulative_variance_final": float(cumvar[-1]),
             "snr_train_min_median_max": [

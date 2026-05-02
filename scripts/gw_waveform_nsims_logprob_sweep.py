@@ -307,9 +307,11 @@ def sample_masses(n_sims: int, rng: np.random.Generator, cfg: GwWaveformConfig) 
     chunks = []
     while sum(chunk.shape[0] for chunk in chunks) < n_sims:
         n_remaining = n_sims - sum(chunk.shape[0] for chunk in chunks)
-        m1 = rng.uniform(cfg.m1_min, cfg.m1_max, n_remaining)
-        m2 = rng.uniform(cfg.m2_min, cfg.m2_max, n_remaining)
-        theta = np.stack([m1, m2], axis=1)
+        n_draw = max(4 * n_remaining, 2048)
+        m1 = rng.uniform(cfg.m1_min, cfg.m1_max, n_draw)
+        m2 = rng.uniform(cfg.m2_min, cfg.m2_max, n_draw)
+        keep = m1 >= m2
+        theta = np.stack([m1[keep], m2[keep]], axis=1)[:n_remaining]
         if theta.size:
             chunks.append(theta.astype(np.float32))
     return np.concatenate(chunks, axis=0)
@@ -365,7 +367,8 @@ def in_theta_prior(theta: np.ndarray, cfg: GwWaveformConfig) -> np.ndarray:
     finite = np.isfinite(theta).all(axis=1)
     above = (theta >= cfg.prior_low).all(axis=1)
     below = (theta <= cfg.prior_high).all(axis=1)
-    return finite & above & below
+    ordered = theta[:, 0] >= theta[:, 1]
+    return finite & above & below & ordered
 
 
 def in_scaled_theta_prior(theta_scaled: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
@@ -988,7 +991,8 @@ def main() -> None:
             "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical (m1, m2) coordinates.",
-            "Invalid posterior samples outside m1/m2 bounds are set to NaN.",
+            "Training and test masses are generated on the triangular domain m1 >= m2.",
+            "Invalid posterior samples outside m1/m2 bounds or with m1 < m2 are set to NaN for plots/FoM.",
             "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",
             "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
             "Coverage posterior samples are not truncated to the prior box; only non-finite samples are dropped.",

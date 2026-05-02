@@ -368,6 +368,13 @@ def in_theta_prior(theta: np.ndarray, cfg: GwWaveformConfig) -> np.ndarray:
     return finite & above & below
 
 
+def in_scaled_theta_prior(theta_scaled: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(theta_scaled).all(axis=1)
+    above = (theta_scaled >= low).all(axis=1)
+    below = (theta_scaled <= high).all(axis=1)
+    return finite & above & below
+
+
 def inverse_logdet_jacobian(
     eta: np.ndarray,
     eta_to_theta_fn,
@@ -795,7 +802,8 @@ def main() -> None:
             "coverage_filter_m1_ge_m2": np.asarray(True),
             "coverage_filter_m1_min": np.asarray(10.0, dtype=np.float32),
             "coverage_num_samples": np.asarray(args.coverage_num_samples, dtype=np.int64),
-            "theta_true": theta_test[coverage_indices].astype(np.float32),
+            "theta_true": scale_theta(theta_test[coverage_indices], theta_scaler).astype(np.float32),
+            "theta_true_mass": theta_test[coverage_indices].astype(np.float32),
             "data_obs": data_test[coverage_indices].astype(np.float32),
         }
 
@@ -875,21 +883,29 @@ def main() -> None:
                         device,
                     )
                     if method == "theta":
-                        theta_samples = inverse_scale_theta(raw_samples, theta_scaler)
-                        valid_mask = in_theta_prior(theta_samples, cfg)
+                        theta_samples_scaled = raw_samples
+                        valid_mask = in_scaled_theta_prior(
+                            theta_samples_scaled,
+                            theta_scaled_prior_low,
+                            theta_scaled_prior_high,
+                        )
                     else:
-                        theta_samples = eta_to_theta(raw_samples)
-                        valid_mask = in_theta_prior(theta_samples, cfg)
-                    theta_samples = theta_samples.copy()
-                    theta_samples[~valid_mask] = np.nan
-                    coverage_theta_samples.append(theta_samples.astype(np.float32))
+                        theta_samples_scaled = eta_to_theta_scaled(raw_samples)
+                        valid_mask = in_scaled_theta_prior(
+                            theta_samples_scaled,
+                            theta_scaled_prior_low,
+                            theta_scaled_prior_high,
+                        )
+                    theta_samples_scaled = theta_samples_scaled.copy()
+                    theta_samples_scaled[~valid_mask] = np.nan
+                    coverage_theta_samples.append(theta_samples_scaled.astype(np.float32))
                     coverage_valid_masks.append(valid_mask)
 
                 coverage_samples_ltu = np.stack(coverage_theta_samples, axis=1).astype(np.float32)
                 coverage_valid_ltu = np.stack(coverage_valid_masks, axis=1)
                 diagnostics = compute_coverage_diagnostics(
                     coverage_samples_ltu,
-                    theta_test[coverage_indices],
+                    scale_theta(theta_test[coverage_indices], theta_scaler),
                     seed=run_seed,
                 )
                 coverage_prefix = f"n{nsims}_{method}"
@@ -979,6 +995,7 @@ def main() -> None:
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical (m1, m2) coordinates.",
             "Invalid posterior samples outside m1/m2 bounds are set to NaN.",
+            "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",
             "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
             "Coverage outputs are saved only when --run-coverage is set.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",

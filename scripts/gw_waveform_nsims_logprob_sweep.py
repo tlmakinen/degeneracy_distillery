@@ -884,18 +884,12 @@ def main() -> None:
                     )
                     if method == "theta":
                         theta_samples_scaled = raw_samples
-                        valid_mask = in_scaled_theta_prior(
-                            theta_samples_scaled,
-                            theta_scaled_prior_low,
-                            theta_scaled_prior_high,
-                        )
                     else:
                         theta_samples_scaled = eta_to_theta_scaled(raw_samples)
-                        valid_mask = in_scaled_theta_prior(
-                            theta_samples_scaled,
-                            theta_scaled_prior_low,
-                            theta_scaled_prior_high,
-                        )
+                    # Coverage ranks should use the sampled posterior as-is.
+                    # Filtering is applied to true coverage test cases above,
+                    # not by truncating posterior samples to the prior box.
+                    valid_mask = np.isfinite(theta_samples_scaled).all(axis=1)
                     theta_samples_scaled = theta_samples_scaled.copy()
                     theta_samples_scaled[~valid_mask] = np.nan
                     coverage_theta_samples.append(theta_samples_scaled.astype(np.float32))
@@ -997,6 +991,7 @@ def main() -> None:
             "Invalid posterior samples outside m1/m2 bounds are set to NaN.",
             "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",
             "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
+            "Coverage posterior samples are not truncated to the prior box; only non-finite samples are dropped.",
             "Coverage outputs are saved only when --run-coverage is set.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(m1, m2))) for --fom-nsims, default 1000.",

@@ -959,6 +959,50 @@ def expr_has_pow_with_x_in_exponent(expr: sympy.Expr) -> bool:
     return _expr_has_exp_log_x_power_form(expr)
 
 
+def _sr_coordinate_symbols(e: sympy.Expr) -> set[sympy.Symbol]:
+    """Coordinate symbols named ``X1``, ``X2``, ... used by an expression."""
+    return {s for s in e.free_symbols if _is_sr_coordinate_symbol(s)}
+
+
+def expr_has_self_transcendental(expr: sympy.Expr) -> bool:
+    """
+    True for same-coordinate nonlinear self-couplings that are hard to invert.
+
+    This intentionally keeps cross-coordinate terms such as ``X2*exp(X1)`` and
+    ``X2**X1`` while rejecting terms such as ``X1*exp(X1)``, ``X1**X1``, and
+    ``(a*X1)**(b*X1)``.
+    """
+    transcendental_funcs = {sympy.exp, sympy.log, sympy.sin, sympy.cos, sympy.tan}
+
+    # Same coordinate in both base and exponent, e.g. X1**X1 or
+    # (a*X1)**(b*X1). Constant exponents like X1**2 are kept.
+    for node in sympy.preorder_traversal(expr):
+        if isinstance(node, sympy.Pow):
+            base, exponent = node.as_base_exp()
+            if _sr_coordinate_symbols(base) & _sr_coordinate_symbols(exponent):
+                return True
+
+    # Multiplicative terms where a factor outside f(...) and the argument of
+    # f(...) depend on the same coordinate, e.g. (1 + X1)*exp(X1).
+    expanded = sympy.expand_mul(expr)
+    terms = sympy.Add.make_args(expanded) if isinstance(expanded, sympy.Add) else (expanded,)
+    for term in terms:
+        factors = sympy.Mul.make_args(term) if isinstance(term, sympy.Mul) else (term,)
+        factor_symbols = [_sr_coordinate_symbols(factor) for factor in factors]
+        for idx, factor in enumerate(factors):
+            other_symbols = set().union(
+                *(symbols for j, symbols in enumerate(factor_symbols) if j != idx)
+            )
+            if not other_symbols:
+                continue
+            for node in sympy.preorder_traversal(factor):
+                if node.func in transcendental_funcs and len(node.args) == 1:
+                    if _sr_coordinate_symbols(node.args[0]) & other_symbols:
+                        return True
+
+    return False
+
+
 def sr_structure_predicate(
     n_params: int,
     *,
@@ -971,6 +1015,7 @@ def sr_structure_predicate(
     check_nested_logabs: bool = False,
     max_logabs_nesting: Optional[int] = 1,
     forbid_x_in_pow_exponent: bool = True,
+    forbid_self_transcendental: bool = False,
 ) -> Callable[[str], bool]:
     """
     Build a string predicate for :func:`analyze_equations` / ``equation_predicate``.
@@ -1011,6 +1056,10 @@ def sr_structure_predicate(
         allows one ``logAbs`` wrapper but not ``logAbs(logAbs(...))``.
     forbid_x_in_pow_exponent
         If True, reject ``Pow`` nodes whose exponent depends on any ``Xi``.
+    forbid_self_transcendental
+        If True, reject same-coordinate self-couplings such as ``X1*exp(X1)``
+        and ``X1**X1`` while keeping cross-coordinate terms such as
+        ``X2*exp(X1)`` and ``X2**X1``.
 
     Returns
     -------
@@ -1023,6 +1072,8 @@ def sr_structure_predicate(
         except Exception:
             return False
         if forbid_x_in_pow_exponent and expr_has_pow_with_x_in_exponent(expr):
+            return False
+        if forbid_self_transcendental and expr_has_self_transcendental(expr):
             return False
         if check_nested_exp and max_exp_nesting is not None:
             if max_exp_nesting_depth(expr) > max_exp_nesting:

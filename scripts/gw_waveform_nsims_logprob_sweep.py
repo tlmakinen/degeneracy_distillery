@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
 try:
@@ -198,6 +199,26 @@ def make_expression_transform(expressions: tuple[str, str] | list[str]):
         return np.column_stack(cols).astype(np.float32)
 
     return transform
+
+
+def make_theta_scaler(cfg: GwWaveformConfig) -> MinMaxScaler:
+    """Scale physical masses to the coordinate range used by the SR expressions."""
+    scaler = MinMaxScaler(feature_range=(0.1, 1.0))
+    scaler.fit(np.vstack([cfg.prior_low, cfg.prior_high]).astype(np.float64))
+    return scaler
+
+
+def scale_theta(theta: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
+    return scaler.transform(np.asarray(theta, dtype=np.float64)).astype(np.float32)
+
+
+def inverse_scale_theta(theta_scaled: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
+    return scaler.inverse_transform(np.asarray(theta_scaled, dtype=np.float64)).astype(np.float32)
+
+
+def theta_scaler_logdet_mass_per_scaled(scaler: MinMaxScaler) -> float:
+    """Constant log|d theta_mass / d theta_scaled| for density conversion."""
+    return float(np.sum(np.log(1.0 / scaler.scale_)))
 
 
 def chirp_mass(m1: np.ndarray | float, m2: np.ndarray | float) -> np.ndarray | float:
@@ -650,6 +671,10 @@ def main() -> None:
         device = "cpu"
 
     cfg = GwWaveformConfig()
+    theta_scaler = make_theta_scaler(cfg)
+    theta_scaled_prior_low = scale_theta(cfg.prior_low[None, :], theta_scaler)[0]
+    theta_scaled_prior_high = scale_theta(cfg.prior_high[None, :], theta_scaler)[0]
+    theta_scale_logdet = theta_scaler_logdet_mass_per_scaled(theta_scaler)
     theta_to_eta = make_expression_transform(args.theta_to_eta)
     max_nsims = max(args.nsims)
     rng = np.random.default_rng(args.seed)
@@ -666,7 +691,10 @@ def main() -> None:
             "eta-to-theta expressions are required. Set DEFAULT_ETA_TO_THETA_EXPRS "
             "or pass --eta-to-theta; this script no longer numerically solves inverses."
         )
-    eta_to_theta = make_expression_transform(args.eta_to_theta)
+    eta_to_theta_scaled = make_expression_transform(args.eta_to_theta)
+
+    def eta_to_theta(eta: np.ndarray) -> np.ndarray:
+        return inverse_scale_theta(eta_to_theta_scaled(eta), theta_scaler)
 
     theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
     print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")
@@ -694,11 +722,19 @@ def main() -> None:
     np.savez_compressed(
         args.out_dir / "dataset_reference.npz",
         theta_test=theta_test.astype(np.float32),
+        theta_test_scaled=scale_theta(theta_test, theta_scaler).astype(np.float32),
         data_test=data_test.astype(np.float32),
         snr_test=snr_test.astype(np.float32),
         example_indices=example_indices.astype(np.int64),
         theta_examples=theta_test[example_indices].astype(np.float32),
+        theta_examples_scaled=scale_theta(theta_test[example_indices], theta_scaler).astype(np.float32),
         data_examples=data_test[example_indices].astype(np.float32),
+        theta_scaler_data_min=theta_scaler.data_min_.astype(np.float32),
+        theta_scaler_data_max=theta_scaler.data_max_.astype(np.float32),
+        theta_scaler_scale=theta_scaler.scale_.astype(np.float32),
+        theta_scaler_min=theta_scaler.min_.astype(np.float32),
+        theta_scaled_prior_low=theta_scaled_prior_low.astype(np.float32),
+        theta_scaled_prior_high=theta_scaled_prior_high.astype(np.float32),
         freqs=freqs.astype(np.float32),
         psd=psd.astype(np.float32),
         pca_components=pca.components_.astype(np.float32),
@@ -728,6 +764,7 @@ def main() -> None:
 
     for nsims in args.nsims:
         train_theta = theta_pool[:nsims]
+        train_theta_scaled = scale_theta(train_theta, theta_scaler)
         train_data = data_pool[:nsims]
 
         for method in ("theta", "eta"):
@@ -736,12 +773,12 @@ def main() -> None:
             print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
 
             if method == "theta":
-                train_params = train_theta
-                prior_low = cfg.prior_low
-                prior_high = cfg.prior_high
-                logdet_correction = 0.0
+                train_params = train_theta_scaled
+                prior_low = theta_scaled_prior_low
+                prior_high = theta_scaled_prior_high
+                logdet_correction = theta_scale_logdet
             else:
-                train_params = theta_to_eta(train_theta)
+                train_params = theta_to_eta(train_theta_scaled)
                 prior_low = train_params.min(axis=0)
                 prior_high = train_params.max(axis=0)
                 logdet_correction = inverse_logdet_jacobian(
@@ -794,7 +831,7 @@ def main() -> None:
                         device,
                     )
                     if method == "theta":
-                        theta_samples = raw_samples
+                        theta_samples = inverse_scale_theta(raw_samples, theta_scaler)
                         valid_mask = in_theta_prior(theta_samples, cfg)
                     else:
                         theta_samples = eta_to_theta(raw_samples)
@@ -828,13 +865,13 @@ def main() -> None:
                     device,
                 )
                 if method == "theta":
-                    theta_samples = raw_samples
+                    theta_samples = inverse_scale_theta(raw_samples, theta_scaler)
                     valid_mask = in_theta_prior(theta_samples, cfg)
                 else:
                     theta_samples = eta_to_theta(raw_samples)
                     valid_mask = in_theta_prior(theta_samples, cfg)
-                    theta_samples = theta_samples.copy()
-                    theta_samples[~valid_mask] = np.nan
+                theta_samples = theta_samples.copy()
+                theta_samples[~valid_mask] = np.nan
 
                 raw_examples.append(raw_samples)
                 theta_examples.append(theta_samples.astype(np.float32))
@@ -860,6 +897,14 @@ def main() -> None:
             "eta_labels": ETA_LABELS,
             "theta_prior_low": cfg.prior_low.tolist(),
             "theta_prior_high": cfg.prior_high.tolist(),
+            "theta_training_space": "MinMaxScaler(feature_range=(0.1, 1.0))",
+            "theta_scaled_prior_low": theta_scaled_prior_low.tolist(),
+            "theta_scaled_prior_high": theta_scaled_prior_high.tolist(),
+            "theta_scaler_data_min": theta_scaler.data_min_.tolist(),
+            "theta_scaler_data_max": theta_scaler.data_max_.tolist(),
+            "theta_scaler_scale": theta_scaler.scale_.tolist(),
+            "theta_scaler_min": theta_scaler.min_.tolist(),
+            "logdet_dtheta_mass_dtheta_scaled": theta_scale_logdet,
             "theta_to_eta_expressions": list(args.theta_to_eta),
             "eta_to_theta_expressions": list(args.eta_to_theta),
             "eta_to_theta_mode": "expression",

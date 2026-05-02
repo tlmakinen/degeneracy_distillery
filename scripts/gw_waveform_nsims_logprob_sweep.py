@@ -745,7 +745,20 @@ def main() -> None:
         coverage_n_test = min(args.coverage_n_test, args.n_test)
         coverage_seed = args.seed + 20_000 if args.coverage_seed is None else args.coverage_seed
         coverage_rng = np.random.default_rng(coverage_seed)
-        coverage_indices = coverage_rng.choice(args.n_test, size=coverage_n_test, replace=False)
+        coverage_candidate_indices = coverage_rng.choice(args.n_test, size=coverage_n_test, replace=False)
+        coverage_theta = theta_test[coverage_candidate_indices]
+        coverage_keep = (coverage_theta[:, 0] >= coverage_theta[:, 1]) & (coverage_theta[:, 0] >= 10.0)
+        coverage_indices = coverage_candidate_indices[coverage_keep]
+        if coverage_indices.size == 0:
+            raise ValueError(
+                "Coverage filtering removed all selected test cases. Increase --coverage-n-test "
+                "or check the test prior."
+            )
+        print(
+            "Coverage filtering kept "
+            f"{coverage_indices.size}/{coverage_candidate_indices.size} test cases "
+            "with m1 >= m2 and m1 >= 10."
+        )
 
     np.savez_compressed(
         args.out_dir / "dataset_reference.npz",
@@ -778,6 +791,9 @@ def main() -> None:
         coverage_arrays = {
             "coverage_nsims": np.asarray(coverage_nsims, dtype=np.int64),
             "coverage_indices": coverage_indices.astype(np.int64),
+            "coverage_candidate_indices": coverage_candidate_indices.astype(np.int64),
+            "coverage_filter_m1_ge_m2": np.asarray(True),
+            "coverage_filter_m1_min": np.asarray(10.0, dtype=np.float32),
             "coverage_num_samples": np.asarray(args.coverage_num_samples, dtype=np.int64),
             "theta_true": theta_test[coverage_indices].astype(np.float32),
             "data_obs": data_test[coverage_indices].astype(np.float32),
@@ -962,7 +978,8 @@ def main() -> None:
             "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
             "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
             "posterior *_theta_samples arrays are mapped to physical (m1, m2) coordinates.",
-            "Invalid samples outside m1/m2 bounds or with m1 < m2 are set to NaN for eta runs.",
+            "Invalid posterior samples outside m1/m2 bounds are set to NaN.",
+            "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
             "Coverage outputs are saved only when --run-coverage is set.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(m1, m2))) for --fom-nsims, default 1000.",

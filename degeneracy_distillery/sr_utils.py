@@ -370,7 +370,13 @@ def check_symbolic_invertibility(
         sympy.Eq(output_symbol, expr)
         for output_symbol, expr in zip(output_symbols, parsed_exprs)
     ]
-    solutions = sympy.solve(equations, input_symbols, dict=True, simplify=True)
+    solutions = sympy.solve(
+        equations,
+        input_symbols,
+        dict=True,
+        simplify=False,
+        rational=False,
+    )
 
     jacobian = None
     jacobian_det = None
@@ -446,6 +452,7 @@ def inverse_solution_to_sr_coords(
     output_symbols: List[Any],
     output_prefix: str = "X",
     log_to_logabs: bool = True,
+    precision: int = 12,
 ) -> List[str]:
     """Convert one SymPy inverse solution to ``get_y_sr``-style expressions.
 
@@ -463,13 +470,13 @@ def inverse_solution_to_sr_coords(
     logAbs = sympy.Function("logAbs")
 
     def _format_expr(expr: sympy.Expr) -> str:
-        expr = sympy.simplify(expr)
+        expr = sympy.factor(expr)
         if log_to_logabs:
             expr = expr.replace(
                 lambda node: node.func == sympy.log and len(node.args) == 1,
                 lambda node: logAbs(node.args[0]),
             )
-        return str(expr)
+        return str(expr.evalf(precision))
 
     coords = []
     for symbol in input_symbols:

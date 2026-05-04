@@ -692,6 +692,224 @@ def snap_shared_coefficients(
 
 
 # =============================================================================
+# 7b. INNER-FACTOR COEFFICIENT SNAP
+#
+# ``snap_shared_coefficients`` operates only on the *outer* leading scalar of
+# each atom (the ``c`` in ``c * atom``).  Coefficients that live *inside* an
+# atom — e.g. the ``a, b`` in ``(a*X1 + b*X2) * exp(c*X3)`` — are part of the
+# atom's symbolic identity and are invisible to that step.  This routine walks
+# each expression's AST, finds inner ``Add`` nodes whose monomial coefficients
+# are within tolerance of their mean, and snaps them to a shared value.  Each
+# proposal is gated on the same flatness check used elsewhere.
+# =============================================================================
+
+def _collect_inner_adds(expr: sympy.Expr) -> List[sympy.Expr]:
+    """Return all ``sympy.Add`` subexpressions of ``expr`` (including ``expr``
+    itself), in pre-order.  Duplicate canonical forms are returned once."""
+    out: List[sympy.Expr] = []
+    seen: set = set()
+    stack: List[sympy.Expr] = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, sympy.Add):
+            key = sympy.srepr(node)
+            if key not in seen:
+                seen.add(key)
+                out.append(node)
+        if hasattr(node, "args"):
+            stack.extend(node.args)
+    return out
+
+
+def _propose_add_snap(
+    node: sympy.Add,
+    rel_tol: float,
+    decimal: int,
+) -> Optional[Tuple[sympy.Expr, float, float]]:
+    """If every additive arg of ``node`` has a numeric leading coefficient and
+    those coefficients lie within ``rel_tol`` of their mean, return a snapped
+    replacement and ``(mean, spread)``.  Otherwise return ``None``.
+
+    A constant additive term (e.g. the bare ``-1.9`` in ``A*B - 1.9``) breaks
+    the snap: there is no monomial to share the coefficient with, so we bail
+    out instead of trying to snap a number to a symbol coefficient.
+    """
+    coeffs: List[float] = []
+    atoms: List[sympy.Expr] = []
+    for t in node.args:
+        c, a = t.as_coeff_Mul()
+        try:
+            cf = float(c)
+        except (TypeError, ValueError):
+            return None
+        if cf == 0.0:
+            return None
+        # Reject pure-number terms (atom == 1): they have no symbolic partner.
+        if a == sympy.S.One:
+            return None
+        coeffs.append(cf)
+        atoms.append(a)
+
+    if len(coeffs) < 2:
+        return None
+
+    arr = np.asarray(coeffs, dtype=float)
+    mean = float(arr.mean())
+    if abs(mean) < 1e-12:
+        return None
+
+    spread = float(np.max(np.abs(arr - mean)) / abs(mean))
+    if spread > rel_tol:
+        return None
+
+    rounded = round(mean, decimal)
+    if rounded == 0.0:
+        return None
+
+    # If everything already equals the rounded mean, there's nothing to do.
+    if np.allclose(arr, rounded, rtol=0, atol=10 ** (-decimal - 1)):
+        return None
+
+    snapped = sympy.Add(*(sympy.Float(rounded) * a for a in atoms))
+    return snapped, mean, spread
+
+
+def snap_inner_factors(
+    expressions: Sequence[str],
+    X: np.ndarray,
+    Fs: np.ndarray,
+    n_params: int,
+    rel_tol: float = 0.1,
+    flat_tol: float = 0.05,
+    decimal: int = 3,
+    A: Optional[np.ndarray] = None,
+    check_flattening_fn: Optional[Callable] = None,
+    max_iter: int = 200,
+    verbose: bool = True,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Snap numerically-close coefficients of *inner* ``Add`` nodes within each
+    expression, gated on the global flatness score.
+
+    Complementary to :func:`snap_shared_coefficients`, which only sees the
+    leading scalar of each atom.  For an expression like::
+
+        -0.3 * (-0.156*m1 - 0.144*m2) * (2.38*m1 + 2.20*m2)
+
+    this routine notices that the inner sums ``(-0.156*m1 - 0.144*m2)`` and
+    ``(2.38*m1 + 2.20*m2)`` each have coefficients within ``rel_tol`` of their
+    mean and proposes to snap them to ``-0.15*(m1 + m2)`` and ``2.29*(m1 + m2)``
+    respectively (one snap per iteration, lowest-spread first).  Each proposal
+    is committed only if the flatness score changes by less than ``flat_tol``.
+
+    Parameters
+    ----------
+    expressions, X, Fs, n_params, A, check_flattening_fn
+        As in :func:`snap_shared_coefficients`.
+    rel_tol
+        Maximum ``max|c - mean| / |mean|`` over the args of an inner ``Add``
+        for the snap to be proposed.
+    flat_tol
+        Reject snaps whose relative change in flatness exceeds this.
+    decimal
+        Number of decimals to round the snapped coefficient to.  Should
+        usually match the ``decimal`` you pass to ``regroup_like_terms``.
+    max_iter
+        Safety cap on the number of accept/reject iterations.
+
+    Returns
+    -------
+    expressions
+        Updated expression strings.
+    log
+        Per-proposal record (row, node, mean, spread, rel flatness change,
+        accepted flag).
+    """
+    if check_flattening_fn is None:
+        check_flattening_fn = make_check_flattening_fn(X, Fs)
+    ref = _flat_score(expressions, X, Fs, n_params, check_flattening_fn, A)
+
+    current = list(expressions)
+    log: List[Dict[str, Any]] = []
+    # Tabu set so we don't retry rejected proposals on the same row.
+    tried: set = set()
+
+    for _ in range(max_iter):
+        best: Optional[Tuple[int, sympy.Expr, sympy.Expr,
+                             float, float, sympy.Expr, Tuple[int, str]]] = None
+        for i, expr_str in enumerate(current):
+            try:
+                expr = _sympify_expr(expr_str)
+            except Exception:
+                continue
+            for node in _collect_inner_adds(expr):
+                key = (i, sympy.srepr(node))
+                if key in tried:
+                    continue
+                proposal = _propose_add_snap(node, rel_tol, decimal)
+                if proposal is None:
+                    tried.add(key)
+                    continue
+                snapped, mean, spread = proposal
+                if best is None or spread < best[4]:
+                    best = (i, node, snapped, mean, spread, expr, key)
+
+        if best is None:
+            break
+
+        i, node, snapped, mean, spread, expr, key = best
+        try:
+            new_expr = expr.xreplace({node: snapped})
+        except Exception:
+            tried.add(key)
+            continue
+        if new_expr == expr:
+            tried.add(key)
+            continue
+
+        candidate = list(current)
+        candidate[i] = str(new_expr)
+        try:
+            score = _flat_score(
+                candidate, X, Fs, n_params, check_flattening_fn, A
+            )
+        except Exception:
+            log.append(dict(
+                row=i, node=str(node), snapped_to=mean,
+                rel_spread=spread, flat_rel_delta=None, accepted=False,
+            ))
+            tried.add(key)
+            continue
+
+        rel_delta = abs(score - ref) / max(ref, 1e-30)
+        accept = rel_delta < flat_tol
+        log.append(dict(
+            row=i, node=str(node), snapped_to=mean,
+            rel_spread=spread, flat_rel_delta=rel_delta, accepted=accept,
+        ))
+        if accept:
+            current = candidate
+            ref = score
+            # The row changed, so previously tried (and rejected) proposals on
+            # this row may now be reachable through different parent contexts.
+            tried = {k for k in tried if k[0] != i}
+            if verbose:
+                print(
+                    f"  row {i}: snapped {sympy.sstr(node)[:50]!r:52} "
+                    f"-> mean {mean:.4g} (spread {spread:.2%}, "
+                    f"Δflat {rel_delta:.2%})"
+                )
+        else:
+            tried.add(key)
+            if verbose:
+                print(
+                    f"  row {i}: rejected {sympy.sstr(node)[:50]!r:52} "
+                    f"(Δflat {rel_delta:.2%} > {flat_tol:.2%})"
+                )
+
+    return current, log
+
+
+# =============================================================================
 # 8. TOP-LEVEL WRAPPER
 # =============================================================================
 
@@ -709,6 +927,10 @@ def regroup_like_terms(
     do_snap: bool = True,
     snap_rel_tol: float = 0.2,
     snap_flat_tol: float = 0.05,
+    do_inner_snap: bool = True,
+    inner_snap_rel_tol: Optional[float] = None,
+    inner_snap_flat_tol: Optional[float] = None,
+    inner_snap_decimal: Optional[int] = None,
     orthogonal: bool = True,
     rotation_kwargs: Optional[Dict[str, Any]] = None,
     check_flattening_fn: Optional[Callable] = None,
@@ -755,6 +977,21 @@ def regroup_like_terms(
         Run :func:`snap_shared_coefficients` after the rotation.
     snap_rel_tol, snap_flat_tol
         Forwarded to :func:`snap_shared_coefficients`.
+    do_inner_snap
+        Run :func:`snap_inner_factors` after :func:`snap_shared_coefficients`.
+        This catches numerically-close coefficients living *inside* a compound
+        atom (e.g. the ``a, b`` in ``(a*X1 + b*X2)*exp(c*X3)``), which the
+        atom-level snap cannot see.
+    inner_snap_rel_tol, inner_snap_flat_tol
+        Tolerances for :func:`snap_inner_factors`.  Default to the
+        corresponding ``snap_*`` values when ``None``.
+    inner_snap_decimal
+        Decimals used to round the snapped inner-factor coefficient.  Inner
+        coefficients often need more precision than the outer ``decimal``
+        (which controls the leading scalar of each atom) — e.g. with
+        ``decimal=1`` an inner coefficient of ``-0.045`` would otherwise round
+        to ``0`` and be rejected.  Defaults to ``max(decimal, 3)`` when
+        ``None``.
     orthogonal
         If False, use the (possibly non-orthogonal) rotation as-is and fold
         ``R^{-1}`` into ``A``.  Not recommended unless you need that extra
@@ -889,6 +1126,36 @@ def regroup_like_terms(
         if verbose:
             print(f"final flatness: {info['final_flat']:.6f}")
 
+    if do_inner_snap:
+        if verbose:
+            print("snapping inner-factor coefficients...")
+        eff_inner_rel_tol = (
+            inner_snap_rel_tol if inner_snap_rel_tol is not None else snap_rel_tol
+        )
+        eff_inner_flat_tol = (
+            inner_snap_flat_tol if inner_snap_flat_tol is not None else snap_flat_tol
+        )
+        eff_inner_decimal = (
+            inner_snap_decimal if inner_snap_decimal is not None
+            else max(decimal, 3)
+        )
+        current, inner_snap_log = snap_inner_factors(
+            current, X, Fs, n_params,
+            rel_tol=eff_inner_rel_tol,
+            flat_tol=eff_inner_flat_tol,
+            decimal=eff_inner_decimal,
+            A=A_new_for_check if info["rotation_accepted"] else A,
+            check_flattening_fn=check_flattening_fn,
+            verbose=verbose,
+        )
+        info["inner_snap_log"] = inner_snap_log
+        info["final_flat"] = _flat_score(
+            current, X, Fs, n_params, check_flattening_fn,
+            A_new_for_check if info["rotation_accepted"] else A,
+        )
+        if verbose:
+            print(f"final flatness after inner snap: {info['final_flat']:.6f}")
+
     if repair_rank_deficiency:
         A_for_rank = A_new_for_check if info["rotation_accepted"] else A
         current, rank_info = repair_coordinate_rank_deficiency(
@@ -954,3 +1221,28 @@ if __name__ == "__main__":
     )
     print("R2 @ C:")
     print(np.round(R2 @ C, 3))
+
+    # ----- inner-factor snap helpers -----
+    print("\n--- inner-factor snap helpers ---")
+    m1, m2 = sp.symbols("m1 m2")
+    expr = sp.sympify(
+        "-0.1*m1 - 0.3*m2 - 0.3*(-0.155843*m1 - 0.143996*m2)"
+        "*(2.3825*m1 + 2.198799*m2)"
+    )
+    inner = _collect_inner_adds(expr)
+    print(f"found {len(inner)} Add subexpressions")
+    snapped_any = False
+    new_expr = expr
+    for node in inner:
+        prop = _propose_add_snap(node, rel_tol=0.1, decimal=3)
+        if prop is None:
+            print(f"  no snap: {node}")
+            continue
+        snapped, mean, spread = prop
+        print(f"  snap: {node}  ->  {snapped}  (mean={mean:.4g}, "
+              f"spread={spread:.2%})")
+        new_expr = new_expr.xreplace({node: snapped})
+        snapped_any = True
+    print(f"original : {expr}")
+    print(f"snapped  : {new_expr}")
+    assert snapped_any, "expected at least one inner snap"

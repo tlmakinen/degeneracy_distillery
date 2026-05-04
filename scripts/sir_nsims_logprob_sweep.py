@@ -650,13 +650,22 @@ def main() -> None:
 
             for member, summary in enumerate(summaries):
                 prefix = f"n{nsims}_{method}_member{member}"
-                history_arrays[f"{prefix}_training_log_probs"] = np.asarray(
-                    summary["training_log_probs"], dtype=np.float32
-                )
+                training_log_probs = np.asarray(summary["training_log_probs"], dtype=np.float32)
                 validation_log_probs = np.asarray(summary["validation_log_probs"], dtype=np.float32)
-                history_arrays[f"{prefix}_validation_log_probs"] = validation_log_probs
-                history_arrays[f"{prefix}_validation_log_probs_smoothed"] = smooth_curve(
+                validation_log_probs_smoothed = smooth_curve(
                     validation_log_probs, args.validation_smoothing_window
+                ).astype(np.float32)
+                history_arrays[f"{prefix}_training_log_probs"] = training_log_probs
+                history_arrays[f"{prefix}_validation_log_probs"] = validation_log_probs
+                history_arrays[f"{prefix}_validation_log_probs_smoothed"] = validation_log_probs_smoothed
+                history_arrays[f"{prefix}_training_log_probs_theta_density"] = (
+                    training_log_probs - logdet_correction
+                ).astype(np.float32)
+                history_arrays[f"{prefix}_validation_log_probs_theta_density"] = (
+                    validation_log_probs - logdet_correction
+                ).astype(np.float32)
+                history_arrays[f"{prefix}_validation_log_probs_smoothed_theta_density"] = (
+                    validation_log_probs_smoothed - logdet_correction
                 ).astype(np.float32)
 
 

@@ -156,15 +156,20 @@ def fill_lower_tri(v: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def fill_diagonal(a: torch.Tensor, val: torch.Tensor) -> torch.Tensor:
+def fill_diagonal(a: torch.Tensor, val) -> torch.Tensor:
     """Out-of-place fill of the (last 2 dims of) ``a``'s diagonal with ``val``.
 
     Returns a new tensor; the original is not modified. Supports leading
-    batch dims, mirroring the JAX implementation.
+    batch dims, mirroring the JAX implementation. ``val`` may be a tensor or
+    a Python scalar; tensors are cast to ``a.dtype`` so this works under
+    :func:`torch.autocast` when intermediate ops promote dtypes
+    (e.g. ``softplus`` -> fp32 while ``a`` is bf16).
     """
     n = a.shape[-1]
     out = a.clone()
     idx = torch.arange(n, device=a.device)
+    if isinstance(val, torch.Tensor) and val.dtype != out.dtype:
+        val = val.to(out.dtype)
     out[..., idx, idx] = val
     return out
 
@@ -187,39 +192,71 @@ def construct_fisher_matrix_log_cholesky(
     Supports arbitrary leading batch dimensions: input of shape
     ``(..., n_p*(n_p+1)/2)`` returns ``(..., n_p, n_p)``. With a 1-D input
     this matches the original single-sample behaviour.
+
+    The construction is performed entirely in fp32 -- inputs are promoted
+    and the body runs inside ``torch.autocast(..., enabled=False)`` so the
+    final ``L @ L.T`` matmul also stays in fp32 even when the call site is
+    inside an outer ``torch.autocast`` region. This avoids:
+
+      * dtype-mismatch ``index_put_`` errors (CUDA's autocast promotes
+        ``softplus`` to fp32 while the bf16 slice of ``outputs`` would
+        otherwise feed an ``index_put_`` with a bf16 destination);
+      * silent bf16 down-casting of the Fisher matrix and the resulting
+        loss in numerical conditioning of ``slogdet`` in
+        :func:`default_kl_loss`.
+
+    The compute cost is :math:`O(n_p^3)` per sample, negligible relative to
+    the upstream matmuls that *do* benefit from bf16/fp16 autocast.
     """
-    n_diag = n_p
-    batch_shape = outputs.shape[:-1]
+    # Promote to fp32 for numerical stability and dtype consistency. fp64
+    # inputs are kept at fp64; everything else (bf16, fp16, fp32) goes
+    # through fp32. This is a no-op outside autocast on fp32 inputs.
+    if outputs.dtype not in (torch.float32, torch.float64):
+        outputs = outputs.float()
 
-    log_diag = outputs[..., :n_diag]
-    diag_elements = F.softplus(log_diag) + 1e-4
+    # Disable autocast for the construction so the L @ L.T matmul keeps the
+    # promoted fp32 dtype instead of being silently cast back to bf16/fp16.
+    with torch.autocast(device_type=outputs.device.type, enabled=False):
+        n_diag = n_p
+        batch_shape = outputs.shape[:-1]
 
-    off_diag = outputs[..., n_diag:]
+        log_diag = outputs[..., :n_diag]
+        diag_elements = F.softplus(log_diag) + 1e-4
 
-    L = torch.zeros(
-        *batch_shape, n_p, n_p, dtype=outputs.dtype, device=outputs.device
-    )
-    diag_idx = torch.arange(n_p, device=outputs.device)
-    L[..., diag_idx, diag_idx] = diag_elements
-    if n_p > 1:
-        lower_idx = torch.tril_indices(n_p, n_p, offset=-1, device=outputs.device)
-        L[..., lower_idx[0], lower_idx[1]] = off_diag
+        off_diag = outputs[..., n_diag:]
 
-    return L @ L.transpose(-1, -2)
+        L = torch.zeros(
+            *batch_shape, n_p, n_p, dtype=outputs.dtype, device=outputs.device
+        )
+        diag_idx = torch.arange(n_p, device=outputs.device)
+        L[..., diag_idx, diag_idx] = diag_elements
+        if n_p > 1:
+            lower_idx = torch.tril_indices(
+                n_p, n_p, offset=-1, device=outputs.device
+            )
+            L[..., lower_idx[0], lower_idx[1]] = off_diag
+
+        return L @ L.transpose(-1, -2)
 
 
 def construct_fisher_matrix_single(outputs: torch.Tensor) -> torch.Tensor:
     """Single-sample Fisher construction matching the original Flax helper.
 
     Operates on a 1-D ``outputs`` (or any leading batch dim plus a final
-    triangular-numbered axis) and returns a (..., n, n) PSD matrix.
+    triangular-numbered axis) and returns a (..., n, n) PSD matrix. As with
+    :func:`construct_fisher_matrix_log_cholesky`, the construction runs in
+    fp32 (or fp64) inside an autocast-disabled region so the
+    ``L @ L.T`` matmul is not silently cast back to bf16/fp16.
     """
-    Q = fill_lower_tri(outputs)
-    Q_lower = torch.tril(Q)
-    middle = torch.diagonal(Q_lower - F.softplus(Q_lower), dim1=-2, dim2=-1)
-    padding = torch.zeros_like(Q)
-    L = Q - fill_diagonal(padding, middle)
-    return L @ L.transpose(-1, -2)
+    if outputs.dtype not in (torch.float32, torch.float64):
+        outputs = outputs.float()
+    with torch.autocast(device_type=outputs.device.type, enabled=False):
+        Q = fill_lower_tri(outputs)
+        Q_lower = torch.tril(Q)
+        middle = torch.diagonal(Q_lower - F.softplus(Q_lower), dim1=-2, dim2=-1)
+        padding = torch.zeros_like(Q)
+        L = Q - fill_diagonal(padding, middle)
+        return L @ L.transpose(-1, -2)
 
 
 def construct_fisher_matrix_multiple(outputs: torch.Tensor) -> torch.Tensor:

@@ -239,6 +239,31 @@ def masked_kl_loss(
 # =============================================================================
 
 
+def _is_dataloader(obj: Any) -> bool:
+    """True for ``torch.utils.data.DataLoader`` and PyG's ``DataLoader``.
+
+    Both expose a ``.dataset`` attribute and are iterable but not subscriptable.
+    Detected duck-typed so we don't have to import torch_geometric here.
+    """
+    return (
+        obj is not None
+        and hasattr(obj, "dataset")
+        and hasattr(obj, "__iter__")
+        and not hasattr(obj, "__getitem__")
+    )
+
+
+def _underlying_dataset(source: Any) -> Any:
+    """Return the underlying indexable dataset behind a source.
+
+    For a DataLoader this is ``source.dataset``. For an already-indexable
+    dataset (or anything else) we return it unchanged.
+    """
+    if _is_dataloader(source):
+        return source.dataset
+    return source
+
+
 def _materialise_dataset(dataset):
     """Return a list-like wrapper that supports ``len`` and ``__getitem__``.
 
@@ -351,29 +376,39 @@ def _infer_batch_size(x_batch: Any, theta_batch: torch.Tensor) -> int:
 
 def _predict_dataset(
     model: nn.Module,
+    source,
     dataset,
     batch_size: int,
     collate_fn: Callable,
     model_apply_fn: Callable,
     device: Optional[torch.device],
     prefetch_batches: int = 0,
+    scale_iter: Optional[Callable] = None,
 ):
     """Run ``model`` over an entire dataset in batches and stack outputs.
+
+    ``source`` may be either a ``DataLoader`` (in which case it is iterated
+    directly) or an indexable ``dataset`` (in which case ``collate_fn`` and
+    ``batch_size`` are used). The user-facing ordering of test predictions
+    follows whatever the source produces; for reproducible test indexing,
+    pass a DataLoader with ``shuffle=False`` or an indexable dataset.
 
     Returns ``(mle, F, theta)`` as numpy arrays stacked along the leading
     axis. Always runs under ``torch.no_grad`` in ``eval`` mode.
     """
     model.eval()
-    n = len(dataset)
     all_mle, all_F, all_theta = [], [], []
-    indices = np.arange(n)
     with torch.no_grad():
-        for x_batch, theta_batch in _prefetch_iter(
-            _iter_batches(
-                dataset, indices, batch_size, collate_fn, drop_last=False
-            ),
-            prefetch_batches,
-        ):
+        if _is_dataloader(source):
+            base = iter(source)
+        else:
+            base = _iter_batches(
+                dataset, np.arange(len(dataset)), batch_size, collate_fn,
+                drop_last=False,
+            )
+        if scale_iter is not None:
+            base = scale_iter(base)
+        for x_batch, theta_batch in _prefetch_iter(base, prefetch_batches):
             x_batch = _move_to_device(x_batch, device)
             theta_batch_dev = _move_to_device(theta_batch, device)
             mle, F_mat = model_apply_fn(model, x_batch)
@@ -451,7 +486,17 @@ def train_fishnets_dataset(
     prefetch_batches: int = 0,
     device: Optional[Union[str, torch.device]] = None,
 ):
-    """Train an ensemble of fishnet networks from indexable datasets.
+    """Train an ensemble of fishnet networks from datasets or DataLoaders.
+
+    Both ``train_dataset`` and ``test_dataset`` may be either:
+
+      * an indexable dataset (anything with ``__len__`` and ``__getitem__``;
+        in this case the function batches via the supplied ``collate_fn``);
+      * a ``torch.utils.data.DataLoader`` (or ``torch_geometric.loader.
+        DataLoader``); in this case batching, shuffling and collation are
+        handled by the loader itself and the supplied ``collate_fn`` /
+        ``train_batch_size`` / ``drop_last`` are ignored for that stream.
+        The loader is iterated fresh once per epoch.
 
     See :func:`degeneracy_distillery.training_loop_fishnets_dataset.
     train_fishnets_dataset` for the JAX version's full argument docs; only the
@@ -462,7 +507,11 @@ def train_fishnets_dataset(
     sample_to_xy_fn, collate_fn
         Same contract as the JAX version, but values flow through PyTorch
         tensors (and, for graph data, PyG ``Batch`` objects) instead of
-        ``jnp.ndarray``.
+        ``jnp.ndarray``. When you pass a ``DataLoader``, set its own
+        ``collate_fn`` to produce ``(x_batch, theta_batch)`` tuples (matching
+        the contract here); the ``collate_fn`` argument to this function is
+        then only used for the lazy-init forward pass on a single
+        ``dataset[0]`` sample, so it can be left as the default.
     model_apply_fn
         ``(model, x_batch) -> (mle, F)``. PyTorch ``nn.Module``s carry their
         own weights, so there is no separate ``w`` argument like in JAX.
@@ -523,8 +572,18 @@ def train_fishnets_dataset(
         device = torch.device(device)
 
     # ---------------- dataset prep ----------------
-    train_dataset = _materialise_dataset(train_dataset)
-    test_dataset = _materialise_dataset(test_dataset)
+    # We accept either DataLoader-style sources (iterable, with .dataset) or
+    # indexable datasets. ``*_source`` is what we *iterate* per epoch;
+    # ``*_dataset`` is the underlying indexable thing used for one-off probes
+    # (sample inspection, scaler fitting, lazy-init forward).
+    train_source = train_dataset
+    test_source = test_dataset
+    train_dataset = _underlying_dataset(train_source)
+    test_dataset = _underlying_dataset(test_source)
+    if not _is_dataloader(train_source):
+        train_dataset = _materialise_dataset(train_dataset)
+    if not _is_dataloader(test_source):
+        test_dataset = _materialise_dataset(test_dataset)
     n_train_samples = len(train_dataset)
     n_test_samples = len(test_dataset)
     if n_train_samples == 0:
@@ -575,25 +634,24 @@ def train_fishnets_dataset(
         feat = np.concatenate(feat, axis=0)
         data_scaler.fit(feat)
 
-        # Wrap collate_fn to apply the scaler to ``x_batch`` inline.
-        _user_collate = collate_fn
-
-        def _scaling_collate(samples):
-            x_batch, theta_batch = _user_collate(samples)
+    # Iteration-time scaler: applied to whatever (x_batch, theta_batch) tuples
+    # come out of the source (indexable or DataLoader). For graph batches we
+    # raise -- pre-normalise upstream and leave ``scaler_type='none'``.
+    def _scale_iter(iterable):
+        if data_scaler is None:
+            yield from iterable
+            return
+        for x_batch, theta_batch in iterable:
             if not isinstance(x_batch, torch.Tensor):
-                # The sklearn scaler only knows about flat tensors. For graph
-                # data, leave scaler_type='none' and pre-normalise upstream.
                 raise TypeError(
-                    "scaler_type != 'none' is only supported when collate_fn "
-                    "produces a torch.Tensor x_batch. For graph data, "
+                    "scaler_type != 'none' is only supported when the source "
+                    "yields a torch.Tensor x_batch. For graph data, "
                     "pre-normalise upstream and leave scaler_type='none'."
                 )
-            arr = x_batch.cpu().numpy()
+            arr = x_batch.detach().cpu().numpy()
             shape = arr.shape
             arr = data_scaler.transform(arr.reshape(-1, shape[-1])).reshape(shape)
-            return torch.as_tensor(arr, dtype=x_batch.dtype), theta_batch
-
-        collate_fn = _scaling_collate
+            yield torch.as_tensor(arr, dtype=x_batch.dtype), theta_batch
 
     # ---------------- model setup ----------------
     rng = np.random.default_rng(seed_model)
@@ -671,10 +729,15 @@ def train_fishnets_dataset(
         for m in models:
             model_init_fn(m, init_input)
     else:
-        # Route through the user's collate_fn so any torch->device conversion,
-        # graph batching, or input scaling that happens at training time is
+        # For DataLoader sources, pull a real first batch so the init mirrors
+        # exactly the shapes / containers the user's loader produces. For
+        # indexable sources, route a single sample through the user's
+        # collate_fn so any torch->device conversion or graph batching is
         # also exercised at init time.
-        x_batch_init, _ = collate_fn([train_dataset[0]])
+        if _is_dataloader(train_source):
+            x_batch_init, _ = next(iter(train_source))
+        else:
+            x_batch_init, _ = collate_fn([train_dataset[0]])
         for m in models:
             model_init_fn(m, x_batch_init)
 
@@ -687,6 +750,31 @@ def train_fishnets_dataset(
     train_batch = train_batch_size
     val_batch = val_batch_size if val_batch_size is not None else train_batch
     _pbar_stride = max(1, int(update_pbar_every))
+
+    def _train_iter(rng_local):
+        """Yield one epoch of training batches (DataLoader- or dataset-aware)."""
+        if _is_dataloader(train_source):
+            # The loader handles its own shuffling/batching/collation; we
+            # just walk it once per epoch.
+            base = iter(train_source)
+        else:
+            perm = rng_local.permutation(n_train_samples)
+            base = _iter_batches(
+                train_dataset, perm, train_batch, collate_fn,
+                drop_last=drop_last,
+            )
+        return _prefetch_iter(_scale_iter(base), prefetch_batches)
+
+    def _val_iter():
+        """Yield one pass of validation batches in deterministic order."""
+        if _is_dataloader(test_source):
+            base = iter(test_source)
+        else:
+            base = _iter_batches(
+                test_dataset, np.arange(n_test_samples), val_batch,
+                collate_fn, drop_last=False,
+            )
+        return _prefetch_iter(_scale_iter(base), prefetch_batches)
 
     def training_loop(seed: int, model: nn.Module):
         rng_local = np.random.default_rng(int(seed))
@@ -708,16 +796,9 @@ def train_fishnets_dataset(
         for j in pbar:
             # ---- train pass ----
             model.train()
-            perm = rng_local.permutation(n_train_samples)
             epoch_loss = 0.0
             n_batches = 0
-            for x_batch, theta_batch in _prefetch_iter(
-                _iter_batches(
-                    train_dataset, perm, train_batch, collate_fn,
-                    drop_last=drop_last,
-                ),
-                prefetch_batches,
-            ):
+            for x_batch, theta_batch in _train_iter(rng_local):
                 x_batch = _move_to_device(x_batch, device)
                 theta_batch = _move_to_device(theta_batch, device)
                 optimizer.zero_grad(set_to_none=True)
@@ -739,15 +820,8 @@ def train_fishnets_dataset(
             model.eval()
             v_total = 0.0
             v_count = 0
-            val_indices = np.arange(n_test_samples)
             with torch.no_grad():
-                for x_batch, theta_batch in _prefetch_iter(
-                    _iter_batches(
-                        test_dataset, val_indices, val_batch, collate_fn,
-                        drop_last=False,
-                    ),
-                    prefetch_batches,
-                ):
+                for x_batch, theta_batch in _val_iter():
                     x_batch = _move_to_device(x_batch, device)
                     theta_batch = _move_to_device(theta_batch, device)
                     mle, F_mat = model_apply_fn(model, x_batch)
@@ -807,8 +881,9 @@ def train_fishnets_dataset(
     test_mles, test_Fs, test_thetas, test_xs = [], [], [], None
     for i in range(num_models):
         mle, F_mat, theta_stacked = _predict_dataset(
-            models[i], test_dataset, val_batch, collate_fn, model_apply_fn,
-            device=device, prefetch_batches=prefetch_batches,
+            models[i], test_source, test_dataset, val_batch, collate_fn,
+            model_apply_fn, device=device, prefetch_batches=prefetch_batches,
+            scale_iter=_scale_iter,
         )
         test_mles.append(mle)
         test_Fs.append(F_mat)
@@ -819,10 +894,14 @@ def train_fishnets_dataset(
             # (e.g. a PyG Batch).
             try:
                 xs = []
-                for x_batch, _ in _iter_batches(
-                    test_dataset, np.arange(n_test_samples), val_batch,
-                    collate_fn, drop_last=False,
-                ):
+                if _is_dataloader(test_source):
+                    base = iter(test_source)
+                else:
+                    base = _iter_batches(
+                        test_dataset, np.arange(n_test_samples), val_batch,
+                        collate_fn, drop_last=False,
+                    )
+                for x_batch, _ in _scale_iter(base):
                     if not isinstance(x_batch, torch.Tensor):
                         raise TypeError("x_batch is not a torch.Tensor")
                     xs.append(x_batch.cpu().numpy())

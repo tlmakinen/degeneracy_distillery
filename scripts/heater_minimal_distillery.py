@@ -112,6 +112,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flatten-epochs-phase1", type=int, default=1000)
     parser.add_argument("--flatten-epochs-phase2", type=int, default=500)
     parser.add_argument("--flatten-finetune-epochs", type=int, default=200)
+    parser.add_argument(
+        "--no-invertibility-mlp", action="store_true",
+        help="Disable the residual-MLP forward/backward invertibility constraint. "
+             "Useful for rank-1 problems where requiring eta ~= theta pins the "
+             "flow near identity and prevents real compression.",
+    )
+    parser.add_argument(
+        "--invertibility-weight", type=float, default=1.0,
+        help="Weight on the forward-backward MLP reconstruction penalty "
+             "(theta - theta_rec)^2. Lower this (e.g. 0.1, 0.01) to let the "
+             "flattener compress more aggressively. Ignored when "
+             "--no-invertibility-mlp is set.",
+    )
+    parser.add_argument(
+        "--align-mode",
+        choices=("procrustes", "kabsch", "none"),
+        default="procrustes",
+        help="Ensemble-rotation mode used by load_and_process_data_v2.",
+    )
 
     # --- symbolic regression ---
     parser.add_argument("--sr-time-limit", type=int, default=60 * 3,
@@ -225,8 +244,11 @@ def main() -> None:
         ensemble_weights = fishnets_npz["ensemble_weights"]
         print(f"\n[flatten] loaded fishnets ensemble: thetas={thetas.shape}, "
               f"Fs={F_network_ensemble.shape}, weights={ensemble_weights.shape}")
+        fwd_bwd_mlp = not args.no_invertibility_mlp
         print(f"[flatten] loss_type={args.loss_type}  beta_det={args.beta_det}  "
               f"noise={args.noise}")
+        print(f"[flatten] forward_backward_mlp={fwd_bwd_mlp}  "
+              f"invertibility_weight={args.invertibility_weight}")
         print(f"[flatten] writing -> {flattening_prefix}.npz")
         fit_flattening(
             F_network_ensemble=F_network_ensemble,
@@ -234,8 +256,8 @@ def main() -> None:
             ensemble_weights=ensemble_weights,
             flattener_activation="softplus",
             loss_type=args.loss_type,
-            forward_backward_mlp=True,
-            forward_backward_invertibility_weight=1.0,
+            forward_backward_mlp=fwd_bwd_mlp,
+            forward_backward_invertibility_weight=args.invertibility_weight,
             n_layers=5,
             offset=0.0,
             beta_det=args.beta_det,
@@ -263,6 +285,7 @@ def main() -> None:
         from degeneracy_distillery.align_coords import load_and_process_data_v2
 
         print(f"\n[preprocess] loading flattened coords from {flattened_npz}")
+        print(f"[preprocess] align_mode={args.align_mode}")
         data = load_and_process_data_v2(
             datapath=str(flattened_npz.parent) + os.sep,
             filename=flattened_npz.name,
@@ -270,7 +293,7 @@ def main() -> None:
             seed=44 + args.seed,
             process_ensemble=True,
             n_d=1.0,
-            align_mode="procrustes",
+            align_mode=args.align_mode,
             separate_nonlinearity=True,
             canonicalize="permute_and_sign",
             use_prior_normalization=True,
@@ -299,6 +322,8 @@ def main() -> None:
         )
 
         sr_dir.mkdir(parents=True, exist_ok=True)
+        # equation_predicate is applied strictly post-hoc inside
+        # analyze_equations -- it does NOT affect PyOperon's search.
         sr_predicate = sr_structure_predicate(
             n_params=n_params,
             forbid_self_transcendental=True,

@@ -10,20 +10,45 @@ only the scalar product P = prod_i theta_i enters the data. This sweep
 demonstrates the practical consequence: training NPE-MAF on the raw
 d-dimensional theta target degrades with d (curse of dimensionality acting
 on a measure-zero manifold), while training on the analytic distilled
-1-dimensional target eta = prod_i theta_i is, by construction, insensitive
-to d. With a fixed simulation budget the gap between the two widens
-exponentially, exactly as predicted by Stone's minimax bound for
-nonparametric density estimation.
+1-dimensional target is, by construction, insensitive to d. With a fixed
+simulation budget the gap between the two widens exponentially, exactly
+as predicted by Stone's minimax bound for nonparametric density
+estimation.
+
+Choice of distilled coordinate
+------------------------------
+The "obvious" distilled target ``eta = prod_i theta_i`` has range
+``[theta_min^d, theta_max^d]``, which grows *exponentially* with d. After
+the MAF's internal standardisation a fixed posterior width
+``sigma_perp ~ sigma / ||k||`` becomes a near-delta in standardised
+units, which the flow cannot represent from O(1000) samples. The
+resulting distilled curve decays with d for purely numerical reasons
+rather than statistical ones, smuggling the curse of dimensionality back
+into the figure through the *coordinate* rather than the *intrinsic
+dimension*.
+
+The default distilled coordinate here is therefore the **standardised
+log-product**
+
+    eta(theta) = (sum_i log theta_i  -  d * mu_log)
+                 / sqrt(d * var_log),
+
+where ``mu_log`` and ``var_log`` are the analytic mean and variance of
+``log theta`` under the prior. This is a strictly monotone function of
+``prod_i theta_i`` (so it carries the same identifiable information),
+but its induced prior tends to ``N(0, 1)`` by the CLT and is
+d-independent in support and scale. Pass ``--distilled-coord product``
+to recover the original (unstabilised) target for comparison.
 
 Defaults match the k=1 heater pipeline (theta in [1, 2], n_t = 20,
 nsims = 1000, tau = 1.0, sigma = 0.2). Reasonable runs are produced in a
 few minutes per (d, trial) pair on a single GPU and a few times that on
 CPU.
 
-Note: we use the *analytic* distilled coordinate eta = prod_i theta_i
-rather than re-running the Distillery for every d. The k=1 experiment
-(see scripts/heater_minimal_distillery.py) is the proof-of-concept that
-the Distillery *recovers* this coordinate from data; this sweep
+Note: we use an *analytic* distilled coordinate rather than re-running
+the Distillery for every d. The k=1 experiment (see
+``scripts/heater_minimal_distillery.py``) is the proof-of-concept that
+the Distillery *recovers* such a coordinate from data; this sweep
 quantifies the sample-efficiency gain that follows from using it.
 
 Run from the repository root, e.g.::
@@ -38,7 +63,8 @@ Outputs in ``--out-dir``:
 * ``metrics.csv`` / ``metrics.npz``: per-trial best val log-prob.
 * ``metrics_aggregate.csv``: mean +/- std across trials, per d.
 * ``log_prob_vs_d.{pdf,png}``: the headline figure.
-* ``manifest.json``: configuration record.
+* ``manifest.json``: configuration record (includes the chosen
+  distilled coordinate and its analytic moments).
 """
 
 from __future__ import annotations
@@ -118,6 +144,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats-maf", type=int, default=2)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
 
+    # --- distilled coordinate ---
+    parser.add_argument(
+        "--distilled-coord",
+        choices=("standardised_log_product", "log_product", "product"),
+        default="standardised_log_product",
+        help=(
+            "Choice of analytic distilled coordinate. "
+            "'standardised_log_product' (default): "
+            "(sum log theta - d*mu_log) / sqrt(d*var_log) "
+            "-- d-invariant N(0, 1) prior by CLT, recommended. "
+            "'log_product': sum_i log theta_i -- range scales linearly with d. "
+            "'product': prod_i theta_i -- range scales exponentially with d "
+            "(reproduces the original numerical pathology, kept for comparison)."
+        ),
+    )
+
     # --- I/O ---
     parser.add_argument("--out-dir", type=Path, default=Path("heater_dim_scaling_run"))
     return parser.parse_args()
@@ -134,6 +176,77 @@ def chain_dataset(
     noise = rng.normal(scale=cfg.sigma, size=mean.shape).astype(np.float32)
     data = (mean + noise).astype(np.float32)
     return theta, data
+
+
+def log_theta_moments_uniform(a: float, b: float) -> tuple[float, float]:
+    """Analytic mean and variance of ``log theta`` for ``theta ~ U[a, b]``.
+
+    Returns ``(mu_log, var_log)``. Requires ``a > 0``.
+    """
+    if a <= 0.0:
+        raise ValueError("log moments require a positive prior lower bound")
+    width = b - a
+    mu = (b * np.log(b) - b - a * np.log(a) + a) / width
+    e_sq = (
+        b * np.log(b) ** 2 - 2.0 * b * np.log(b) + 2.0 * b
+        - a * np.log(a) ** 2 + 2.0 * a * np.log(a) - 2.0 * a
+    ) / width
+    var = e_sq - mu ** 2
+    return float(mu), float(var)
+
+
+def compute_distilled_target(
+    theta: np.ndarray, coord: str, cfg: ChainHeaterCfg, d: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, dict[str, float]]:
+    """Map ``theta`` to a chosen 1-D distilled target.
+
+    Parameters
+    ----------
+    theta : array of shape (n, d)
+    coord : one of {"product", "log_product", "standardised_log_product"}
+    cfg, d : simulator config and current ambient dimension
+
+    Returns
+    -------
+    eta : (n, 1) float32 array of distilled targets
+    low, high : (1,) float32 arrays giving prior bounds for ili.utils.Uniform
+    label : LaTeX label for plotting
+    info : dict of analytic constants used (``mu_log``, ``var_log``)
+    """
+    info: dict[str, float] = {}
+    if coord == "product":
+        eta = np.prod(theta, axis=1, keepdims=True).astype(np.float32)
+        low = np.array([cfg.theta_min ** d], dtype=np.float32)
+        high = np.array([cfg.theta_max ** d], dtype=np.float32)
+        label = r"distilled $\eta = \prod_i \theta_i \in \mathbb{R}$"
+        return eta, low, high, label, info
+
+    mu_log, var_log = log_theta_moments_uniform(cfg.theta_min, cfg.theta_max)
+    info["mu_log"] = mu_log
+    info["var_log"] = var_log
+    log_theta_sum = np.log(theta).sum(axis=1, keepdims=True).astype(np.float32)
+
+    if coord == "log_product":
+        eta = log_theta_sum
+        low = np.array([d * np.log(cfg.theta_min)], dtype=np.float32)
+        high = np.array([d * np.log(cfg.theta_max)], dtype=np.float32)
+        label = r"distilled $\eta = \sum_i \log \theta_i$"
+        return eta, low, high, label, info
+
+    if coord == "standardised_log_product":
+        scale = np.sqrt(d * var_log)
+        eta = ((log_theta_sum - d * mu_log) / scale).astype(np.float32)
+        # +/- 5 sigma envelopes the Gaussian induced prior to numerical zero
+        low = np.array([-5.0], dtype=np.float32)
+        high = np.array([+5.0], dtype=np.float32)
+        label = (
+            r"distilled $\eta = (\sum_i \log\theta_i - d\mu_{\log})"
+            r"/\sqrt{d\,\sigma^{2}_{\log}}$"
+        )
+        info["scale"] = float(scale)
+        return eta, low, high, label, info
+
+    raise ValueError(f"unknown distilled-coord choice: {coord!r}")
 
 
 def make_runner(
@@ -199,6 +312,14 @@ def main() -> None:
 
     rows: list[dict[str, Any]] = []
     histories: dict[str, np.ndarray] = {}
+    distilled_label: str = ""
+    distilled_info: dict[str, float] = {}
+
+    print(f"distilled coordinate: {args.distilled_coord}")
+    if args.distilled_coord != "product":
+        mu_log, var_log = log_theta_moments_uniform(cfg.theta_min, cfg.theta_max)
+        print(f"  prior moments: mu_log = {mu_log:.6f}, "
+              f"var_log = {var_log:.6f}, sigma_log = {np.sqrt(var_log):.6f}")
 
     for d in args.dims:
         for trial in range(args.num_trials):
@@ -216,11 +337,13 @@ def main() -> None:
                 theta_tr, data_tr, low_raw, high_raw, args, device, seed,
             )
 
-            # distilled NPE: target is eta = prod_i theta_i in R^1
-            eta_tr = np.prod(theta_tr, axis=1, keepdims=True).astype(np.float32)
-            low_eta = np.array([cfg.theta_min ** d], dtype=np.float32)
-            high_eta = np.array([cfg.theta_max ** d], dtype=np.float32)
-            print(f"[distilled] target dim = 1, training NPE-MAF...")
+            # distilled NPE: target is a 1-D analytic identifiable coord
+            eta_tr, low_eta, high_eta, distilled_label, distilled_info = (
+                compute_distilled_target(theta_tr, args.distilled_coord, cfg, d)
+            )
+            print(f"[distilled] target dim = 1 ({args.distilled_coord}), "
+                  f"range [{float(low_eta[0]):.4g}, {float(high_eta[0]):.4g}], "
+                  f"training NPE-MAF...")
             dist_lp, dist_train, dist_val = train_npe(
                 eta_tr, data_tr, low_eta, high_eta, args, device, seed + 1,
             )
@@ -281,7 +404,7 @@ def main() -> None:
         ax.errorbar(
             agg["d"], agg["dist_mean"], yerr=agg["dist_sem"],
             marker="o", capsize=3,
-            label=r"distilled $\eta=\prod_i \theta_i\in\mathbb{R}$",
+            label=distilled_label or "distilled (1-D)",
         )
         ax.set_xlabel(r"ambient dim $d$  (intrinsic dim $= 1$)")
         ax.set_ylabel(r"best validation $\log p(\,\cdot\,|\,y)$")
@@ -300,6 +423,9 @@ def main() -> None:
         "args": {k: (str(v) if isinstance(v, Path) else v)
                  for k, v in vars(args).items()},
         "cfg": asdict(cfg),
+        "distilled_coord": args.distilled_coord,
+        "distilled_info": distilled_info,
+        "distilled_label_latex": distilled_label,
         "files": {
             "metrics.csv": "per-trial val log-prob for raw and distilled NPE",
             "metrics.npz": "same as metrics.csv in numpy format",

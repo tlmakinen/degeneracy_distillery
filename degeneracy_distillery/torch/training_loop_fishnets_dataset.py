@@ -374,6 +374,28 @@ def _infer_batch_size(x_batch: Any, theta_batch: torch.Tensor) -> int:
 # =============================================================================
 
 
+def _autocast_apply(
+    model_apply_fn: Callable,
+    model: nn.Module,
+    x_batch: Any,
+    amp_dtype: Optional[torch.dtype],
+    device_type: str,
+):
+    """Run ``model_apply_fn`` under an optional autocast region.
+
+    When ``amp_dtype`` is not ``None`` the forward runs in mixed precision
+    (e.g. ``torch.bfloat16`` on Ampere/Ada/L4 GPUs) and the returned
+    ``(mle, F)`` are cast back to fp32 so downstream ops (notably
+    ``torch.linalg.slogdet`` in :func:`default_kl_loss`) stay well-conditioned.
+    When ``amp_dtype`` is ``None`` this is a thin pass-through.
+    """
+    if amp_dtype is None:
+        return model_apply_fn(model, x_batch)
+    with torch.autocast(device_type=device_type, dtype=amp_dtype):
+        mle, F_mat = model_apply_fn(model, x_batch)
+    return mle.float(), F_mat.float()
+
+
 def _predict_dataset(
     model: nn.Module,
     source,
@@ -384,6 +406,7 @@ def _predict_dataset(
     device: Optional[torch.device],
     prefetch_batches: int = 0,
     scale_iter: Optional[Callable] = None,
+    amp_dtype: Optional[torch.dtype] = None,
 ):
     """Run ``model`` over an entire dataset in batches and stack outputs.
 
@@ -394,9 +417,13 @@ def _predict_dataset(
     pass a DataLoader with ``shuffle=False`` or an indexable dataset.
 
     Returns ``(mle, F, theta)`` as numpy arrays stacked along the leading
-    axis. Always runs under ``torch.no_grad`` in ``eval`` mode.
+    axis. Always runs under ``torch.no_grad`` in ``eval`` mode. When
+    ``amp_dtype`` is provided the forward runs under
+    :func:`torch.autocast` and outputs are cast back to fp32 before being
+    materialised on the host.
     """
     model.eval()
+    device_type = device.type if device is not None else "cpu"
     all_mle, all_F, all_theta = [], [], []
     with torch.no_grad():
         if _is_dataloader(source):
@@ -411,7 +438,9 @@ def _predict_dataset(
         for x_batch, theta_batch in _prefetch_iter(base, prefetch_batches):
             x_batch = _move_to_device(x_batch, device)
             theta_batch_dev = _move_to_device(theta_batch, device)
-            mle, F_mat = model_apply_fn(model, x_batch)
+            mle, F_mat = _autocast_apply(
+                model_apply_fn, model, x_batch, amp_dtype, device_type,
+            )
             all_mle.append(mle.detach().cpu().numpy())
             all_F.append(F_mat.detach().cpu().numpy())
             # Use the original theta (CPU is fine; we asked the user not to
@@ -485,6 +514,7 @@ def train_fishnets_dataset(
     drop_last: bool = True,
     prefetch_batches: int = 0,
     device: Optional[Union[str, torch.device]] = None,
+    amp_dtype: Optional[torch.dtype] = None,
 ):
     """Train an ensemble of fishnet networks from datasets or DataLoaders.
 
@@ -534,6 +564,15 @@ def train_fishnets_dataset(
     device
         ``'cuda'`` / ``'cpu'`` / ``torch.device``. Default ``None`` selects
         ``cuda`` if available, else ``cpu``.
+    amp_dtype
+        Optional :class:`torch.dtype` to enable mixed-precision forward
+        passes via :func:`torch.autocast`. Set to ``torch.bfloat16`` on
+        Ampere/Ada/L4 GPUs for a typical 1.5--2.5x speedup; the
+        ``(mle, F)`` outputs are cast back to fp32 before the loss so
+        ``torch.linalg.slogdet`` stays well-conditioned. Default ``None``
+        (autocast disabled). bf16 does not require a ``GradScaler``;
+        for fp16 you would need to add one yourself via a custom
+        ``model_apply_fn`` / ``loss_fn`` combo.
     drop_last, prefetch_batches
         Same semantics as the JAX version.
     init_input
@@ -750,6 +789,13 @@ def train_fishnets_dataset(
     train_batch = train_batch_size
     val_batch = val_batch_size if val_batch_size is not None else train_batch
     _pbar_stride = max(1, int(update_pbar_every))
+    _device_type = device.type
+    if amp_dtype is not None:
+        print(
+            f"Mixed precision: forward passes will run under "
+            f"torch.autocast(device_type={_device_type!r}, "
+            f"dtype={amp_dtype}); outputs cast back to fp32 for the loss."
+        )
 
     def _train_iter(rng_local):
         """Yield one epoch of training batches (DataLoader- or dataset-aware)."""
@@ -802,7 +848,9 @@ def train_fishnets_dataset(
                 x_batch = _move_to_device(x_batch, device)
                 theta_batch = _move_to_device(theta_batch, device)
                 optimizer.zero_grad(set_to_none=True)
-                mle, F_mat = model_apply_fn(model, x_batch)
+                mle, F_mat = _autocast_apply(
+                    model_apply_fn, model, x_batch, amp_dtype, _device_type,
+                )
                 loss_t = loss_fn(mle, F_mat, theta_batch, x_batch)
                 loss_t.backward()
                 optimizer.step()
@@ -824,7 +872,9 @@ def train_fishnets_dataset(
                 for x_batch, theta_batch in _val_iter():
                     x_batch = _move_to_device(x_batch, device)
                     theta_batch = _move_to_device(theta_batch, device)
-                    mle, F_mat = model_apply_fn(model, x_batch)
+                    mle, F_mat = _autocast_apply(
+                        model_apply_fn, model, x_batch, amp_dtype, _device_type,
+                    )
                     v = loss_fn(mle, F_mat, theta_batch, x_batch)
                     bs = _infer_batch_size(x_batch, theta_batch)
                     v_total += float(v.detach()) * bs
@@ -883,7 +933,7 @@ def train_fishnets_dataset(
         mle, F_mat, theta_stacked = _predict_dataset(
             models[i], test_source, test_dataset, val_batch, collate_fn,
             model_apply_fn, device=device, prefetch_batches=prefetch_batches,
-            scale_iter=_scale_iter,
+            scale_iter=_scale_iter, amp_dtype=amp_dtype,
         )
         test_mles.append(mle)
         test_Fs.append(F_mat)

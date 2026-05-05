@@ -30,11 +30,27 @@ later stage with ``--start-from {sim,fishnets,flatten,preprocess,sr,prune}``::
 
 Tuning the flattener for rank-1 problems
 ----------------------------------------
-The default ``loss_type='log_frob'`` includes a ``||Q^{-1} - I||_F`` term that
-blows up when the Fisher matrix is near-singular -- which is exactly what
-happens here.  For rank-1 problems use ``--loss-type squared_frob_det``
-(``||Q-I||_F^2 + beta_det * (log det Q)^2``); the ``log det`` barrier is a
-*symmetric* penalty that won't punish the unidentifiable direction.
+This problem has a *structurally rank-1 Fisher* (only the product
+``theta_1 * theta_2`` enters the data), so the ideal Jacobian satisfies
+``|det J| -> 0`` everywhere -- not ``|det J| ~ 1``.  Two flags matter:
+
+* ``--no-invertibility-mlp``  **strongly recommended for rank-deficient
+  problems.**  The default ``forward_backward_mlp=True`` adds a
+  ``mean((theta - theta_rec)^2)`` penalty that pulls ``J`` toward identity,
+  which is the *opposite* of what a rank-1 problem wants.  Disabling it
+  lets the flow collapse volume in the unidentifiable direction.
+
+* ``--loss-type``: ``log_frob`` works once the inverse-MLP is off.  Its
+  asymptotic value of ``~0.7`` is the structural rank-1 floor (set by
+  ``||Q^{-1} - I||_F`` in the reweighted Frobenius), not a sign of bad
+  training.  ``--loss-type squared_frob`` is a cleaner alternative for
+  rank-1 cases since it omits the inverse term entirely.
+
+Diagnostic rule of thumb: ``det F(eta) ~ 1`` is *not* the right target for
+a rank-1 problem -- it usually means the flow is stuck near identity and
+the eta coordinates collapse to ``theta``.  Trust the downstream
+correlation table instead (one eta strongly correlated with the product
+axis, one with the nuisance axis, ~zero cross-talk).
 
 Expected sanity-check outcome
 -----------------------------

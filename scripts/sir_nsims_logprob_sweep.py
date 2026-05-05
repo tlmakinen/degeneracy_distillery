@@ -86,6 +86,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=Path("sir_nsims_logprob_sweep"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-test", type=int, default=1000)
+    parser.add_argument(
+        "--training-data",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to an .npz file holding a precomputed training pool, e.g. the "
+            "concatenated train+test sets from the distillery. The script reads (theta, "
+            "data) from the file using the first matching key pair among "
+            "('theta','data'), ('theta_train','data_train'), or "
+            "('theta_combined','data_combined'). Theta must already be in the script's "
+            "3-D form (beta, gamma, I0/10). For nsims <= file size, MAF training data is "
+            "taken from the file (first nsims rows). For max(nsims) > file size, "
+            "additional sims are generated to fill the deficit. When this flag is not "
+            "given, the legacy generate-everything path is used."
+        ),
+    )
+    parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.05,
+        help="SIR observation noise std added to I(t)/N (default: 0.05, matches legacy notebook).",
+    )
     parser.add_argument("--n-examples", type=int, default=8)
     parser.add_argument("--n-posterior-samples", type=int, default=10000)
     parser.add_argument(
@@ -252,6 +274,90 @@ def generate_sir_dataset(
 
     pbar.close()
     return np.concatenate(theta_chunks, axis=0), np.concatenate(data_chunks, axis=0)
+
+
+def load_training_pool(path: Path, n_timepoints: int) -> tuple[np.ndarray, np.ndarray]:
+    """Load a precomputed (theta, data) training pool from an .npz file.
+
+    Resolution order:
+
+    1. If the archive contains all four keys ``theta_train``, ``data_train``,
+       ``theta_test``, ``data_test`` (e.g. saved by the distillery notebook),
+       the train and test sets are concatenated along axis 0, train first,
+       so for nsims <= len(train) only the train sims are used and for
+       len(train) < nsims <= len(train) + len(test) the test sims fill in.
+    2. Otherwise, the first matching pair among ``('theta','data')``,
+       ``('theta_train','data_train')``, ``('theta_combined','data_combined')``
+       is used as-is.
+
+    Theta must have shape (N, 3) corresponding to (beta, gamma, I0/10), and data
+    must have shape (N, n_timepoints).
+    """
+    archive = np.load(path)
+    available = list(archive.files)
+
+    train_test_keys = ("theta_train", "data_train", "theta_test", "data_test")
+    if all(key in available for key in train_test_keys):
+        theta_train = np.asarray(archive["theta_train"], dtype=np.float32)
+        data_train = np.asarray(archive["data_train"], dtype=np.float32)
+        theta_test = np.asarray(archive["theta_test"], dtype=np.float32)
+        data_test = np.asarray(archive["data_test"], dtype=np.float32)
+        if theta_train.shape[1:] != theta_test.shape[1:]:
+            raise ValueError(
+                f"theta_train and theta_test have incompatible shapes: "
+                f"{theta_train.shape} vs {theta_test.shape}."
+            )
+        if data_train.shape[1:] != data_test.shape[1:]:
+            raise ValueError(
+                f"data_train and data_test have incompatible shapes: "
+                f"{data_train.shape} vs {data_test.shape}."
+            )
+        theta = np.concatenate([theta_train, theta_test], axis=0)
+        data = np.concatenate([data_train, data_test], axis=0)
+        chosen_desc = (
+            f"concatenated theta_train{theta_train.shape[0]} + "
+            f"theta_test{theta_test.shape[0]}"
+        )
+    else:
+        candidate_keys = [
+            ("theta", "data"),
+            ("theta_train", "data_train"),
+            ("theta_combined", "data_combined"),
+        ]
+        chosen: tuple[str, str] | None = None
+        for theta_key, data_key in candidate_keys:
+            if theta_key in available and data_key in available:
+                chosen = (theta_key, data_key)
+                break
+        if chosen is None:
+            raise ValueError(
+                f"Could not find a recognized (theta, data) key pair in {path}. "
+                f"Available keys: {available}. Expected either all of "
+                f"{train_test_keys} or one of {candidate_keys}."
+            )
+        theta = np.asarray(archive[chosen[0]], dtype=np.float32)
+        data = np.asarray(archive[chosen[1]], dtype=np.float32)
+        chosen_desc = f"{chosen[0]}/{chosen[1]}"
+
+    expected_dim = THETA_PRIOR_LOW.size
+    if theta.ndim != 2 or theta.shape[1] != expected_dim:
+        raise ValueError(
+            f"Loaded theta has shape {theta.shape} (from {chosen_desc}); expected "
+            f"(N, {expected_dim}) with columns (beta, gamma, I0/10). If your "
+            f"distillery saved a 2-D theta = (beta, gamma), append the I0/10 "
+            f"column before saving."
+        )
+    if data.ndim != 2 or data.shape[0] != theta.shape[0]:
+        raise ValueError(
+            f"Loaded data has shape {data.shape} (from {chosen_desc}); expected "
+            f"({theta.shape[0]}, {n_timepoints})."
+        )
+    if data.shape[1] != n_timepoints:
+        raise ValueError(
+            f"Loaded data has {data.shape[1]} timepoints (from {chosen_desc}); "
+            f"expected {n_timepoints}."
+        )
+    return theta, data
 
 
 def in_theta_prior(theta: np.ndarray) -> np.ndarray:
@@ -549,16 +655,43 @@ def main() -> None:
     if device == "auto":
         device = "cpu"
 
-    cfg = SirConfig()
+    cfg = SirConfig(noise_std=args.noise_std)
     theta_to_eta = make_expression_transform(args.theta_to_eta)
     eta_to_theta = make_expression_transform(args.eta_to_theta)
     max_nsims = max(args.nsims)
     rng = np.random.default_rng(args.seed)
 
     print(f"Using device: {device}")
-    print(f"Generating {max_nsims} training simulations and {args.n_test} test simulations.")
-    theta_pool, data_pool = generate_sir_dataset(max_nsims, rng, cfg, "train sims")
-    theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
+    print(f"SIR noise_std = {cfg.noise_std}")
+    if args.training_data is not None:
+        print(f"Loading training pool from {args.training_data}")
+        loaded_theta, loaded_data = load_training_pool(args.training_data, cfg.n_timepoints)
+        n_loaded = loaded_theta.shape[0]
+        n_from_file = min(n_loaded, max_nsims)
+        n_extra = max(0, max_nsims - n_loaded)
+        print(
+            f"Loaded {n_loaded} sims; using first {n_from_file} for the training pool. "
+            f"Need {n_extra} additional sims to reach max_nsims={max_nsims}."
+        )
+        theta_pool_pre = loaded_theta[:n_from_file]
+        data_pool_pre = loaded_data[:n_from_file]
+        if n_extra > 0:
+            extra_theta, extra_data = generate_sir_dataset(
+                n_extra, rng, cfg, "extra train sims"
+            )
+            theta_pool = np.concatenate([theta_pool_pre, extra_theta], axis=0).astype(np.float32)
+            data_pool = np.concatenate([data_pool_pre, extra_data], axis=0).astype(np.float32)
+        else:
+            theta_pool = theta_pool_pre.astype(np.float32)
+            data_pool = data_pool_pre.astype(np.float32)
+        print(f"Generating {args.n_test} test simulations.")
+        theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
+    else:
+        print(
+            f"Generating {max_nsims} training simulations and {args.n_test} test simulations."
+        )
+        theta_pool, data_pool = generate_sir_dataset(max_nsims, rng, cfg, "train sims")
+        theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
 
     if args.n_examples > args.n_test:
         raise ValueError("--n-examples cannot exceed --n-test.")
@@ -766,7 +899,13 @@ def main() -> None:
 
     manifest = {
         "config": {
-            "args": vars(args) | {"out_dir": str(args.out_dir), "device_resolved": device},
+            "args": vars(args) | {
+                "out_dir": str(args.out_dir),
+                "training_data": (
+                    str(args.training_data) if args.training_data is not None else None
+                ),
+                "device_resolved": device,
+            },
             "sir": asdict(cfg),
             "theta_labels": THETA_LABELS,
             "eta_labels": ETA_LABELS,

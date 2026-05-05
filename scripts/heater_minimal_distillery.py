@@ -294,9 +294,17 @@ def main() -> None:
     mdl_coords = frob_coords = None
     split_data = None
     if start_idx <= _stage_index("sr"):
-        from degeneracy_distillery.sr_utils import fit_and_analyze_sr
+        from degeneracy_distillery.sr_utils import (
+            fit_and_analyze_sr, sr_structure_predicate,
+        )
 
         sr_dir.mkdir(parents=True, exist_ok=True)
+        sr_predicate = sr_structure_predicate(
+            n_params=n_params,
+            forbid_self_transcendental=True,
+            check_nested_exp=False,
+            forbid_x_in_pow_exponent=True,
+        )
         print(f"\n[sr] running PyOperon for {args.sr_time_limit}s -> {sr_dir}")
         mdl_coords, frob_coords, _analysis, split_data = fit_and_analyze_sr(
             X, y, y_std, dy_sr, Fs,
@@ -311,6 +319,8 @@ def main() -> None:
             allowed_symbols="add,mul,div,pow,constant,variable,sqrt",
             max_complexity_thresh=20,
             equation_set="pareto",
+            length_penalty=2.0,
+            equation_predicate=sr_predicate,
         )
 
         print("\n" + "=" * 60)
@@ -385,6 +395,84 @@ def main() -> None:
         print_discovered_expressions(
             [sympy.simplify(p).evalf(1) for p in pruned_exprs], name_map,
         )
+
+        # --- 8. correlation with candidate physics axes ---------------------
+        _print_physics_correlations(
+            X_test, mdl_coords, pruned_exprs,
+        )
+
+
+def _print_physics_correlations(
+    X_test: np.ndarray,
+    mdl_coords,
+    pruned_exprs,
+) -> None:
+    """Print Pearson |r| of each discovered eta against candidate physics axes.
+
+    The truly identifiable axis is the dissipated power ``P = X1 * X2``.  The
+    unidentifiable axis is ``log(X1 / X2)``.  Local approximations to the
+    product (linear sum, log-sum, etc.) are included to make it obvious when
+    SR settles for a local rather than global match.
+    """
+    from scipy.stats import pearsonr
+
+    from degeneracy_distillery.postprocessing_utils import get_y_sr
+
+    X = np.asarray(X_test)
+    x1, x2 = X[:, 0], X[:, 1]
+    candidates = {
+        "X1*X2  (true identifiable axis)":           x1 * x2,
+        "sqrt(X1*X2)":                                np.sqrt(np.clip(x1 * x2, 1e-12, None)),
+        "log(X1*X2)":                                 np.log(np.clip(x1 * x2, 1e-12, None)),
+        "X1+X2  (local approx of sqrt(X1*X2))":       x1 + x2,
+        "log(X1/X2)  (true nuisance axis)":           np.log(np.clip(x1, 1e-12, None))
+                                                      - np.log(np.clip(x2, 1e-12, None)),
+        "X1-X2":                                      x1 - x2,
+    }
+
+    def _print_block(title: str, exprs) -> None:
+        print(f"\n{title}")
+        try:
+            eta = np.asarray(get_y_sr(exprs, X))
+        except Exception as err:  # pragma: no cover - defensive
+            print(f"  (get_y_sr failed: {err})")
+            return
+        if eta.ndim == 1:
+            eta = eta[:, None]
+        n_eta = eta.shape[1]
+
+        max_label = max(len(label) for label in candidates)
+        header = " " * (max_label + 2) + "".join(
+            f"  |r| η_{i+1:<3}" for i in range(n_eta)
+        )
+        print(header)
+        print(" " * (max_label + 2) + "  -------" * n_eta)
+        for label, vec in candidates.items():
+            row = label.ljust(max_label) + "  "
+            for i in range(n_eta):
+                eta_i = eta[:, i]
+                if not np.all(np.isfinite(eta_i)):
+                    row += "    n/a "
+                    continue
+                r, _ = pearsonr(eta_i, vec)
+                row += f"  {abs(r):>6.3f}"
+            print(row)
+
+    _print_block(
+        "--- |Pearson r| of MDL coords vs candidate axes "
+        "(closer to 1.0 = better match) ---",
+        list(mdl_coords),
+    )
+    _print_block(
+        "--- |Pearson r| of pruned coords vs candidate axes ---",
+        list(pruned_exprs),
+    )
+    print(
+        "\nExpected: one of the η's correlates very strongly (|r| > 0.99) with "
+        "X1*X2, sqrt(X1*X2), or log(X1*X2) -- those are equivalent up to a\n"
+        "monotone reparameterization. The orthogonal η should be poorly\n"
+        "correlated with everything (it's the unidentifiable direction).\n"
+    )
 
 
 if __name__ == "__main__":

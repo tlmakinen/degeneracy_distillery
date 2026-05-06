@@ -630,7 +630,7 @@ def fit_flattening(F_network_ensemble, θs,
                    loss_type: Literal[
                        "log_frob", "frob", "squared_frob", "squared_frob_det"
                    ] = "log_frob",
-                   do_plot: bool = True,
+                   do_plot: bool = False,
                    loss_reweight_lambda: float = 100.0,
                    loss_reweight_epsilon: float = 1e-7,
                    loss_log_epsilon: float = 1e-12,
@@ -641,7 +641,8 @@ def fit_flattening(F_network_ensemble, θs,
                    lr_schedule_phase1: Optional[Any] = None,
                    lr_schedule_phase2: Optional[Any] = None,
                    lr_schedule_finetune: Optional[Any] = None,
-                   update_pbar_every: int = 10):
+                   update_pbar_every: int = 10,
+                   return_model: bool = False):
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
@@ -776,6 +777,9 @@ def fit_flattening(F_network_ensemble, θs,
             (legacy behavior).
         update_pbar_every: Refresh the tqdm bar description (and tqdm ``miniters``) at most every this
             many epochs; default 10 reduces log/Colab traffic. Use 1 to update every epoch.
+        return_model: If True, also return the Flax ``nn.Module`` instance used for training
+            (``custom_MLP``, ``WhitenedMLP``, ``RealNVPWrapper``, etc., depending on flags).
+            Default False preserves the original 3-tuple return type.
     
     Returns:
         w: Trained network parameters
@@ -787,6 +791,7 @@ def fit_flattening(F_network_ensemble, θs,
                      - 'F_ensemble': Fisher matrices
                      - 'eta_ensemble': Coordinate predictions per ensemble member
                      - Additional metrics and metadata
+        When ``return_model`` is True, returns a 4-tuple with the Flax module as the final element.
     """
     # ---------------------- CONSTANTS & SETUP -----------------------
     n_params = θs.shape[-1]
@@ -1477,6 +1482,8 @@ def fit_flattening(F_network_ensemble, θs,
         plt.close()
 
     print("EXPERIMENT COMPLETED & RESULTS SAVED TO:", outname + ".npz")
+    if return_model:
+        return w, ensemble_ws, output_dict, model
     return w, ensemble_ws, output_dict
 
 # ---------------------- EXECUTION (for testing) -----------------------

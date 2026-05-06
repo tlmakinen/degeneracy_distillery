@@ -58,13 +58,25 @@ Run from the repository root, e.g.::
         --num-trials 3 \\
         --out-dir heater_dim_scaling_run
 
+Or with a Stone-rate sweep over ``N``::
+
+    python scripts/heater_dim_scaling_sweep.py \\
+        --dims 2 4 6 8 10 12 \\
+        --nsims-list 500 1000 2000 5000 \\
+        --num-trials 3 \\
+        --marginal-eta-eval \\
+        --out-dir heater_dim_scaling_Nsweep
+
 Outputs in ``--out-dir``:
 
-* ``metrics.csv`` / ``metrics.npz``: per-trial best val log-prob.
-* ``metrics_aggregate.csv``: mean +/- std across trials, per d.
-* ``log_prob_vs_d.{pdf,png}``: the headline figure.
+* ``metrics.csv`` / ``metrics.npz``: per-trial best val log-prob,
+  including an ``nsims`` column.
+* ``metrics_aggregate.csv``: mean +/- std/sem across trials, grouped by
+  (``nsims``, ``d``).
+* ``log_prob_vs_d.{pdf,png}``: best val log-prob vs ambient dim, family
+  of curves indexed by ``nsims``.
 * ``manifest.json``: configuration record (includes the chosen
-  distilled coordinate and its analytic moments).
+  distilled coordinate, analytic moments, and the ``nsims_values`` list).
 
 When ``--marginal-eta-eval`` is set, additionally:
 
@@ -77,6 +89,14 @@ When ``--marginal-eta-eval`` is set, additionally:
 * ``log_prob_vs_d_marginal_eta.{pdf,png}``: the apples-to-apples figure.
 * ``training_histories.npz`` gains per-validation log-prob arrays keyed
   ``raw_marg_eta_arr_<tag>`` / ``distilled_marg_eta_arr_<tag>``.
+
+When ``--nsims-list`` provides more than one value, additionally:
+
+* ``log_prob_vs_nsims.{pdf,png}``: Stone-rate verification figure --
+  log-prob as a function of ``N`` at each fixed ``d``.  Both raw (solid)
+  and distilled (dashed) families are plotted, colour-coded by ``d``.
+  Use this to verify that the distilled saturation point in ``d`` moves
+  to higher ``d`` as ``N`` grows (the Stone N^{-1/3} bandwidth shrinks).
 """
 
 from __future__ import annotations
@@ -143,7 +163,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--t-max", type=float, default=4.0)
     parser.add_argument("--n-t", type=int, default=20)
     parser.add_argument("--sigma", type=float, default=0.2)
-    parser.add_argument("--nsims", type=int, default=1000)
+    parser.add_argument("--nsims", type=int, default=1000,
+                        help="Single training-set size (used when --nsims-list is empty).")
+    parser.add_argument(
+        "--nsims-list", nargs="+", type=int, default=None,
+        help=(
+            "Optional list of training-set sizes to sweep, e.g. "
+            "'--nsims-list 500 1000 2000 5000'. When provided, the outer loop "
+            "iterates over these values, and an extra 'nsims' column is added "
+            "to all output tables. Useful for verifying the Stone-rate "
+            "saturation point as a function of N. When omitted, --nsims is "
+            "used as a single value (backward compatible)."
+        ),
+    )
     parser.add_argument("--n-test", type=int, default=1000)
 
     # --- NPE training (matches scripts/rosen_nsims_logprob_sweep.py) ---
@@ -444,99 +476,112 @@ def main() -> None:
         print(f"marginal-eta-eval: ON  ({n_marg_val} val obs, "
               f"{args.n_marginal_samples} posterior samples / obs)")
 
-    for d in args.dims:
-        for trial in range(args.num_trials):
-            seed = args.seed + 7919 * trial + 31 * d
-            tag = f"d{d}_trial{trial}"
-            print(f"\n=== {tag} (seed {seed}) ===")
-            rng = np.random.default_rng(seed)
+    nsims_values: list[int] = list(args.nsims_list) if args.nsims_list else [int(args.nsims)]
+    multi_nsims = len(nsims_values) > 1
+    if multi_nsims:
+        print(f"nsims sweep: {nsims_values}")
 
-            theta_tr, data_tr = chain_dataset(args.nsims, d, cfg, rng)
-            # raw NPE: target is theta in R^d
-            low_raw = np.full(d, cfg.theta_min, dtype=np.float32)
-            high_raw = np.full(d, cfg.theta_max, dtype=np.float32)
-            print(f"[raw      ] target dim = {d}, training NPE-MAF...")
-            raw_lp, raw_train, raw_val, raw_posterior = train_npe(
-                theta_tr, data_tr, low_raw, high_raw, args, device, seed,
-            )
-
-            # distilled NPE: target is a 1-D analytic identifiable coord
-            eta_tr, low_eta, high_eta, distilled_label, distilled_info = (
-                compute_distilled_target(theta_tr, args.distilled_coord, cfg, d)
-            )
-            print(f"[distilled] target dim = 1 ({args.distilled_coord}), "
-                  f"range [{float(low_eta[0]):.4g}, {float(high_eta[0]):.4g}], "
-                  f"training NPE-MAF...")
-            dist_lp, dist_train, dist_val, dist_posterior = train_npe(
-                eta_tr, data_tr, low_eta, high_eta, args, device, seed + 1,
-            )
-
-            print(f"  raw       best val log_prob = {raw_lp:.4f}  "
-                  f"(target dim {d})")
-            print(f"  distilled best val log_prob = {dist_lp:.4f}  "
-                  f"(target dim 1)")
-
-            row: dict[str, Any] = {
-                "d": d, "trial": trial, "seed": seed,
-                "raw_log_prob": raw_lp,
-                "distilled_log_prob": dist_lp,
-            }
-
-            if args.marginal_eta_eval:
-                # held-out evaluation set, shared between the two NPEs
-                marg_rng = np.random.default_rng(seed + 999_983)
-                theta_eval, data_eval = chain_dataset(
-                    int(args.n_marginal_val or args.n_test), d, cfg, marg_rng,
+    for nsims_idx, n_sim in enumerate(nsims_values):
+        for d in args.dims:
+            for trial in range(args.num_trials):
+                seed = (
+                    args.seed
+                    + 7919 * trial
+                    + 31 * d
+                    + 1_000_003 * nsims_idx
                 )
-                eta_true_eval, _, _, _, _ = compute_distilled_target(
-                    theta_eval, args.distilled_coord, cfg, d,
-                )
-                eta_true_eval = eta_true_eval.reshape(-1).astype(np.float32)
+                tag = (f"N{n_sim}_d{d}_trial{trial}" if multi_nsims
+                       else f"d{d}_trial{trial}")
+                print(f"\n=== {tag} (seed {seed}, nsims={n_sim}) ===")
+                rng = np.random.default_rng(seed)
 
-                eta_proj_raw = make_eta_projector(args.distilled_coord, cfg, d)
-                # distilled NPE samples are already 1-D in eta-coords
-                eta_proj_dist = lambda s: np.asarray(s, dtype=np.float32).reshape(-1)
+                theta_tr, data_tr = chain_dataset(n_sim, d, cfg, rng)
+                # raw NPE: target is theta in R^d
+                low_raw = np.full(d, cfg.theta_min, dtype=np.float32)
+                high_raw = np.full(d, cfg.theta_max, dtype=np.float32)
+                print(f"[raw      ] target dim = {d}, training NPE-MAF...")
+                raw_lp, raw_train, raw_val, raw_posterior = train_npe(
+                    theta_tr, data_tr, low_raw, high_raw, args, device, seed,
+                )
 
-                print(f"[marg-eta] evaluating raw NPE...")
-                raw_marg_arr = marginal_eta_log_probs(
-                    raw_posterior, data_eval, eta_true_eval, eta_proj_raw,
-                    args.n_marginal_samples, device,
+                # distilled NPE: target is a 1-D analytic identifiable coord
+                eta_tr, low_eta, high_eta, distilled_label, distilled_info = (
+                    compute_distilled_target(theta_tr, args.distilled_coord, cfg, d)
                 )
-                print(f"[marg-eta] evaluating distilled NPE...")
-                dist_marg_arr = marginal_eta_log_probs(
-                    dist_posterior, data_eval, eta_true_eval, eta_proj_dist,
-                    args.n_marginal_samples, device,
+                print(f"[distilled] target dim = 1 ({args.distilled_coord}), "
+                      f"range [{float(low_eta[0]):.4g}, {float(high_eta[0]):.4g}], "
+                      f"training NPE-MAF...")
+                dist_lp, dist_train, dist_val, dist_posterior = train_npe(
+                    eta_tr, data_tr, low_eta, high_eta, args, device, seed + 1,
                 )
-                row["raw_marg_eta_logprob"] = float(np.mean(raw_marg_arr))
-                row["distilled_marg_eta_logprob"] = float(np.mean(dist_marg_arr))
-                row["raw_marg_eta_se"] = float(
-                    np.std(raw_marg_arr, ddof=1) / np.sqrt(len(raw_marg_arr))
-                )
-                row["distilled_marg_eta_se"] = float(
-                    np.std(dist_marg_arr, ddof=1) / np.sqrt(len(dist_marg_arr))
-                )
-                histories[f"raw_marg_eta_arr_{tag}"] = raw_marg_arr
-                histories[f"distilled_marg_eta_arr_{tag}"] = dist_marg_arr
-                print(f"  raw       <log p_marg(eta|y)> = "
-                      f"{row['raw_marg_eta_logprob']:.4f}")
-                print(f"  distilled <log p_marg(eta|y)> = "
-                      f"{row['distilled_marg_eta_logprob']:.4f}")
 
-            rows.append(row)
-            histories[f"raw_train_{tag}"] = raw_train
-            histories[f"raw_val_{tag}"] = raw_val
-            histories[f"distilled_train_{tag}"] = dist_train
-            histories[f"distilled_val_{tag}"] = dist_val
+                print(f"  raw       best val log_prob = {raw_lp:.4f}  "
+                      f"(target dim {d})")
+                print(f"  distilled best val log_prob = {dist_lp:.4f}  "
+                      f"(target dim 1)")
 
-            # release posteriors before next iteration to keep GPU memory flat
-            del raw_posterior, dist_posterior
-            if device == "cuda":
-                torch.cuda.empty_cache()
+                row: dict[str, Any] = {
+                    "nsims": n_sim, "d": d, "trial": trial, "seed": seed,
+                    "raw_log_prob": raw_lp,
+                    "distilled_log_prob": dist_lp,
+                }
+
+                if args.marginal_eta_eval:
+                    # held-out evaluation set, shared between the two NPEs
+                    marg_rng = np.random.default_rng(seed + 999_983)
+                    theta_eval, data_eval = chain_dataset(
+                        int(args.n_marginal_val or args.n_test), d, cfg, marg_rng,
+                    )
+                    eta_true_eval, _, _, _, _ = compute_distilled_target(
+                        theta_eval, args.distilled_coord, cfg, d,
+                    )
+                    eta_true_eval = eta_true_eval.reshape(-1).astype(np.float32)
+
+                    eta_proj_raw = make_eta_projector(args.distilled_coord, cfg, d)
+                    # distilled NPE samples are already 1-D in eta-coords
+                    eta_proj_dist = lambda s: np.asarray(s, dtype=np.float32).reshape(-1)
+
+                    print(f"[marg-eta] evaluating raw NPE...")
+                    raw_marg_arr = marginal_eta_log_probs(
+                        raw_posterior, data_eval, eta_true_eval, eta_proj_raw,
+                        args.n_marginal_samples, device,
+                    )
+                    print(f"[marg-eta] evaluating distilled NPE...")
+                    dist_marg_arr = marginal_eta_log_probs(
+                        dist_posterior, data_eval, eta_true_eval, eta_proj_dist,
+                        args.n_marginal_samples, device,
+                    )
+                    row["raw_marg_eta_logprob"] = float(np.mean(raw_marg_arr))
+                    row["distilled_marg_eta_logprob"] = float(np.mean(dist_marg_arr))
+                    row["raw_marg_eta_se"] = float(
+                        np.std(raw_marg_arr, ddof=1) / np.sqrt(len(raw_marg_arr))
+                    )
+                    row["distilled_marg_eta_se"] = float(
+                        np.std(dist_marg_arr, ddof=1) / np.sqrt(len(dist_marg_arr))
+                    )
+                    histories[f"raw_marg_eta_arr_{tag}"] = raw_marg_arr
+                    histories[f"distilled_marg_eta_arr_{tag}"] = dist_marg_arr
+                    print(f"  raw       <log p_marg(eta|y)> = "
+                          f"{row['raw_marg_eta_logprob']:.4f}")
+                    print(f"  distilled <log p_marg(eta|y)> = "
+                          f"{row['distilled_marg_eta_logprob']:.4f}")
+
+                rows.append(row)
+                histories[f"raw_train_{tag}"] = raw_train
+                histories[f"raw_val_{tag}"] = raw_val
+                histories[f"distilled_train_{tag}"] = dist_train
+                histories[f"distilled_val_{tag}"] = dist_val
+
+                # release posteriors before next iteration to keep GPU memory flat
+                del raw_posterior, dist_posterior
+                if device == "cuda":
+                    torch.cuda.empty_cache()
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "metrics.csv", index=False)
 
     npz_payload = {
+        "nsims": df["nsims"].to_numpy(),
         "d": df["d"].to_numpy(),
         "trial": df["trial"].to_numpy(),
         "seed": df["seed"].to_numpy(),
@@ -569,7 +614,7 @@ def main() -> None:
             "dist_marg_eta_n": ("distilled_marg_eta_logprob", "count"),
         })
 
-    agg = df.groupby("d").agg(**agg_specs).reset_index()
+    agg = df.groupby(["nsims", "d"]).agg(**agg_specs).reset_index()
     agg["raw_sem"] = agg["raw_std"] / np.sqrt(np.maximum(agg["raw_n"], 1))
     agg["dist_sem"] = agg["dist_std"] / np.sqrt(np.maximum(agg["dist_n"], 1))
     if args.marginal_eta_eval:
@@ -584,54 +629,107 @@ def main() -> None:
     print("\n=== Aggregate (mean +/- sem) ===")
     print(agg.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
 
+    def _plot_family(
+        ax, agg_, raw_col: str, raw_sem_col: str,
+        dist_col: str, dist_sem_col: str, *, with_legend: bool = True,
+    ) -> None:
+        """Plot raw/distilled vs d as a family of curves indexed by nsims."""
+        nsims_in_agg = sorted(agg_["nsims"].unique())
+        cmap = plt.get_cmap("viridis")
+        for i, n_sim in enumerate(nsims_in_agg):
+            sub = agg_[agg_["nsims"] == n_sim].sort_values("d")
+            color = cmap(i / max(len(nsims_in_agg) - 1, 1))
+            n_label = f"$N={n_sim}$"
+            ax.errorbar(
+                sub["d"], sub[raw_col], yerr=sub[raw_sem_col],
+                fmt="s-", color=color, capsize=2, alpha=0.85,
+                label=f"raw  {n_label}",
+            )
+            ax.errorbar(
+                sub["d"], sub[dist_col], yerr=sub[dist_sem_col],
+                fmt="o--", color=color, capsize=2, alpha=0.85,
+                label=f"distilled  {n_label}",
+            )
+        ax.grid(True, alpha=0.3)
+        if with_legend:
+            ax.legend(fontsize=8, frameon=False, ncol=max(1, len(nsims_in_agg) // 3))
+
     try:  # pragma: no cover - plotting is best-effort
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(6.2, 4.2), constrained_layout=True)
-        ax.errorbar(
-            agg["d"], agg["raw_mean"], yerr=agg["raw_sem"],
-            marker="s", capsize=3, label=r"raw $\theta\in\mathbb{R}^{d}$",
-        )
-        ax.errorbar(
-            agg["d"], agg["dist_mean"], yerr=agg["dist_sem"],
-            marker="o", capsize=3,
-            label=distilled_label or "distilled (1-D)",
+        fig, ax = plt.subplots(figsize=(6.6, 4.4), constrained_layout=True)
+        _plot_family(
+            ax, agg,
+            raw_col="raw_mean", raw_sem_col="raw_sem",
+            dist_col="dist_mean", dist_sem_col="dist_sem",
         )
         ax.set_xlabel(r"ambient dim $d$  (intrinsic dim $= 1$)")
-        ax.set_ylabel(r"best validation $\log p(\,\cdot\,|\,y)$")
-        ax.set_title(
-            r"Heater chain-product: NPE-MAF val log-prob vs ambient dim"
-        )
-        ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.set_ylabel(r"best validation $\log\hat{p}(\,\cdot\,|\,y)$")
+        title = "Heater chain-product: NPE-MAF val log-prob vs ambient dim"
+        if multi_nsims:
+            title += f"  (sweep over $N \\in $ {nsims_values})"
+        ax.set_title(title)
         fig.savefig(out_dir / "log_prob_vs_d.pdf")
         fig.savefig(out_dir / "log_prob_vs_d.png", dpi=200)
         print(f"\nSaved figure to {out_dir / 'log_prob_vs_d.pdf'}")
 
         if args.marginal_eta_eval:
-            fig2, ax2 = plt.subplots(figsize=(6.2, 4.2), constrained_layout=True)
-            ax2.errorbar(
-                agg["d"], agg["raw_marg_eta_mean"], yerr=agg["raw_marg_eta_sem"],
-                marker="s", capsize=3,
-                label=r"raw $\theta$, projected onto $\eta$",
-            )
-            ax2.errorbar(
-                agg["d"], agg["dist_marg_eta_mean"], yerr=agg["dist_marg_eta_sem"],
-                marker="o", capsize=3,
-                label=r"distilled (native $\eta$)",
+            fig2, ax2 = plt.subplots(figsize=(6.6, 4.4), constrained_layout=True)
+            _plot_family(
+                ax2, agg,
+                raw_col="raw_marg_eta_mean", raw_sem_col="raw_marg_eta_sem",
+                dist_col="dist_marg_eta_mean", dist_sem_col="dist_marg_eta_sem",
             )
             ax2.set_xlabel(r"ambient dim $d$  (intrinsic dim $= 1$)")
             ax2.set_ylabel(
                 r"$\langle\,\log\hat{p}_{\mathrm{marg}}(\eta_{\mathrm{true}}\mid y)\,\rangle$"
             )
-            ax2.set_title(
-                "Heater chain-product: marginal log-prob on the same $\\eta$ axis"
-            )
-            ax2.grid(True, alpha=0.3)
-            ax2.legend()
+            title2 = "Heater chain-product: marginal log-prob on the same $\\eta$ axis"
+            if multi_nsims:
+                title2 += f"  (sweep over $N \\in $ {nsims_values})"
+            ax2.set_title(title2)
             fig2.savefig(out_dir / "log_prob_vs_d_marginal_eta.pdf")
             fig2.savefig(out_dir / "log_prob_vs_d_marginal_eta.png", dpi=200)
             print(f"Saved figure to {out_dir / 'log_prob_vs_d_marginal_eta.pdf'}")
+
+        # Optional: log-prob vs nsims at fixed d (Stone-rate verification panel)
+        if multi_nsims:
+            fig3, ax3 = plt.subplots(figsize=(6.6, 4.4), constrained_layout=True)
+            cmap = plt.get_cmap("plasma")
+            d_vals = sorted(agg["d"].unique())
+            col_y_raw = ("raw_marg_eta_mean" if args.marginal_eta_eval
+                         else "raw_mean")
+            col_y_dist = ("dist_marg_eta_mean" if args.marginal_eta_eval
+                          else "dist_mean")
+            sem_raw = ("raw_marg_eta_sem" if args.marginal_eta_eval else "raw_sem")
+            sem_dist = ("dist_marg_eta_sem" if args.marginal_eta_eval else "dist_sem")
+            for i, d_val in enumerate(d_vals):
+                sub = agg[agg["d"] == d_val].sort_values("nsims")
+                color = cmap(i / max(len(d_vals) - 1, 1))
+                ax3.errorbar(
+                    sub["nsims"], sub[col_y_raw], yerr=sub[sem_raw],
+                    fmt="s-", color=color, capsize=2, alpha=0.85,
+                    label=f"raw  $d={int(d_val)}$",
+                )
+                ax3.errorbar(
+                    sub["nsims"], sub[col_y_dist], yerr=sub[sem_dist],
+                    fmt="o--", color=color, capsize=2, alpha=0.85,
+                    label=f"distilled  $d={int(d_val)}$",
+                )
+            ax3.set_xscale("log")
+            ax3.set_xlabel(r"training-set size $N$")
+            ylabel_pieces = [r"validation $\log\hat{p}$"]
+            if args.marginal_eta_eval:
+                ylabel_pieces = [
+                    r"$\langle\,\log\hat{p}_{\mathrm{marg}}(\eta\,|\,y)\,\rangle$"
+                ]
+            ax3.set_ylabel(ylabel_pieces[0])
+            ax3.set_title("Stone-rate verification: log-prob vs $N$ at fixed $d$")
+            ax3.grid(True, which="both", alpha=0.3)
+            ax3.legend(fontsize=8, frameon=False, ncol=max(1, len(d_vals) // 3))
+            fig3.savefig(out_dir / "log_prob_vs_nsims.pdf")
+            fig3.savefig(out_dir / "log_prob_vs_nsims.png", dpi=200)
+            print(f"Saved figure to {out_dir / 'log_prob_vs_nsims.pdf'}")
     except Exception as e:
         print(f"plot failed: {e}")
 
@@ -643,17 +741,24 @@ def main() -> None:
         "distilled_info": distilled_info,
         "distilled_label_latex": distilled_label,
         "marginal_eta_eval": bool(args.marginal_eta_eval),
+        "nsims_values": nsims_values,
         "files": {
             "metrics.csv": "per-trial val log-prob for raw and distilled NPE "
-                           "(plus *_marg_eta_logprob columns when --marginal-eta-eval)",
+                           "(plus *_marg_eta_logprob columns when --marginal-eta-eval). "
+                           "Always contains an 'nsims' column.",
             "metrics.npz": "same as metrics.csv in numpy format",
-            "metrics_aggregate.csv": "mean/std/sem across trials, per d",
+            "metrics_aggregate.csv": "mean/std/sem across trials, grouped by (nsims, d)",
             "training_histories.npz": "full train/val curves keyed by 'raw_*'/'distilled_*' "
-                                      "(plus '*_marg_eta_arr_*' per-validation arrays)",
-            "log_prob_vs_d.pdf": "headline figure: best val log-prob vs ambient dim",
+                                      "(tags include 'N{nsims}' when --nsims-list is used; "
+                                      "plus '*_marg_eta_arr_*' per-validation arrays)",
+            "log_prob_vs_d.pdf": "headline figure: best val log-prob vs ambient dim, "
+                                 "family of curves indexed by nsims",
             "log_prob_vs_d_marginal_eta.pdf":
                 "apples-to-apples figure: marginal log-prob on the same eta axis "
                 "(only present when --marginal-eta-eval)",
+            "log_prob_vs_nsims.pdf":
+                "Stone-rate verification figure: log-prob vs N at fixed d "
+                "(only present when --nsims-list provides >1 value)",
         },
     }
     with open(out_dir / "manifest.json", "w") as f:

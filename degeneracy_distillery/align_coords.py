@@ -675,7 +675,7 @@ def process_ensemble_rotation_v2(
     """Ensemble alignment using Jacobian-Procrustes + nonlinearity rotation.
 
     API-compatible with :func:`preprocessing_utils.process_ensemble_rotation`
-    (returns the same keys), but uses the improved algorithms from this
+    (returns the same keys, plus ``reference_offset``), but uses the improved algorithms from this
     module.
 
     Key differences vs. the legacy function:
@@ -699,6 +699,10 @@ def process_ensemble_rotation_v2(
       The subtracted vector is ``y_global_min - offset_delta`` (shape
       ``(D_out,)``); see :func:`_global_coordinate_floor_shift`.  When enabled,
       the return dict may include ``eta_coordinate_shift`` with that vector.
+    * ``reference_offset``: when ``restore_reference_mean`` is True, the vector
+      ``(R_basis @ mean(y_reference)) / sqrt(n_d)`` added to ``ys_arr`` and
+      ``y_mean`` (full η dimension, before the ``mask`` is applied to means);
+      ``None`` when ``restore_reference_mean`` is False.
     """
     if Fisher_to_flatten not in ("average", "best"):
         raise ValueError(
@@ -873,6 +877,7 @@ def process_ensemble_rotation_v2(
         "n_d": n_d,
         "eta_ensemble": eta_ensemble_masked,
         "norm_factor": datafile["norm_factor"],
+        "reference_offset": reference_offset,
     }
     if eta_floor_shift is not None:
         out["eta_coordinate_shift"] = eta_floor_shift

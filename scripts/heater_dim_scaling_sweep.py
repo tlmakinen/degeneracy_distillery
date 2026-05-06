@@ -40,6 +40,19 @@ but its induced prior tends to ``N(0, 1)`` by the CLT and is
 d-independent in support and scale. Pass ``--distilled-coord product``
 to recover the original (unstabilised) target for comparison.
 
+Choice of NDE architecture
+--------------------------
+The raw NPE has a genuine d-dimensional target and uses a MAF (lampe
+backend, the original setup). The distilled NPE has a strictly 1-D
+target, a regime in which an autoregressive flow degenerates to a
+stack of conditional scalar bijectors with no autoregressive
+dependence to exploit -- the flow's capacity is mostly dead weight and
+it is prone to mis-localising the (very sharp) Bayes-optimal posterior
+on eta. The default distilled architecture is therefore an MDN (sbi
+backend, ``--num-mdn-components`` mixture components, K=4 by default).
+Pass ``--distilled-model maf`` to recover the original lampe-MAF
+distilled NPE for direct A/B comparison.
+
 Defaults match the k=1 heater pipeline (theta in [1, 2], n_t = 20,
 nsims = 1000, tau = 1.0, sigma = 0.2). Reasonable runs are produced in a
 few minutes per (d, trial) pair on a single GPU and a few times that on
@@ -187,6 +200,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-transforms", type=int, default=5)
     parser.add_argument("--repeats-maf", type=int, default=2)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+
+    # --- NDE architecture (raw stays MAF, distilled defaults to MDN) -----
+    # An autoregressive flow on a 1-D target is degenerate: there is nothing
+    # to autoregress over and the architecture's capacity is mostly dead
+    # weight, while still being prone to mis-localising sharp posteriors.
+    # An MDN is the natural conditional density estimator in 1-D.
+    parser.add_argument(
+        "--raw-model", choices=("maf", "mdn"), default="maf",
+        help="NDE architecture for the raw (d-dim) NPE. Default: maf "
+             "(via the lampe backend).",
+    )
+    parser.add_argument(
+        "--distilled-model", choices=("maf", "mdn"), default="mdn",
+        help="NDE architecture for the distilled (1-D) NPE. Default: mdn "
+             "(via the sbi backend), strongly recommended over MAF in 1-D.",
+    )
+    parser.add_argument(
+        "--num-mdn-components", type=int, default=4,
+        help="Number of mixture components used when --*-model=mdn. "
+             "K=1 is sufficient when the Bayes-optimal posterior is "
+             "near-Gaussian; K=4 buys robustness with negligible cost.",
+    )
 
     # --- distilled coordinate ---
     parser.add_argument(
@@ -394,35 +429,67 @@ def marginal_eta_log_probs(
 
 def make_runner(
     low: np.ndarray, high: np.ndarray, args: argparse.Namespace, device: str,
+    *, model: str = "maf",
 ) -> InferenceRunner:
+    """Build an InferenceRunner for either a MAF (lampe) or MDN (sbi) NPE.
+
+    For ``model="maf"`` we use the lampe backend with the existing
+    ``--repeats-maf`` ensemble. For ``model="mdn"`` we use the sbi backend
+    with ``--num-mdn-components`` mixture components, ensembled across
+    ``--repeats-maf`` independent inits. Both backends produce summaries
+    with ``training_log_probs`` / ``validation_log_probs`` keys.
+    """
     prior = ili.utils.Uniform(low=low.tolist(), high=high.tolist(), device=device)
-    nets = [
-        ili.utils.load_nde_lampe(
-            engine="NPE", model="maf",
-            hidden_features=args.hidden_features,
-            num_transforms=args.num_transforms,
-            repeats=args.repeats_maf,
-        )
-    ]
     train_args = {
         "training_batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "max_num_epochs": args.epochs,
         "stop_after_epochs": args.patience,
     }
-    return InferenceRunner.load(
-        backend="lampe", engine="NPE",
-        prior=prior, nets=nets, device=device,
-        train_args=train_args, proposal=None, out_dir=None,
-    )
+    if model == "mdn":
+        nets = [
+            ili.utils.load_nde_sbi(
+                engine="NPE", model="mdn",
+                hidden_features=args.hidden_features,
+                num_components=args.num_mdn_components,
+            )
+            for _ in range(max(1, int(args.repeats_maf)))
+        ]
+        return InferenceRunner.load(
+            backend="sbi", engine="NPE",
+            prior=prior, nets=nets, device=device,
+            train_args=train_args, proposal=None, out_dir=None,
+        )
+    if model == "maf":
+        nets = [
+            ili.utils.load_nde_lampe(
+                engine="NPE", model="maf",
+                hidden_features=args.hidden_features,
+                num_transforms=args.num_transforms,
+                repeats=args.repeats_maf,
+            )
+        ]
+        return InferenceRunner.load(
+            backend="lampe", engine="NPE",
+            prior=prior, nets=nets, device=device,
+            train_args=train_args, proposal=None, out_dir=None,
+        )
+    raise ValueError(f"unknown NDE model: {model!r}")
 
 
 def train_npe(
     theta: np.ndarray, data: np.ndarray,
     low: np.ndarray, high: np.ndarray,
     args: argparse.Namespace, device: str, seed: int,
+    *, model: str = "maf",
 ) -> tuple[float, np.ndarray, np.ndarray, Any]:
-    """Train an NPE-MAF.
+    """Train an NPE with the chosen NDE architecture.
+
+    Parameters
+    ----------
+    model : "maf" (lampe) or "mdn" (sbi). Both produce summaries with
+        ``training_log_probs`` / ``validation_log_probs`` so the caller
+        does not need to know which backend was used.
 
     Returns
     -------
@@ -437,7 +504,7 @@ def train_npe(
     if device == "cuda":
         torch.cuda.manual_seed_all(seed)
 
-    runner = make_runner(low, high, args, device)
+    runner = make_runner(low, high, args, device, model=model)
     loader = NumpyLoader(x=data.astype(np.float32),
                          theta=theta.astype(np.float32))
     posterior, summaries = runner(loader=loader)
@@ -499,9 +566,10 @@ def main() -> None:
                 # raw NPE: target is theta in R^d
                 low_raw = np.full(d, cfg.theta_min, dtype=np.float32)
                 high_raw = np.full(d, cfg.theta_max, dtype=np.float32)
-                print(f"[raw      ] target dim = {d}, training NPE-MAF...")
+                print(f"[raw      ] target dim = {d}, training NPE-{args.raw_model.upper()}...")
                 raw_lp, raw_train, raw_val, raw_posterior = train_npe(
                     theta_tr, data_tr, low_raw, high_raw, args, device, seed,
+                    model=args.raw_model,
                 )
 
                 # distilled NPE: target is a 1-D analytic identifiable coord
@@ -510,9 +578,10 @@ def main() -> None:
                 )
                 print(f"[distilled] target dim = 1 ({args.distilled_coord}), "
                       f"range [{float(low_eta[0]):.4g}, {float(high_eta[0]):.4g}], "
-                      f"training NPE-MAF...")
+                      f"training NPE-{args.distilled_model.upper()}...")
                 dist_lp, dist_train, dist_val, dist_posterior = train_npe(
                     eta_tr, data_tr, low_eta, high_eta, args, device, seed + 1,
+                    model=args.distilled_model,
                 )
 
                 print(f"  raw       best val log_prob = {raw_lp:.4f}  "
@@ -740,6 +809,9 @@ def main() -> None:
         "distilled_coord": args.distilled_coord,
         "distilled_info": distilled_info,
         "distilled_label_latex": distilled_label,
+        "raw_model": args.raw_model,
+        "distilled_model": args.distilled_model,
+        "num_mdn_components": int(args.num_mdn_components),
         "marginal_eta_eval": bool(args.marginal_eta_eval),
         "nsims_values": nsims_values,
         "files": {

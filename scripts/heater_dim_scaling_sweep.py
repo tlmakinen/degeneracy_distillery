@@ -65,6 +65,18 @@ Outputs in ``--out-dir``:
 * ``log_prob_vs_d.{pdf,png}``: the headline figure.
 * ``manifest.json``: configuration record (includes the chosen
   distilled coordinate and its analytic moments).
+
+When ``--marginal-eta-eval`` is set, additionally:
+
+* ``metrics.csv`` / ``metrics.npz`` gain ``raw_marg_eta_logprob`` and
+  ``distilled_marg_eta_logprob`` columns -- both NPEs evaluated on the
+  *same* 1-D marginal density on eta via Gaussian moment matching of
+  posterior samples (apples-to-apples comparison; see Sec. "Marginal-on-eta
+  evaluation" in the script body).
+* ``metrics_aggregate.csv`` gains ``*_marg_eta_{mean,std,sem,n}`` columns.
+* ``log_prob_vs_d_marginal_eta.{pdf,png}``: the apples-to-apples figure.
+* ``training_histories.npz`` gains per-validation log-prob arrays keyed
+  ``raw_marg_eta_arr_<tag>`` / ``distilled_marg_eta_arr_<tag>``.
 """
 
 from __future__ import annotations
@@ -160,6 +172,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # --- apples-to-apples marginal-on-eta evaluation ---
+    parser.add_argument(
+        "--marginal-eta-eval", action="store_true",
+        help=(
+            "After training, evaluate both NPEs on the same 1-D marginal "
+            "density log p_marg(eta_true | y) via Gaussian moment matching "
+            "of posterior samples. Adds an apples-to-apples figure and CSV "
+            "columns; ~10-20%% wall-clock surcharge."
+        ),
+    )
+    parser.add_argument(
+        "--n-marginal-samples", type=int, default=2000,
+        help="Posterior samples per validation observation for the "
+             "marginal-on-eta Gaussian fit.",
+    )
+    parser.add_argument(
+        "--n-marginal-val", type=int, default=None,
+        help="Number of held-out validation observations used for the "
+             "marginal-on-eta evaluation (default: --n-test).",
+    )
+
     # --- I/O ---
     parser.add_argument("--out-dir", type=Path, default=Path("heater_dim_scaling_run"))
     return parser.parse_args()
@@ -249,6 +282,84 @@ def compute_distilled_target(
     raise ValueError(f"unknown distilled-coord choice: {coord!r}")
 
 
+def make_eta_projector(coord: str, cfg: ChainHeaterCfg, d: int):
+    """Return a callable that maps theta-samples ``(n, d)`` to ``(n,)`` eta.
+
+    Uses the *same* analytic transform as ``compute_distilled_target`` so the
+    raw NPE's posterior samples can be projected onto the same axis the
+    distilled NPE was trained on. Constants are computed once and reused.
+    """
+    if coord == "product":
+        return lambda theta: np.prod(theta, axis=1).astype(np.float32)
+    mu_log, var_log = log_theta_moments_uniform(cfg.theta_min, cfg.theta_max)
+    if coord == "log_product":
+        return lambda theta: np.log(theta).sum(axis=1).astype(np.float32)
+    if coord == "standardised_log_product":
+        scale = float(np.sqrt(d * var_log))
+        offset = float(d * mu_log)
+        return lambda theta: ((np.log(theta).sum(axis=1) - offset) / scale).astype(np.float32)
+    raise ValueError(f"unknown distilled-coord choice: {coord!r}")
+
+
+def marginal_eta_log_probs(
+    posterior: Any,
+    x_val: np.ndarray,
+    eta_true: np.ndarray,
+    eta_projector,
+    n_samples: int,
+    device: str,
+    *,
+    progress: bool = True,
+) -> np.ndarray:
+    """Per-validation Gaussian-fit log p_marg(eta_true | y) from posterior samples.
+
+    For each ``y_i`` in ``x_val``:
+
+        1. Sample ``n_samples`` parameters from the trained posterior at ``y_i``.
+        2. Project them through ``eta_projector`` to scalar etas.
+           For the *distilled* NPE pass ``eta_projector = lambda s: s.reshape(-1)``;
+           for the *raw* NPE pass the result of ``make_eta_projector``.
+        3. Fit Gaussian moments ``(mu_i, sigma_i^2)`` to the eta-samples and
+           return ``log N(eta_true_i | mu_i, sigma_i^2)``.
+
+    The Gaussian fit is the natural Bayes-optimal estimator for this simulator:
+    the conditional likelihood ``p(y | eta)`` is exactly Gaussian (linear in
+    eta plus Gaussian noise), and the standardised-log-product prior is
+    near-Gaussian by CLT, so the marginal posterior on eta is well-approximated
+    by a Gaussian for any d.
+    """
+    n_val = int(x_val.shape[0])
+    log_probs = np.empty(n_val, dtype=np.float32)
+    x_val_t = torch.as_tensor(x_val.astype(np.float32), device=device)
+    iterator = range(n_val)
+    if progress:
+        try:
+            from tqdm import tqdm  # local import: optional dependency
+            iterator = tqdm(iterator, desc="marg-eta", leave=False)
+        except ImportError:
+            pass
+
+    log_2pi = float(np.log(2.0 * np.pi))
+    with torch.no_grad():
+        for i in iterator:
+            x_i = x_val_t[i]
+            try:
+                samples = posterior.sample(
+                    (n_samples,), x=x_i, show_progress_bars=False,
+                )
+            except TypeError:
+                samples = posterior.sample((n_samples,), x=x_i)
+            samples_np = samples.detach().cpu().numpy().astype(np.float32)
+            if samples_np.ndim == 1:
+                samples_np = samples_np[:, None]
+            eta_samples = np.asarray(eta_projector(samples_np), dtype=np.float64)
+            mu = float(eta_samples.mean())
+            var = float(eta_samples.var(ddof=0)) + 1e-12
+            log_probs[i] = -0.5 * (log_2pi + np.log(var)) \
+                           - 0.5 * (float(eta_true[i]) - mu) ** 2 / var
+    return log_probs
+
+
 def make_runner(
     low: np.ndarray, high: np.ndarray, args: argparse.Namespace, device: str,
 ) -> InferenceRunner:
@@ -278,8 +389,16 @@ def train_npe(
     theta: np.ndarray, data: np.ndarray,
     low: np.ndarray, high: np.ndarray,
     args: argparse.Namespace, device: str, seed: int,
-) -> tuple[float, np.ndarray, np.ndarray]:
-    """Train an NPE-MAF and return (best val log_prob, train_curve, val_curve)."""
+) -> tuple[float, np.ndarray, np.ndarray, Any]:
+    """Train an NPE-MAF.
+
+    Returns
+    -------
+    best_val_log_prob : float
+    train_log_probs   : per-epoch training log-prob curve
+    val_log_probs     : per-epoch validation log-prob curve
+    posterior         : the trained posterior object (for downstream sampling)
+    """
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -289,10 +408,10 @@ def train_npe(
     runner = make_runner(low, high, args, device)
     loader = NumpyLoader(x=data.astype(np.float32),
                          theta=theta.astype(np.float32))
-    _, summaries = runner(loader=loader)
+    posterior, summaries = runner(loader=loader)
     val_log_probs = np.asarray(summaries[0]["validation_log_probs"])
     train_log_probs = np.asarray(summaries[0]["training_log_probs"])
-    return float(np.max(val_log_probs)), train_log_probs, val_log_probs
+    return float(np.max(val_log_probs)), train_log_probs, val_log_probs, posterior
 
 
 def main() -> None:
@@ -320,6 +439,10 @@ def main() -> None:
         mu_log, var_log = log_theta_moments_uniform(cfg.theta_min, cfg.theta_max)
         print(f"  prior moments: mu_log = {mu_log:.6f}, "
               f"var_log = {var_log:.6f}, sigma_log = {np.sqrt(var_log):.6f}")
+    if args.marginal_eta_eval:
+        n_marg_val = int(args.n_marginal_val or args.n_test)
+        print(f"marginal-eta-eval: ON  ({n_marg_val} val obs, "
+              f"{args.n_marginal_samples} posterior samples / obs)")
 
     for d in args.dims:
         for trial in range(args.num_trials):
@@ -333,7 +456,7 @@ def main() -> None:
             low_raw = np.full(d, cfg.theta_min, dtype=np.float32)
             high_raw = np.full(d, cfg.theta_max, dtype=np.float32)
             print(f"[raw      ] target dim = {d}, training NPE-MAF...")
-            raw_lp, raw_train, raw_val = train_npe(
+            raw_lp, raw_train, raw_val, raw_posterior = train_npe(
                 theta_tr, data_tr, low_raw, high_raw, args, device, seed,
             )
 
@@ -344,7 +467,7 @@ def main() -> None:
             print(f"[distilled] target dim = 1 ({args.distilled_coord}), "
                   f"range [{float(low_eta[0]):.4g}, {float(high_eta[0]):.4g}], "
                   f"training NPE-MAF...")
-            dist_lp, dist_train, dist_val = train_npe(
+            dist_lp, dist_train, dist_val, dist_posterior = train_npe(
                 eta_tr, data_tr, low_eta, high_eta, args, device, seed + 1,
             )
 
@@ -353,41 +476,109 @@ def main() -> None:
             print(f"  distilled best val log_prob = {dist_lp:.4f}  "
                   f"(target dim 1)")
 
-            rows.append({
+            row: dict[str, Any] = {
                 "d": d, "trial": trial, "seed": seed,
                 "raw_log_prob": raw_lp,
                 "distilled_log_prob": dist_lp,
-            })
+            }
+
+            if args.marginal_eta_eval:
+                # held-out evaluation set, shared between the two NPEs
+                marg_rng = np.random.default_rng(seed + 999_983)
+                theta_eval, data_eval = chain_dataset(
+                    int(args.n_marginal_val or args.n_test), d, cfg, marg_rng,
+                )
+                eta_true_eval, _, _, _, _ = compute_distilled_target(
+                    theta_eval, args.distilled_coord, cfg, d,
+                )
+                eta_true_eval = eta_true_eval.reshape(-1).astype(np.float32)
+
+                eta_proj_raw = make_eta_projector(args.distilled_coord, cfg, d)
+                # distilled NPE samples are already 1-D in eta-coords
+                eta_proj_dist = lambda s: np.asarray(s, dtype=np.float32).reshape(-1)
+
+                print(f"[marg-eta] evaluating raw NPE...")
+                raw_marg_arr = marginal_eta_log_probs(
+                    raw_posterior, data_eval, eta_true_eval, eta_proj_raw,
+                    args.n_marginal_samples, device,
+                )
+                print(f"[marg-eta] evaluating distilled NPE...")
+                dist_marg_arr = marginal_eta_log_probs(
+                    dist_posterior, data_eval, eta_true_eval, eta_proj_dist,
+                    args.n_marginal_samples, device,
+                )
+                row["raw_marg_eta_logprob"] = float(np.mean(raw_marg_arr))
+                row["distilled_marg_eta_logprob"] = float(np.mean(dist_marg_arr))
+                row["raw_marg_eta_se"] = float(
+                    np.std(raw_marg_arr, ddof=1) / np.sqrt(len(raw_marg_arr))
+                )
+                row["distilled_marg_eta_se"] = float(
+                    np.std(dist_marg_arr, ddof=1) / np.sqrt(len(dist_marg_arr))
+                )
+                histories[f"raw_marg_eta_arr_{tag}"] = raw_marg_arr
+                histories[f"distilled_marg_eta_arr_{tag}"] = dist_marg_arr
+                print(f"  raw       <log p_marg(eta|y)> = "
+                      f"{row['raw_marg_eta_logprob']:.4f}")
+                print(f"  distilled <log p_marg(eta|y)> = "
+                      f"{row['distilled_marg_eta_logprob']:.4f}")
+
+            rows.append(row)
             histories[f"raw_train_{tag}"] = raw_train
             histories[f"raw_val_{tag}"] = raw_val
             histories[f"distilled_train_{tag}"] = dist_train
             histories[f"distilled_val_{tag}"] = dist_val
 
+            # release posteriors before next iteration to keep GPU memory flat
+            del raw_posterior, dist_posterior
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "metrics.csv", index=False)
-    np.savez(out_dir / "metrics.npz",
-             d=df["d"].to_numpy(),
-             trial=df["trial"].to_numpy(),
-             seed=df["seed"].to_numpy(),
-             raw_log_prob=df["raw_log_prob"].to_numpy(),
-             distilled_log_prob=df["distilled_log_prob"].to_numpy())
+
+    npz_payload = {
+        "d": df["d"].to_numpy(),
+        "trial": df["trial"].to_numpy(),
+        "seed": df["seed"].to_numpy(),
+        "raw_log_prob": df["raw_log_prob"].to_numpy(),
+        "distilled_log_prob": df["distilled_log_prob"].to_numpy(),
+    }
+    if args.marginal_eta_eval:
+        npz_payload["raw_marg_eta_logprob"] = df["raw_marg_eta_logprob"].to_numpy()
+        npz_payload["distilled_marg_eta_logprob"] = df["distilled_marg_eta_logprob"].to_numpy()
+        npz_payload["raw_marg_eta_se"] = df["raw_marg_eta_se"].to_numpy()
+        npz_payload["distilled_marg_eta_se"] = df["distilled_marg_eta_se"].to_numpy()
+    np.savez(out_dir / "metrics.npz", **npz_payload)
     np.savez(out_dir / "training_histories.npz", **histories)
 
-    agg = (
-        df.groupby("d")
-          .agg(
-              raw_mean=("raw_log_prob", "mean"),
-              raw_std=("raw_log_prob", "std"),
-              raw_n=("raw_log_prob", "count"),
-              dist_mean=("distilled_log_prob", "mean"),
-              dist_std=("distilled_log_prob", "std"),
-              dist_n=("distilled_log_prob", "count"),
-          )
-          .reset_index()
-    )
-    # sem (standard error of the mean) for error bars
+    agg_specs: dict[str, tuple[str, str]] = {
+        "raw_mean": ("raw_log_prob", "mean"),
+        "raw_std": ("raw_log_prob", "std"),
+        "raw_n": ("raw_log_prob", "count"),
+        "dist_mean": ("distilled_log_prob", "mean"),
+        "dist_std": ("distilled_log_prob", "std"),
+        "dist_n": ("distilled_log_prob", "count"),
+    }
+    if args.marginal_eta_eval:
+        agg_specs.update({
+            "raw_marg_eta_mean": ("raw_marg_eta_logprob", "mean"),
+            "raw_marg_eta_std": ("raw_marg_eta_logprob", "std"),
+            "raw_marg_eta_n": ("raw_marg_eta_logprob", "count"),
+            "dist_marg_eta_mean": ("distilled_marg_eta_logprob", "mean"),
+            "dist_marg_eta_std": ("distilled_marg_eta_logprob", "std"),
+            "dist_marg_eta_n": ("distilled_marg_eta_logprob", "count"),
+        })
+
+    agg = df.groupby("d").agg(**agg_specs).reset_index()
     agg["raw_sem"] = agg["raw_std"] / np.sqrt(np.maximum(agg["raw_n"], 1))
     agg["dist_sem"] = agg["dist_std"] / np.sqrt(np.maximum(agg["dist_n"], 1))
+    if args.marginal_eta_eval:
+        agg["raw_marg_eta_sem"] = (
+            agg["raw_marg_eta_std"] / np.sqrt(np.maximum(agg["raw_marg_eta_n"], 1))
+        )
+        agg["dist_marg_eta_sem"] = (
+            agg["dist_marg_eta_std"] / np.sqrt(np.maximum(agg["dist_marg_eta_n"], 1))
+        )
     agg.to_csv(out_dir / "metrics_aggregate.csv", index=False)
 
     print("\n=== Aggregate (mean +/- sem) ===")
@@ -416,6 +607,31 @@ def main() -> None:
         fig.savefig(out_dir / "log_prob_vs_d.pdf")
         fig.savefig(out_dir / "log_prob_vs_d.png", dpi=200)
         print(f"\nSaved figure to {out_dir / 'log_prob_vs_d.pdf'}")
+
+        if args.marginal_eta_eval:
+            fig2, ax2 = plt.subplots(figsize=(6.2, 4.2), constrained_layout=True)
+            ax2.errorbar(
+                agg["d"], agg["raw_marg_eta_mean"], yerr=agg["raw_marg_eta_sem"],
+                marker="s", capsize=3,
+                label=r"raw $\theta$, projected onto $\eta$",
+            )
+            ax2.errorbar(
+                agg["d"], agg["dist_marg_eta_mean"], yerr=agg["dist_marg_eta_sem"],
+                marker="o", capsize=3,
+                label=r"distilled (native $\eta$)",
+            )
+            ax2.set_xlabel(r"ambient dim $d$  (intrinsic dim $= 1$)")
+            ax2.set_ylabel(
+                r"$\langle\,\log\hat{p}_{\mathrm{marg}}(\eta_{\mathrm{true}}\mid y)\,\rangle$"
+            )
+            ax2.set_title(
+                "Heater chain-product: marginal log-prob on the same $\\eta$ axis"
+            )
+            ax2.grid(True, alpha=0.3)
+            ax2.legend()
+            fig2.savefig(out_dir / "log_prob_vs_d_marginal_eta.pdf")
+            fig2.savefig(out_dir / "log_prob_vs_d_marginal_eta.png", dpi=200)
+            print(f"Saved figure to {out_dir / 'log_prob_vs_d_marginal_eta.pdf'}")
     except Exception as e:
         print(f"plot failed: {e}")
 
@@ -426,12 +642,18 @@ def main() -> None:
         "distilled_coord": args.distilled_coord,
         "distilled_info": distilled_info,
         "distilled_label_latex": distilled_label,
+        "marginal_eta_eval": bool(args.marginal_eta_eval),
         "files": {
-            "metrics.csv": "per-trial val log-prob for raw and distilled NPE",
+            "metrics.csv": "per-trial val log-prob for raw and distilled NPE "
+                           "(plus *_marg_eta_logprob columns when --marginal-eta-eval)",
             "metrics.npz": "same as metrics.csv in numpy format",
             "metrics_aggregate.csv": "mean/std/sem across trials, per d",
-            "training_histories.npz": "full train/val curves keyed by 'raw_*'/'distilled_*'",
-            "log_prob_vs_d.pdf": "headline figure: log-prob vs ambient dim",
+            "training_histories.npz": "full train/val curves keyed by 'raw_*'/'distilled_*' "
+                                      "(plus '*_marg_eta_arr_*' per-validation arrays)",
+            "log_prob_vs_d.pdf": "headline figure: best val log-prob vs ambient dim",
+            "log_prob_vs_d_marginal_eta.pdf":
+                "apples-to-apples figure: marginal log-prob on the same eta axis "
+                "(only present when --marginal-eta-eval)",
         },
     }
     with open(out_dir / "manifest.json", "w") as f:

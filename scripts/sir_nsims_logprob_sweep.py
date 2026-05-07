@@ -64,6 +64,55 @@ DEFAULT_ETA_TO_THETA_EXPRS = (
 
 
 @dataclass
+class ThetaScaler:
+    """Affine MinMax-style scaler matching sklearn.preprocessing.MinMaxScaler.
+
+    Maps physical theta to ``feat_min + (theta - data_min) * scale_`` where
+    ``scale_ = (feat_max - feat_min) / (data_max - data_min)``. With the
+    defaults (data_min=THETA_PRIOR_LOW, feature_range=(1.0, 2.0)) the scaled
+    theta lives in [1, 2] when physical theta is in [data_min, data_max].
+    """
+
+    data_min: np.ndarray
+    data_max: np.ndarray
+    feat_min: float = 1.0
+    feat_max: float = 2.0
+
+    def __post_init__(self) -> None:
+        self.data_min = np.asarray(self.data_min, dtype=np.float64)
+        self.data_max = np.asarray(self.data_max, dtype=np.float64)
+        if self.data_min.shape != self.data_max.shape:
+            raise ValueError(
+                f"data_min and data_max must have the same shape; got "
+                f"{self.data_min.shape} and {self.data_max.shape}."
+            )
+        if np.any(self.data_max <= self.data_min):
+            raise ValueError(
+                f"scaler data_max must be elementwise > data_min; got "
+                f"data_min={self.data_min.tolist()}, data_max={self.data_max.tolist()}."
+            )
+        if not (self.feat_max > self.feat_min):
+            raise ValueError(
+                f"feature_range must satisfy feat_max > feat_min; got "
+                f"({self.feat_min}, {self.feat_max})."
+            )
+        self.scale_ = (self.feat_max - self.feat_min) / (self.data_max - self.data_min)
+        self.min_ = self.feat_min - self.data_min * self.scale_
+
+    def transform(self, theta: np.ndarray) -> np.ndarray:
+        theta_arr = np.asarray(theta, dtype=np.float64)
+        return (theta_arr * self.scale_ + self.min_).astype(np.float32)
+
+    def inverse_transform(self, scaled: np.ndarray) -> np.ndarray:
+        scaled_arr = np.asarray(scaled, dtype=np.float64)
+        return ((scaled_arr - self.min_) / self.scale_).astype(np.float32)
+
+    def logdet_physical_per_scaled(self) -> float:
+        """Constant log|det(d theta_physical / d theta_scaled)|."""
+        return float(np.sum(np.log(1.0 / self.scale_)))
+
+
+@dataclass
 class SirConfig:
     n_pop: int = 1000
     i0_mean: float = 8.0
@@ -107,6 +156,64 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.05,
         help="SIR observation noise std added to I(t)/N (default: 0.05, matches legacy notebook).",
+    )
+    parser.add_argument(
+        "--scale-theta",
+        action="store_true",
+        help=(
+            "Train the MAFs on theta linearly scaled into --scaler-feature-range "
+            "(default [1, 2]) using --scaler-data-min / --scaler-data-max as the "
+            "affine bounds. The eta expressions in --theta-to-eta / --eta-to-theta "
+            "are then assumed to act on the SCALED theta (matching the GW sweep "
+            "convention); a constant scaler Jacobian correction is added to the "
+            "theta-density log_prob, and physical-theta posterior samples are "
+            "obtained by inverse-scaling the MAF samples. Without this flag the "
+            "legacy unscaled path is used unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--scaler-data-min",
+        nargs=3,
+        type=float,
+        default=[0.1, 0.05, 0.0],
+        metavar=("BETA", "GAMMA", "I0_OVER_10"),
+        help=(
+            "data_min_ for the (beta, gamma, I0/10) scaler. Used only when "
+            "--scale-theta or --training-data-scaled is set. Should match the "
+            "MinMaxScaler.data_min_ produced by the distillery (default: prior low)."
+        ),
+    )
+    parser.add_argument(
+        "--scaler-data-max",
+        nargs=3,
+        type=float,
+        default=[1.0, 0.5, 2.0],
+        metavar=("BETA", "GAMMA", "I0_OVER_10"),
+        help=(
+            "data_max_ for the (beta, gamma, I0/10) scaler. Used only when "
+            "--scale-theta or --training-data-scaled is set. Should match the "
+            "MinMaxScaler.data_max_ produced by the distillery (default uses "
+            "I0/10 max=2.0, which matches Poisson(8) tail behavior)."
+        ),
+    )
+    parser.add_argument(
+        "--scaler-feature-range",
+        nargs=2,
+        type=float,
+        default=[1.0, 2.0],
+        metavar=("LOW", "HIGH"),
+        help="feature_range for the scaler. Default [1, 2] matches the distillery convention.",
+    )
+    parser.add_argument(
+        "--training-data-scaled",
+        action="store_true",
+        help=(
+            "Indicate that the theta in --training-data is already in the scaler's "
+            "feature_range. Loaded theta is inverse-scaled to physical units before "
+            "use, so --scale-theta and --training-data-scaled compose correctly: the "
+            "loader normalizes everything to physical, the MAF rescales when "
+            "--scale-theta is set."
+        ),
     )
     parser.add_argument("--n-examples", type=int, default=8)
     parser.add_argument("--n-posterior-samples", type=int, default=10000)
@@ -656,16 +763,59 @@ def main() -> None:
         device = "cpu"
 
     cfg = SirConfig(noise_std=args.noise_std)
-    theta_to_eta = make_expression_transform(args.theta_to_eta)
-    eta_to_theta = make_expression_transform(args.eta_to_theta)
     max_nsims = max(args.nsims)
     rng = np.random.default_rng(args.seed)
 
+    need_scaler = args.scale_theta or args.training_data_scaled
+    theta_scaler: ThetaScaler | None = None
+    if need_scaler:
+        theta_scaler = ThetaScaler(
+            data_min=np.asarray(args.scaler_data_min, dtype=np.float64),
+            data_max=np.asarray(args.scaler_data_max, dtype=np.float64),
+            feat_min=float(args.scaler_feature_range[0]),
+            feat_max=float(args.scaler_feature_range[1]),
+        )
+        print(
+            "Using ThetaScaler:\n"
+            f"  data_min       = {theta_scaler.data_min.tolist()}\n"
+            f"  data_max       = {theta_scaler.data_max.tolist()}\n"
+            f"  feature_range  = ({theta_scaler.feat_min}, {theta_scaler.feat_max})\n"
+            f"  scale_         = {theta_scaler.scale_.tolist()}\n"
+            f"  log|det dphys/dscaled| = {theta_scaler.logdet_physical_per_scaled():.6f}"
+        )
+
+    # Theta-to-eta / eta-to-theta wrappers. In scaled mode the symbolic
+    # expressions are assumed to take SCALED theta as input (matching the GW
+    # convention), so we sandwich the inverse expression with inverse_transform
+    # to return physical theta.
+    theta_to_eta_expr = make_expression_transform(args.theta_to_eta)
+    eta_to_theta_expr = make_expression_transform(args.eta_to_theta)
+    if args.scale_theta:
+        assert theta_scaler is not None  # narrowing for type checkers
+
+        def theta_to_eta(theta_physical: np.ndarray) -> np.ndarray:
+            return theta_to_eta_expr(theta_scaler.transform(theta_physical))
+
+        def eta_to_theta(eta: np.ndarray) -> np.ndarray:
+            return theta_scaler.inverse_transform(eta_to_theta_expr(eta))
+    else:
+        theta_to_eta = theta_to_eta_expr
+        eta_to_theta = eta_to_theta_expr
+
     print(f"Using device: {device}")
     print(f"SIR noise_std = {cfg.noise_std}")
+    print(f"scale-theta mode: {args.scale_theta}")
     if args.training_data is not None:
         print(f"Loading training pool from {args.training_data}")
         loaded_theta, loaded_data = load_training_pool(args.training_data, cfg.n_timepoints)
+        if args.training_data_scaled:
+            assert theta_scaler is not None
+            print(
+                "  --training-data-scaled: inverse-scaling loaded theta from "
+                f"feature_range=({theta_scaler.feat_min}, {theta_scaler.feat_max}) to "
+                "physical units."
+            )
+            loaded_theta = theta_scaler.inverse_transform(loaded_theta)
         n_loaded = loaded_theta.shape[0]
         n_from_file = min(n_loaded, max_nsims)
         n_extra = max(0, max_nsims - n_loaded)
@@ -708,14 +858,26 @@ def main() -> None:
         coverage_rng = np.random.default_rng(coverage_seed)
         coverage_indices = coverage_rng.choice(args.n_test, size=coverage_n_test, replace=False)
 
-    np.savez_compressed(
-        args.out_dir / "dataset_reference.npz",
-        theta_test=theta_test.astype(np.float32),
-        data_test=data_test.astype(np.float32),
-        example_indices=example_indices.astype(np.int64),
-        theta_examples=theta_test[example_indices].astype(np.float32),
-        data_examples=data_test[example_indices].astype(np.float32),
-    )
+    dataset_reference = {
+        "theta_test": theta_test.astype(np.float32),
+        "data_test": data_test.astype(np.float32),
+        "example_indices": example_indices.astype(np.int64),
+        "theta_examples": theta_test[example_indices].astype(np.float32),
+        "data_examples": data_test[example_indices].astype(np.float32),
+    }
+    if theta_scaler is not None:
+        dataset_reference["theta_test_scaled"] = theta_scaler.transform(theta_test)
+        dataset_reference["theta_examples_scaled"] = theta_scaler.transform(
+            theta_test[example_indices]
+        )
+        dataset_reference["theta_scaler_data_min"] = theta_scaler.data_min.astype(np.float32)
+        dataset_reference["theta_scaler_data_max"] = theta_scaler.data_max.astype(np.float32)
+        dataset_reference["theta_scaler_scale"] = theta_scaler.scale_.astype(np.float32)
+        dataset_reference["theta_scaler_min"] = theta_scaler.min_.astype(np.float32)
+        dataset_reference["theta_scaler_feature_range"] = np.asarray(
+            [theta_scaler.feat_min, theta_scaler.feat_max], dtype=np.float32
+        )
+    np.savez_compressed(args.out_dir / "dataset_reference.npz", **dataset_reference)
 
     metrics_rows: list[dict[str, Any]] = []
     history_arrays: dict[str, np.ndarray] = {}
@@ -736,8 +898,25 @@ def main() -> None:
         "nsims": np.asarray(args.nsims, dtype=np.int64),
     }
 
+    if args.scale_theta:
+        assert theta_scaler is not None
+        theta_pool_for_maf = theta_scaler.transform(theta_pool)
+        scaled_prior_low = np.full(
+            THETA_PRIOR_LOW.shape, theta_scaler.feat_min, dtype=np.float32
+        )
+        scaled_prior_high = np.full(
+            THETA_PRIOR_HIGH.shape, theta_scaler.feat_max, dtype=np.float32
+        )
+        theta_method_logdet = theta_scaler.logdet_physical_per_scaled()
+    else:
+        theta_pool_for_maf = theta_pool
+        scaled_prior_low = THETA_PRIOR_LOW
+        scaled_prior_high = THETA_PRIOR_HIGH
+        theta_method_logdet = 0.0
+
     for nsims in args.nsims:
         train_theta = theta_pool[:nsims]
+        train_theta_for_maf = theta_pool_for_maf[:nsims]
         train_data = data_pool[:nsims]
 
         for method in ("theta", "eta"):
@@ -746,10 +925,10 @@ def main() -> None:
             print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
 
             if method == "theta":
-                train_params = train_theta
-                prior_low = THETA_PRIOR_LOW
-                prior_high = THETA_PRIOR_HIGH
-                logdet_correction = 0.0
+                train_params = train_theta_for_maf
+                prior_low = scaled_prior_low
+                prior_high = scaled_prior_high
+                logdet_correction = theta_method_logdet
             else:
                 train_params = theta_to_eta(train_theta)
                 prior_low = train_params.min(axis=0)
@@ -813,7 +992,11 @@ def main() -> None:
                         device,
                     )
                     if method == "theta":
-                        theta_samples = raw_samples
+                        if args.scale_theta:
+                            assert theta_scaler is not None
+                            theta_samples = theta_scaler.inverse_transform(raw_samples)
+                        else:
+                            theta_samples = raw_samples
                         valid_mask = in_theta_prior(theta_samples)
                     else:
                         theta_samples = eta_to_theta(raw_samples)
@@ -847,8 +1030,15 @@ def main() -> None:
                     device,
                 )
                 if method == "theta":
-                    theta_samples = raw_samples
-                    valid_mask = np.isfinite(theta_samples).all(axis=1)
+                    if args.scale_theta:
+                        assert theta_scaler is not None
+                        theta_samples = theta_scaler.inverse_transform(raw_samples)
+                        valid_mask = in_theta_prior(theta_samples)
+                        theta_samples = theta_samples.copy()
+                        theta_samples[~valid_mask] = np.nan
+                    else:
+                        theta_samples = raw_samples
+                        valid_mask = np.isfinite(theta_samples).all(axis=1)
                 else:
                     theta_samples = eta_to_theta(raw_samples)
                     valid_mask = in_theta_prior(theta_samples)
@@ -897,6 +1087,16 @@ def main() -> None:
             np.savez_compressed(args.out_dir / "posterior_samples.npz", **posterior_arrays)
             print(f"Finished method={method}, nsims={nsims} in {elapsed / 60.0:.1f} min")
 
+    scaler_manifest: dict[str, Any] | None = None
+    if theta_scaler is not None:
+        scaler_manifest = {
+            "data_min": theta_scaler.data_min.tolist(),
+            "data_max": theta_scaler.data_max.tolist(),
+            "feature_range": [theta_scaler.feat_min, theta_scaler.feat_max],
+            "scale_": theta_scaler.scale_.tolist(),
+            "min_": theta_scaler.min_.tolist(),
+            "logdet_dphysical_dscaled": theta_scaler.logdet_physical_per_scaled(),
+        }
     manifest = {
         "config": {
             "args": vars(args) | {
@@ -913,6 +1113,15 @@ def main() -> None:
             "theta_prior_high": THETA_PRIOR_HIGH.tolist(),
             "theta_to_eta_expressions": list(args.theta_to_eta),
             "eta_to_theta_expressions": list(args.eta_to_theta),
+            "scale_theta": args.scale_theta,
+            "training_data_scaled": args.training_data_scaled,
+            "theta_scaler": scaler_manifest,
+            "theta_training_space": (
+                f"MinMaxScaler(feature_range=({args.scaler_feature_range[0]}, "
+                f"{args.scaler_feature_range[1]}))"
+                if args.scale_theta
+                else "physical theta"
+            ),
         },
         "outputs": {
             "metrics_csv": "metrics.csv",
@@ -936,6 +1145,13 @@ def main() -> None:
             "Coverage outputs are saved only when --run-coverage is set.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(beta, gamma))) for --fom-nsims, default 1000.",
+            (
+                "When --scale-theta is set, theta is rescaled to the scaler's "
+                "feature_range before MAF training; the eta expressions act on "
+                "scaled theta; logdet_dtheta_deta_correction for method=theta is "
+                "the constant scaler Jacobian, and for method=eta it is the full "
+                "log|det(d theta_physical / d eta)| via finite differences."
+            ),
         ],
     }
     with open(args.out_dir / "manifest.json", "w", encoding="utf-8") as f:

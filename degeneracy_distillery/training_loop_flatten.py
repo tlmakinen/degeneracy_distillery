@@ -642,7 +642,8 @@ def fit_flattening(F_network_ensemble, θs,
                    lr_schedule_phase2: Optional[Any] = None,
                    lr_schedule_finetune: Optional[Any] = None,
                    update_pbar_every: int = 10,
-                   return_model: bool = False):
+                   return_model: bool = False,
+                   save_flatten_model_pickle: bool = True):
     """
     Fits a flattening network to learn a mapping η = f(θ;w), based on matching 
     the neural-Fisher matrix with the identity. The function accepts F_fishnets and 
@@ -780,6 +781,10 @@ def fit_flattening(F_network_ensemble, θs,
         return_model: If True, also return the Flax ``nn.Module`` instance used for training
             (``custom_MLP``, ``WhitenedMLP``, ``RealNVPWrapper``, etc., depending on flags).
             Default False preserves the original 3-tuple return type.
+        save_flatten_model_pickle: If ``return_model`` is True and this is True (default), write
+            ``{output_prefix}_flatten_model.pkl`` (same stem as the ``.npz``, including any ``_scaled`` suffix)
+            via ``cloudpickle`` with keys ``flatten_model``, ``w``, ``ensemble_ws``, ``output_dict``.
+            Set False to skip saving (only return the module in memory). Ignored when ``return_model`` is False.
     
     Returns:
         w: Trained network parameters
@@ -792,6 +797,7 @@ def fit_flattening(F_network_ensemble, θs,
                      - 'eta_ensemble': Coordinate predictions per ensemble member
                      - Additional metrics and metadata
         When ``return_model`` is True, returns a 4-tuple with the Flax module as the final element.
+        Unless ``save_flatten_model_pickle`` is False, a pickle bundle is also written next to the ``.npz``.
     """
     # ---------------------- CONSTANTS & SETUP -----------------------
     n_params = θs.shape[-1]
@@ -1483,6 +1489,19 @@ def fit_flattening(F_network_ensemble, θs,
 
     print("EXPERIMENT COMPLETED & RESULTS SAVED TO:", outname + ".npz")
     if return_model:
+        if save_flatten_model_pickle:
+            import cloudpickle as pickle
+
+            flatten_model_path = outname + "_flatten_model.pkl"
+            flatten_model_file = {
+                "flatten_model": model,
+                "w": w,
+                "ensemble_ws": ensemble_ws,
+                "output_dict": output_dict,
+            }
+            with open(flatten_model_path, "wb") as f:
+                pickle.dump(flatten_model_file, f)
+            print("Saved flattener module + weights to:", flatten_model_path)
         return w, ensemble_ws, output_dict, model
     return w, ensemble_ws, output_dict
 

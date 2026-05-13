@@ -119,6 +119,140 @@ _TIME_PARAM_NAME = get_time_limit_param_name()
 
 
 # =============================================================================
+# PARAMETER SCALING UTILITIES
+# =============================================================================
+#
+# Pre-fishnet MinMax scaling of theta is the recommended convention: it
+# stabilises Fisher conditioning, flow training, and SR constants when the
+# physical parameters span very different magnitudes.  These helpers fit a
+# scaler before training and convert the SR-discovered expressions back to
+# physical-theta expressions afterwards, in one line each.
+#
+# Typical workflow:
+#
+#     # before fishnets
+#     scaler = fit_theta_scaler(theta_train, feature_range=(1.0, 2.0))
+#     theta_train_s = scaler.transform(theta_train)
+#     theta_test_s  = scaler.transform(theta_test)
+#     # ... fishnets / flattening / load_and_process_data_v2 / fit_and_analyze_sr ...
+#     # SR runs in scaled coordinates and returns expressions in (X1, X2, ...)
+#     # Optional `+sr_offset` (e.g. `+1`) is what was passed to PyOperon.
+#
+#     # after SR
+#     physical_exprs = expressions_to_physical(
+#         pruned_exprs, scaler, sr_offset=1.0,
+#         theta_names=("beta", "gamma", "I0_over_10"),
+#     )
+# =============================================================================
+
+def fit_theta_scaler(
+    theta: np.ndarray,
+    feature_range: Tuple[float, float] = (1.0, 2.0),
+):
+    """Fit a ``sklearn.preprocessing.MinMaxScaler`` on physical theta.
+
+    Parameters
+    ----------
+    theta : array of shape (n_samples, n_params)
+        Physical-theta training samples.  Fit only on training data and
+        reuse the returned scaler on test / SR pools.
+    feature_range : (low, high), default (1.0, 2.0)
+        Target box for the scaled theta.  ``(1.0, 2.0)`` keeps every
+        component strictly positive, of order unity, and avoids the zero
+        branch that confuses log-friendly SR symbol sets.
+
+    Returns
+    -------
+    sklearn.preprocessing.MinMaxScaler
+        A fitted scaler exposing the affine map
+        ``theta_scaled = scaler.scale_ * theta + scaler.min_``.
+    """
+    from sklearn.preprocessing import MinMaxScaler  # local import to keep top-level deps light
+    scaler = MinMaxScaler(feature_range=feature_range)
+    scaler.fit(np.asarray(theta))
+    return scaler
+
+
+def expressions_to_physical(
+    exprs,
+    scaler,
+    sr_offset: float = 0.0,
+    theta_names: Optional[Tuple[str, ...]] = None,
+    simplify: bool = True,
+    decimal: Optional[int] = None,
+):
+    """Convert SR expressions in scaled-theta coordinates back to physical theta.
+
+    Symbolic regression typically runs on ``X = scaler.transform(theta) + sr_offset``
+    (the optional ``+1`` shift used in several reference notebooks keeps PyOperon
+    inputs strictly positive after Procrustes alignment).  The returned sympy
+    expressions are then in the variables ``X1, X2, ...``.  This helper
+    substitutes
+
+        X_i  ->  scaler.scale_[i] * theta_i + scaler.min_[i] + sr_offset
+
+    and returns expressions in the physical theta symbols, ready for printing,
+    further simplification, or evaluation.
+
+    Parameters
+    ----------
+    exprs : Sequence[str | sympy.Expr]
+        SR-discovered coordinate expressions, one per learned eta component.
+    scaler : object with ``scale_`` and ``min_`` attributes
+        A fitted scaler (e.g. from :func:`fit_theta_scaler`).
+    sr_offset : float, default 0.0
+        Constant shift that was added to ``X`` before SR (commonly ``1.0``).
+    theta_names : tuple of str, optional
+        Symbol names for the physical thetas.  Default: ``("theta1", ..., "thetaN")``.
+    simplify : bool, default True
+        Run ``sympy.simplify`` on each substituted expression.
+    decimal : int, optional
+        If given, round numerical coefficients to this many decimals via
+        ``sympy.nsimplify`` after substitution.
+
+    Returns
+    -------
+    list of sympy.Expr
+        Same length as ``exprs``, each in the symbols named by ``theta_names``.
+    """
+    a = np.asarray(scaler.scale_, dtype=float)
+    b = np.asarray(scaler.min_, dtype=float)
+    n = len(a)
+    if theta_names is None:
+        theta_names = tuple(f"theta{i+1}" for i in range(n))
+    if len(theta_names) != n:
+        raise ValueError(
+            f"theta_names has length {len(theta_names)} but scaler implies n={n}"
+        )
+
+    X_syms = sympy.symbols(" ".join(f"X{i+1}" for i in range(n)))
+    if isinstance(X_syms, sympy.Symbol):
+        X_syms = (X_syms,)
+    th_syms = sympy.symbols(" ".join(theta_names))
+    if isinstance(th_syms, sympy.Symbol):
+        th_syms = (th_syms,)
+
+    subs = {
+        X_syms[i]: float(a[i]) * th_syms[i] + float(b[i]) + float(sr_offset)
+        for i in range(n)
+    }
+
+    out = []
+    for e in exprs:
+        ex = sympy.sympify(e) if not isinstance(e, sympy.Expr) else e
+        ex = ex.subs(subs)
+        if simplify:
+            ex = sympy.simplify(ex)
+        if decimal is not None:
+            ex = ex.xreplace({
+                num: round(float(num), int(decimal))
+                for num in ex.atoms(sympy.Float)
+            })
+        out.append(ex)
+    return out
+
+
+# =============================================================================
 # SAFE LAMBDIFY HELPER
 # =============================================================================
 
@@ -170,6 +304,38 @@ def promote_jacrev_output(y):
     """
     y = jnp.asarray(y)
     return jnp.asarray(y, dtype=jnp.promote_types(jnp.float32, y.dtype))
+
+
+def vmapped_jacobian_wrt_X(myeq, X: jnp.ndarray) -> jnp.ndarray:
+    """Jacobian :math:`\\partial y / \\partial \\theta` with shape ``(n_samples, n_params)``.
+
+    For scalar ``myeq(θ₁,…,θₚ)`` evaluated along rows of ``X`` we use a single
+    vector argument ``z ∈ ℝᵖ`` and ``jax.jacrev`` on ``z ↦ myeq(*split(z))``.
+    This avoids JAX-version differences in how ``jacrev(..., argnums=(0,…,p-1))``
+    combined with ``vmap`` returns either a tuple of partials, a stacked array,
+    or other layouts — which previously led to accidental transposes and bogus
+    flattening scores.
+    """
+    X = jnp.asarray(X)
+    _, n_params = X.shape
+
+    def one_row(z: jnp.ndarray) -> jnp.ndarray:
+        def f(t: jnp.ndarray) -> jnp.ndarray:
+            t_parts = jnp.split(t.reshape(-1), int(n_params))
+            t_parts = tuple(p.reshape(()) for p in t_parts)
+            return myeq(*t_parts)
+
+        out = jax.jacrev(f)(z.reshape(-1))
+        return jnp.ravel(out)
+
+    return jax.vmap(one_row)(X)
+
+
+def print_sr_utils_location() -> None:
+    """Print the loaded ``sr_utils`` path (use in notebooks to confirm editable installs)."""
+    import degeneracy_distillery.sr_utils as _m
+
+    print(_m.__file__)
 
 
 # =============================================================================
@@ -1246,10 +1412,7 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
     def frob_loss(p):
         def get_jac_row(p):
             myeq = lambda *args: promote_jacrev_output(eq_jax(*p, *args))
-            # Compute Jacobian for this component
-            yjac = jax.jacrev(myeq, argnums=list(range(0, X.shape[1])))
-            Jpred = jnp.array(jax.vmap(yjac)(*X.T)).T
-            return Jpred
+            return vmapped_jacobian_wrt_X(myeq, jnp.asarray(X))
 
         jac_row = get_jac_row(pars)
         

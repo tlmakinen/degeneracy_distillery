@@ -260,6 +260,47 @@ def parse_args() -> argparse.Namespace:
         help="Moving-average window for selecting the best validation epoch; set to 1 to disable smoothing.",
     )
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--adaptive-batch-size",
+        action="store_true",
+        help=(
+            "Scale the MAF training batch size with nsims so that the number "
+            "of gradient steps per epoch is roughly constant across the "
+            "sweep. The effective batch size is "
+            "clamp(n_train // --target-steps-per-epoch, "
+            "--adaptive-batch-min, --batch-size). Without this flag the "
+            "legacy fixed --batch-size is used unchanged for every nsims."
+        ),
+    )
+    parser.add_argument(
+        "--target-steps-per-epoch",
+        type=int,
+        default=20,
+        help=(
+            "Target gradient steps per epoch when --adaptive-batch-size is "
+            "set (default: 20). Used to derive an nsims-dependent batch size."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-batch-min",
+        type=int,
+        default=8,
+        help=(
+            "Lower bound on the effective batch size when "
+            "--adaptive-batch-size is set (default: 8)."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-batch-val-fraction",
+        type=float,
+        default=0.1,
+        help=(
+            "Assumed validation split fraction when computing n_train for "
+            "--adaptive-batch-size (default: 0.1, matches lampe's default). "
+            "Only affects the adaptive batch-size calculation; the actual "
+            "split is governed by the lampe backend."
+        ),
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--repeats-maf", type=int, default=2)
     parser.add_argument("--hidden-features", type=int, default=50)
@@ -507,11 +548,55 @@ def inverse_logdet_jacobian(
     return float(np.mean(logdets))
 
 
+def resolve_batch_size(
+    nsims: int,
+    target_steps_per_epoch: int,
+    min_bs: int,
+    max_bs: int,
+    val_fraction: float = 0.1,
+) -> int:
+    """Pick a batch size that keeps gradient steps per epoch ~constant.
+
+    The effective training-set size is estimated as ``n_train = (1 - val_fraction) * nsims``
+    (matching lampe's default split). The batch size is then
+    ``clamp(n_train // target_steps_per_epoch, min_bs, min(max_bs, n_train))``.
+    """
+    if nsims <= 0:
+        raise ValueError(f"nsims must be positive; got {nsims}.")
+    if not (0.0 <= val_fraction < 1.0):
+        raise ValueError(
+            f"val_fraction must be in [0, 1); got {val_fraction}."
+        )
+    if target_steps_per_epoch <= 0:
+        raise ValueError(
+            f"target_steps_per_epoch must be positive; got {target_steps_per_epoch}."
+        )
+    n_train = max(1, int((1.0 - val_fraction) * nsims))
+    raw = n_train // target_steps_per_epoch
+    bs = max(min_bs, raw)
+    bs = min(bs, max_bs, n_train)
+    return int(bs)
+
+
+def effective_batch_size_for(nsims: int, args: argparse.Namespace) -> int:
+    """Return the batch size used for a given nsims under the current --args."""
+    if not getattr(args, "adaptive_batch_size", False):
+        return int(args.batch_size)
+    return resolve_batch_size(
+        nsims=nsims,
+        target_steps_per_epoch=args.target_steps_per_epoch,
+        min_bs=args.adaptive_batch_min,
+        max_bs=args.batch_size,
+        val_fraction=args.adaptive_batch_val_fraction,
+    )
+
+
 def make_runner(
     low: np.ndarray,
     high: np.ndarray,
     args: argparse.Namespace,
     device: str,
+    batch_size_override: int | None = None,
 ) -> InferenceRunner:
     prior = ili.utils.Uniform(low=low.tolist(), high=high.tolist(), device=device)
     nets = [
@@ -523,8 +608,11 @@ def make_runner(
             repeats=args.repeats_maf,
         )
     ]
+    effective_batch_size = (
+        int(batch_size_override) if batch_size_override is not None else int(args.batch_size)
+    )
     train_args = {
-        "training_batch_size": args.batch_size,
+        "training_batch_size": effective_batch_size,
         "learning_rate": args.learning_rate,
         "max_num_epochs": args.epochs,
     }
@@ -548,6 +636,7 @@ def train_posterior(
     args: argparse.Namespace,
     device: str,
     seed: int,
+    batch_size_override: int | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     np.random.seed(seed)
     random.seed(seed)
@@ -555,7 +644,9 @@ def train_posterior(
     if device == "cuda":
         torch.cuda.manual_seed_all(seed)
 
-    runner = make_runner(prior_low, prior_high, args, device)
+    runner = make_runner(
+        prior_low, prior_high, args, device, batch_size_override=batch_size_override
+    )
     loader = NumpyLoader(x=data.astype(np.float32), theta=params.astype(np.float32))
     posterior, summaries = runner(loader=loader)
     return posterior, summaries
@@ -596,6 +687,7 @@ def summarize_curves(
     method: str,
     logdet_correction: float,
     validation_smoothing_window: int,
+    batch_size_used: int,
 ) -> list[dict[str, Any]]:
     rows = []
     for member, summary in enumerate(summaries):
@@ -618,6 +710,7 @@ def summarize_curves(
                 "final_validation_log_prob_raw": float(val[-1]),
                 "final_training_log_prob_raw": float(train[-1]),
                 "logdet_dtheta_deta_correction": logdet_correction,
+                "batch_size_used": int(batch_size_used),
             }
         )
     return rows
@@ -919,10 +1012,24 @@ def main() -> None:
         train_theta_for_maf = theta_pool_for_maf[:nsims]
         train_data = data_pool[:nsims]
 
+        effective_batch_size = effective_batch_size_for(nsims, args)
+        if args.adaptive_batch_size:
+            print(
+                f"\nAdaptive batch size for nsims={nsims}: "
+                f"{effective_batch_size} "
+                f"(target_steps_per_epoch={args.target_steps_per_epoch}, "
+                f"min={args.adaptive_batch_min}, "
+                f"cap={args.batch_size}, "
+                f"val_fraction={args.adaptive_batch_val_fraction})"
+            )
+
         for method in ("theta", "eta"):
             start = time.time()
             run_seed = args.seed + nsims * 10 + (0 if method == "theta" else 1)
-            print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
+            print(
+                f"\nTraining method={method}, nsims={nsims}, seed={run_seed}, "
+                f"batch_size={effective_batch_size}"
+            )
 
             if method == "theta":
                 train_params = train_theta_for_maf
@@ -948,6 +1055,7 @@ def main() -> None:
                 args,
                 device,
                 seed=run_seed,
+                batch_size_override=effective_batch_size,
             )
 
             metrics_rows.extend(
@@ -957,6 +1065,7 @@ def main() -> None:
                     method=method,
                     logdet_correction=logdet_correction,
                     validation_smoothing_window=args.validation_smoothing_window,
+                    batch_size_used=effective_batch_size,
                 )
             )
 
@@ -1071,6 +1180,7 @@ def main() -> None:
                     ),
                     best_validation_log_prob_raw_mean=("best_validation_log_prob_raw", "mean"),
                     best_validation_log_prob_raw_std=("best_validation_log_prob_raw", "std"),
+                    batch_size_used=("batch_size_used", "first"),
                     n_ensemble_members=("ensemble_member", "count"),
                 )
             )
@@ -1122,6 +1232,10 @@ def main() -> None:
                 if args.scale_theta
                 else "physical theta"
             ),
+            "effective_batch_sizes": {
+                str(int(n)): int(effective_batch_size_for(int(n), args))
+                for n in args.nsims
+            },
         },
         "outputs": {
             "metrics_csv": "metrics.csv",
@@ -1145,6 +1259,11 @@ def main() -> None:
             "Coverage outputs are saved only when --run-coverage is set.",
             "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
             "FoM is 1/sqrt(det(cov(beta, gamma))) for --fom-nsims, default 1000.",
+            (
+                "batch_size_used is the actual training_batch_size used by lampe "
+                "for each run. When --adaptive-batch-size is set it varies with "
+                "nsims; otherwise it equals --batch-size for every run."
+            ),
             (
                 "When --scale-theta is set, theta is rescaled to the scaler's "
                 "feature_range before MAF training; the eta expressions act on "

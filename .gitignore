@@ -50,6 +50,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+*.egg-info/
 
 # IDEs
 .vscode/

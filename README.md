@@ -1,5 +1,9 @@
 # Degeneracy Distillery
 
+[![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yourusername/degeneracy_distillery/blob/main/notebooks/example.ipynb)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A research package for analyzing degeneracy in neural networks and performing symbolic regression analysis using network flattening techniques.
 
 
@@ -44,7 +48,7 @@ For detailed installation instructions, see [INSTALL.md](INSTALL.md).
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/degeneracy_distillery.git
+git clone https://github.com/tlmakinen/degeneracy_distillery.git
 cd degeneracy_distillery
 
 # Create conda environment (use minimal for better compatibility)

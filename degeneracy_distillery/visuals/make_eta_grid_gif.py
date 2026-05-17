@@ -401,6 +401,7 @@ def make_eta_grid_gif(
     show_loss: bool = False,
     loss_label: str = r"\|Q-I\|_F",
     loss_fmt: str = ".2f",
+    show_align_blurb: bool = True,
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render a 2-panel contour gif of ``eta_1`` and ``eta_2`` vs
     ``(theta_1, theta_2)`` evolving over training.
@@ -479,6 +480,13 @@ def make_eta_grid_gif(
         For very large / very small values the function falls back to
         scientific notation automatically; this argument controls the
         format in the normal-magnitude regime.
+    show_align_blurb : bool, default True
+        If True and ``align_mode != "none"``, include the alignment
+        scheme inline in the super-title (e.g. ``"learned coordinates
+        [linear residual]  |  epoch 1500"``). Set to False for a
+        minimal title — useful for README / promo gifs where the
+        alignment scheme is documented in surrounding prose rather
+        than on the frame itself.
 
     Returns
     -------
@@ -703,7 +711,9 @@ def make_eta_grid_gif(
     cs1 = _draw(axes[1], 1, 0)
     cbar0 = plt.colorbar(cs0, ax=axes[0])
     cbar1 = plt.colorbar(cs1, ax=axes[1])
-    _suptitle_prefix = title_prefix + (f"  [{_align_blurb}]" if _align_blurb else "")
+    _suptitle_prefix = title_prefix + (
+        f"  [{_align_blurb}]" if (_align_blurb and show_align_blurb) else ""
+    )
     suptitle = fig.suptitle(_title_text(0))
 
     def update(i):
@@ -833,6 +843,18 @@ def _build_argparser() -> argparse.ArgumentParser:
             "'.2e'). Default '.2f'."
         ),
     )
+    p.add_argument(
+        "--no-align-blurb",
+        dest="show_align_blurb",
+        action="store_false",
+        help=(
+            "Suppress the alignment-scheme label (e.g. "
+            "'[nonlinearity_rotation]') in the super-title. Useful "
+            "for minimal README / promo gifs. Default: show the "
+            "blurb when an alignment is active."
+        ),
+    )
+    p.set_defaults(show_align_blurb=True)
     return p
 
 
@@ -862,6 +884,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         align_reference_frame=args.align_reference_frame,
         show_loss=args.show_loss,
         loss_fmt=args.loss_fmt,
+        show_align_blurb=args.show_align_blurb,
     )
 
 

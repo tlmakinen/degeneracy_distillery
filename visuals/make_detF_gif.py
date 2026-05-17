@@ -214,6 +214,7 @@ def make_gif(
     writer: str = "pillow",
     data_out_path: Optional[str] = "auto",
     save_gif: bool = True,
+    burn_in: int = 0,
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render the evolution of ensemble-averaged log10(det F) as a .gif.
 
@@ -251,6 +252,11 @@ def make_gif(
     save_gif : bool
         If False, skip rendering the gif entirely (useful when you only
         want the data dump, e.g. to ship locally for replotting).
+    burn_in : int, default 0
+        Render-time burn-in: drop any frame whose epoch number is
+        strictly less than this value before computing percentile
+        colour limits, writing the ``.npz``, and animating. Use this
+        to chop early epochs without re-running training.
 
     Returns
     -------
@@ -258,6 +264,22 @@ def make_gif(
     """
     meta, theta_val, per_model = load_snapshots(snapshots_dir)
     epochs, det_frames = build_frames(meta, per_model)
+
+    if burn_in and burn_in > 0:
+        keep = np.asarray([e >= burn_in for e in epochs])
+        n_dropped = int((~keep).sum())
+        if not keep.any():
+            raise RuntimeError(
+                f"burn_in={burn_in} removed every frame; "
+                f"max epoch was {epochs[-1] if epochs else 0}."
+            )
+        epochs = [e for e, k in zip(epochs, keep) if k]
+        det_frames = det_frames[keep]
+        print(
+            f"render-time burn_in={burn_in}: dropped {n_dropped} early "
+            f"frame(s); {len(epochs)} frame(s) remaining "
+            f"(first kept epoch: {epochs[0]})."
+        )
 
     if param_names is None:
         param_names = meta.get("param_names", ["theta_1", "theta_2"])
@@ -412,6 +434,16 @@ def _build_argparser() -> argparse.ArgumentParser:
             "to ship locally for replotting."
         ),
     )
+    p.add_argument(
+        "--burn-in",
+        type=int,
+        default=0,
+        help=(
+            "Render-time burn-in: drop frames with epoch < this value "
+            "before computing colour limits and animating. Default 0 "
+            "(keep all)."
+        ),
+    )
     return p
 
 
@@ -436,6 +468,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         writer=args.writer,
         data_out_path=data_out,
         save_gif=not args.no_gif,
+        burn_in=args.burn_in,
     )
 
 

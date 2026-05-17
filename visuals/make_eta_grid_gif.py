@@ -619,19 +619,17 @@ def make_eta_grid_gif(
             return s
         return rf"${s}$"
 
-    # Panel titles reflect the alignment state so the viewer knows
-    # what the contour values represent.
+    # Panel titles are always the plain learned-coordinate labels;
+    # the alignment scheme is communicated via the super-title blurb
+    # below, not by changing the per-panel titles.
+    _panel_label = lambda k: rf"$\eta_{k + 1}$"
     if align_mode == "linear_residual":
-        _panel_label = lambda k: rf"$\eta_{k + 1} - (A\theta + b)_{k + 1}$"
         _align_blurb = "linear residual"
     elif align_mode == "nonlinearity_rotation":
-        _panel_label = lambda k: rf"$(R\,\eta)_{k + 1}$"
         _align_blurb = "nonlinearity rotation"
     elif align_mode == "both":
-        _panel_label = lambda k: rf"$(R\,(\eta - A\theta - b))_{k + 1}$"
         _align_blurb = "residual + rotation"
     else:
-        _panel_label = lambda k: rf"$\eta_{k + 1}$"
         _align_blurb = None
 
     def _draw(ax, k, frame_idx):

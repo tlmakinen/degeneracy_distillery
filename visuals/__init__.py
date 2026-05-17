@@ -81,6 +81,7 @@ from .make_detF_gif import (
     save_timeseries_npz,
 )
 from .make_eta_grid_gif import (
+    align_eta_stack,
     load_eta_snapshots,
     make_eta_grid_gif,
     save_eta_timeseries_npz,
@@ -173,6 +174,7 @@ __all__ = [
     "make_eta_grid_gif",
     "save_eta_timeseries_npz",
     "load_eta_snapshots",
+    "align_eta_stack",
     # Shared
     "display_gif",
 ]

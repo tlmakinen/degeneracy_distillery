@@ -237,6 +237,20 @@ axis styling, etc.
 | `min_x`, `max_x`   | `(n_params,)`                               | training-range bounds (for axis limits / extras)              |
 | `snapshots_dir`    | str                                         | absolute path the data was built from (provenance)            |
 
+When `make_eta_grid_gif(..., align_mode=...)` is non-default, the `.npz`
+also carries the alignment metadata so a local replotter can faithfully
+reproduce the gif:
+
+| key                            | shape                            | meaning                                                                 |
+| ------------------------------ | -------------------------------- | ----------------------------------------------------------------------- |
+| `align_mode`                   | str                              | `"linear_residual" / "nonlinearity_rotation" / "both"`                  |
+| `align_reference_frame_index`  | int                              | which frame of `eta_stack` defined the transform (default last)         |
+| `affine_A`                     | `(n_params, 2)`                  | best affine fit `eta ≈ A @ theta + b` on the reference frame            |
+| `affine_b`                     | `(n_params,)`                    | affine offset                                                           |
+| `nonlin_R`                     | `(n_params, n_params)`           | orthogonal rotation that concentrates Jacobian variance up-front        |
+| `nonlin_sigma`                 | `(n_params,)`                    | descending nonlinearity-energy spectrum (singular values of ΔJ)         |
+| `eta_stack_raw`, `eta_grid_2d_raw` | same as `eta_stack` / `eta_grid_2d` | un-aligned snapshots, so you can switch alignment modes locally |
+
 Minimal local replotting examples:
 
 ```python
@@ -289,3 +303,44 @@ CLI flags controlling the data dump (both gif scripts):
 * `--no-data` — skip the data dump (gif only).
 * `--no-gif` — skip the gif (useful on a server: download just the
   small `.npz`).
+
+## Popping the nonlinear part of eta out (flattener gif only)
+
+`make_eta_grid_gif` has an `align_mode` argument that transforms `eta`
+so the nonlinear component dominates the contours. The transform is
+computed once on `align_reference_frame` (default last) and applied
+identically to every frame:
+
+| `align_mode`              | what it does                                                                                              | panel label                            |
+| ------------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `"none"` *(default)*      | raw `eta`                                                                                                 | `η_k`                                  |
+| `"linear_residual"`       | subtract best affine fit `eta ≈ A @ theta + b` (computed on the reference frame)                          | `η_k − (Aθ + b)_k`                    |
+| `"nonlinearity_rotation"` | apply orthogonal rotation `R` that concentrates Jacobian variance into the leading η-axes                | `(R η)_k`                              |
+| `"both"`                  | linear residual, then rotation                                                                            | `(R(η − Aθ − b))_k`                    |
+
+CLI: `--align-mode {none,linear_residual,nonlinearity_rotation,both}`
+and `--align-reference-frame <int>` (default `-1`).
+
+For most quick visualisations `linear_residual` is the most directly
+compelling: it strips the trivial linear gradient and leaves the
+network's learned curvature. `nonlinearity_rotation` is the
+algorithm from `degeneracy_distillery.align_coords.nonlinearity_rotation`,
+vendored JAX-free into `make_eta_grid_gif`. `both` combines them.
+
+Same transform is also exposed as a function so you can apply it
+to an already-saved `.npz` locally:
+
+```python
+from visuals import align_eta_stack
+import numpy as np
+
+d = np.load("eta_grid.npz", allow_pickle=False)
+eta_aligned, info = align_eta_stack(
+    d["eta_stack_raw"] if "eta_stack_raw" in d.files else d["eta_stack"],
+    X_grid=d["X_grid"],
+    mode="linear_residual",
+    grid_num_pts=int(d["xs_mesh"].shape[0]),
+    xs_axis=d["xs_mesh"][0, :],
+    ys_axis=d["ys_mesh"][:, 0],
+)
+```

@@ -601,6 +601,27 @@ def make_eta_grid_gif(
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
 
+    # Control chars almost certainly produced by an unintended Python
+    # backslash escape inside a non-raw string literal. ``"$\theta_1$"``
+    # written without an ``r`` prefix has ``\t`` replaced by a TAB
+    # character at parse time; matplotlib then renders ``$<TAB>heta_1$``
+    # as the visible ``heta_1``. Reversing the substitution restores
+    # the intended TeX.
+    _ESCAPE_UNDO = {
+        "\a": r"\a",   # alpha / arrow / ...
+        "\b": r"\b",   # beta / bullet / ...
+        "\f": r"\f",   # frac / ...
+        "\n": r"\n",   # nu / not / ...
+        "\r": r"\r",   # rho / rangle / ...
+        "\t": r"\t",   # theta / tau / times / ...
+        "\v": r"\v",   # vec / varphi / ...
+    }
+
+    def _undo_string_escapes(s: str) -> str:
+        if not any(ch in s for ch in _ESCAPE_UNDO):
+            return s
+        return "".join(_ESCAPE_UNDO.get(ch, ch) for ch in s)
+
     def _mathwrap(label: str) -> str:
         """Return a matplotlib-safe mathtext label.
 
@@ -608,13 +629,17 @@ def make_eta_grid_gif(
         - ``"theta_1"`` (plain text)            → ``"$theta_1$"``
         - ``r"\theta_1"`` (TeX, no delimiters)  → ``"$\theta_1$"``
         - ``r"$\theta_1$"`` (already wrapped)   → unchanged
+        - ``"$\theta_1$"`` (non-raw; ``\t``→TAB) → recovered as
+          ``"$\theta_1$"`` (the TAB is undone before wrapping).
 
         The previous heuristic (``"\\" not in s``) failed because Python
         string literals like ``"$\theta_1$"`` (non-raw) interpret ``\t``
-        as a tab, so the check picks the wrong branch and double-wraps
-        ``$ ... $`` into a broken ``$$ ... $$``.
+        as a tab, so the check picked the wrong branch and double-wrapped
+        ``$ ... $`` into a broken ``$$ ... $$``. Even after stripping the
+        outer wrapping, the TAB character itself still corrupts the
+        rendered label, so we undo the escapes first.
         """
-        s = str(label)
+        s = _undo_string_escapes(str(label))
         if len(s) >= 2 and s.startswith("$") and s.endswith("$"):
             return s
         return rf"${s}$"

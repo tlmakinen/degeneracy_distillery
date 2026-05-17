@@ -277,6 +277,11 @@ def load_eta_snapshots(snapshots_dir: str):
         Sorted snapshot epoch numbers.
     eta_stack : (n_frames, grid_num_pts**2, n_params) array
         Per-epoch ``eta`` values evaluated on the grid.
+    frob_scores : (n_frames,) np.ndarray of float
+        Per-epoch validation flatness score
+        ``mean_b ||Q_b - I||_F``. ``np.nan`` for frames that did not
+        save a score (older snapshots written before the
+        ``frob_score`` field existed).
     """
     with open(os.path.join(snapshots_dir, "metadata.json")) as f:
         meta = json.load(f)
@@ -287,10 +292,18 @@ def load_eta_snapshots(snapshots_dir: str):
     if not pairs:
         raise RuntimeError(f"no epoch_*.npz snapshots found under {snapshots_dir}")
     epochs = [p[0] for p in pairs]
-    eta_stack = np.stack(
-        [np.load(p[1])["eta_grid"] for p in pairs], axis=0
-    )  # (n_frames, num_pts**2, n_params)
-    return meta, grid, epochs, eta_stack
+    eta_stack_list: List[np.ndarray] = []
+    frob_scores_list: List[float] = []
+    for _, p in pairs:
+        d = np.load(p)
+        eta_stack_list.append(d["eta_grid"])
+        if "frob_score" in d.files:
+            frob_scores_list.append(float(d["frob_score"]))
+        else:
+            frob_scores_list.append(float("nan"))
+    eta_stack = np.stack(eta_stack_list, axis=0)
+    frob_scores = np.asarray(frob_scores_list, dtype=np.float64)
+    return meta, grid, epochs, eta_stack, frob_scores
 
 
 # ----------------------------------------------------------------------------
@@ -308,6 +321,7 @@ def save_eta_timeseries_npz(
     snapshots_dir: str,
     align_info: Optional[Dict[str, Any]] = None,
     eta_stack_raw: Optional[np.ndarray] = None,
+    frob_scores: Optional[np.ndarray] = None,
 ) -> str:
     """Save a self-contained ``.npz`` for local replotting.
 
@@ -357,6 +371,8 @@ def save_eta_timeseries_npz(
         payload["eta_grid_2d_raw"] = np.asarray(eta_stack_raw).reshape(
             -1, num_pts, num_pts, n_p
         )
+    if frob_scores is not None:
+        payload["frob_scores"] = np.asarray(frob_scores, dtype=np.float64)
     np.savez_compressed(out_path, **payload)
     return out_path
 
@@ -382,6 +398,9 @@ def make_eta_grid_gif(
     align_mode: AlignMode = "none",
     align_reference_frame: int = -1,
     keep_raw_in_npz: bool = True,
+    show_loss: bool = False,
+    loss_label: str = r"\|Q-I\|_F",
+    loss_fmt: str = ".2f",
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render a 2-panel contour gif of ``eta_1`` and ``eta_2`` vs
     ``(theta_1, theta_2)`` evolving over training.
@@ -441,12 +460,31 @@ def make_eta_grid_gif(
         ``eta_stack_raw`` / ``eta_grid_2d_raw`` in the portable
         ``.npz`` so a local replotter can switch alignment modes
         without re-running anything.
+    show_loss : bool, default False
+        If True, append the validation flatness Frobenius score
+        (``mean_b ||Q_b - I||_F``) to the per-frame super-title,
+        e.g. ``"epoch 1500  |  ||Q-I||_F = 0.43"``. Scores are
+        read from ``frob_score`` in each ``epoch_*.npz`` (and
+        ``saved_frob_scores`` in ``metadata.json``); they are written
+        by the updated
+        :func:`visuals.training_loop_flatten_snapshots.fit_flattening_with_snapshots`.
+        Snapshots produced before that change silently fall back to
+        showing only the epoch number.
+    loss_label : str, default :code:`r"\\|Q-I\\|_F"`
+        Math-text label used in front of the numeric score. Override
+        to use a different name (e.g. :code:`r"\\mathcal{L}_\\mathrm{val}"`).
+    loss_fmt : str, default ``".2f"``
+        Python format spec for the numeric part of the loss readout
+        (e.g. ``".1f"`` for one decimal, ``".2e"`` for scientific).
+        For very large / very small values the function falls back to
+        scientific notation automatically; this argument controls the
+        format in the normal-magnitude regime.
 
     Returns
     -------
     (gif_path_or_None, epochs, data_path_or_None)
     """
-    meta, grid, epochs, eta_stack = load_eta_snapshots(snapshots_dir)
+    meta, grid, epochs, eta_stack, frob_scores = load_eta_snapshots(snapshots_dir)
     if param_names is None:
         param_names = meta.get("param_names", ["theta_1", "theta_2"])
     if len(param_names) < 2:
@@ -459,6 +497,7 @@ def make_eta_grid_gif(
         n_dropped = int((~keep).sum())
         epochs = [e for e, k in zip(epochs, keep) if k]
         eta_stack = eta_stack[keep]
+        frob_scores = frob_scores[keep]
         if not epochs:
             raise RuntimeError(
                 f"burn_in={burn_in} removed every snapshot; "
@@ -547,6 +586,7 @@ def make_eta_grid_gif(
             snapshots_dir=snapshots_dir,
             align_info=align_info,
             eta_stack_raw=eta_stack_raw if (align_info is not None and keep_raw_in_npz) else None,
+            frob_scores=frob_scores,
         )
         print(
             f"saved eta timeseries to {saved_data_path} "
@@ -609,12 +649,39 @@ def make_eta_grid_gif(
         ax.set_title(_panel_label(k))
         return cs
 
+    def _format_score(val: float) -> str:
+        """Render the per-frame Frobenius score for the super-title."""
+        if not np.isfinite(val):
+            return ""
+        a = abs(val)
+        if a != 0 and (a >= 1e3 or a < 1e-2):
+            return f"${loss_label} = {val:.2e}$"
+        return f"${loss_label} = {format(val, loss_fmt)}$"
+
+    _scores_available = show_loss and np.any(np.isfinite(frob_scores))
+    if show_loss and not _scores_available:
+        print(
+            "show_loss=True but no `frob_score` fields were found in the "
+            "snapshots; rerun training with the updated "
+            "`fit_flattening_with_snapshots` to capture the validation "
+            "Frobenius score per snapshot. Titles will fall back to "
+            "epoch-only."
+        )
+
+    def _title_text(i: int) -> str:
+        base = f"{_suptitle_prefix}  |  epoch {epochs[i]}"
+        if _scores_available:
+            score_str = _format_score(float(frob_scores[i]))
+            if score_str:
+                base = base + "  |  " + score_str
+        return base
+
     cs0 = _draw(axes[0], 0, 0)
     cs1 = _draw(axes[1], 1, 0)
     cbar0 = plt.colorbar(cs0, ax=axes[0])
     cbar1 = plt.colorbar(cs1, ax=axes[1])
     _suptitle_prefix = title_prefix + (f"  [{_align_blurb}]" if _align_blurb else "")
-    suptitle = fig.suptitle(f"{_suptitle_prefix}  |  epoch {epochs[0]}")
+    suptitle = fig.suptitle(_title_text(0))
 
     def update(i):
         # Contour plots can't be updated in-place; redraw and refresh colour bars.
@@ -622,7 +689,7 @@ def make_eta_grid_gif(
         cs1_new = _draw(axes[1], 1, i)
         cbar0.update_normal(cs0_new)
         cbar1.update_normal(cs1_new)
-        suptitle.set_text(f"{_suptitle_prefix}  |  epoch {epochs[i]}")
+        suptitle.set_text(_title_text(i))
         return cs0_new, cs1_new, suptitle
 
     ani = animation.FuncAnimation(
@@ -725,6 +792,24 @@ def _build_argparser() -> argparse.ArgumentParser:
             "(negative indices supported). Default -1 (last frame)."
         ),
     )
+    p.add_argument(
+        "--show-loss",
+        action="store_true",
+        help=(
+            "Display the validation flatness Frobenius score "
+            "(||Q-I||_F) next to the epoch number in the gif's "
+            "super-title. Requires snapshots written by the updated "
+            "fit_flattening_with_snapshots."
+        ),
+    )
+    p.add_argument(
+        "--loss-fmt",
+        default=".2f",
+        help=(
+            "Format spec for the loss readout (e.g. '.2f', '.1f', "
+            "'.2e'). Default '.2f'."
+        ),
+    )
     return p
 
 
@@ -752,6 +837,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         burn_in=args.burn_in,
         align_mode=args.align_mode,
         align_reference_frame=args.align_reference_frame,
+        show_loss=args.show_loss,
+        loss_fmt=args.loss_fmt,
     )
 
 

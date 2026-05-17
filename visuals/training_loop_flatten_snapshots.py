@@ -89,10 +89,25 @@ def _clear_or_make(snap_dir: str) -> None:
         os.makedirs(snap_dir, exist_ok=True)
 
 
-def _save_eta_snapshot(snap_dir: str, epoch: int, eta_grid: np.ndarray) -> None:
+def _save_eta_snapshot(
+    snap_dir: str,
+    epoch: int,
+    eta_grid: np.ndarray,
+    frob_score: Optional[float] = None,
+) -> None:
+    """Write a per-epoch snapshot.
+
+    Always saves ``eta_grid``. When ``frob_score`` is supplied, also
+    writes the scalar ``frob_score`` (the validation
+    ``mean_b ||Q_b - I||_F`` flatness metric) so the gif builder can
+    display it next to the epoch number.
+    """
+    payload: dict[str, np.ndarray] = {"eta_grid": np.asarray(eta_grid)}
+    if frob_score is not None:
+        payload["frob_score"] = np.asarray(float(frob_score), dtype=np.float64)
     np.savez_compressed(
         os.path.join(snap_dir, f"epoch_{epoch:05d}.npz"),
-        eta_grid=np.asarray(eta_grid),
+        **payload,
     )
 
 
@@ -138,6 +153,7 @@ def _write_metadata(
     saved_epochs: Sequence[int],
     final_global_epoch: int,
     notes: str = "",
+    saved_frob_scores: Optional[Sequence[float]] = None,
 ) -> None:
     meta = {
         "save_every": int(save_every),
@@ -150,6 +166,12 @@ def _write_metadata(
         "final_global_epoch": int(final_global_epoch),
         "notes": notes,
     }
+    if saved_frob_scores is not None:
+        # JSON cannot store NaN; encode missing values as None.
+        meta["saved_frob_scores"] = [
+            (None if (isinstance(s, float) and not np.isfinite(s)) else float(s))
+            for s in saved_frob_scores
+        ]
     with open(os.path.join(snap_dir, "metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -421,7 +443,29 @@ def fit_flattening_with_snapshots(
     def _eta_on_grid(w):
         return jax.vmap(lambda d: model.apply(w, d))(X_grid)
 
+    # JIT'd validation Frobenius flatness score, independent of the
+    # training `loss_type`: returns the mean over a batch of theta of
+    # ``||Q - I||_F`` where ``Q = (J^-1).T @ F @ J^-1``. This is what we
+    # display next to the epoch number when ``show_loss=True`` in the
+    # gif builder.
+    @jax.jit
+    def _frob_score_on_batch(w, theta_batch, F_batch):
+        def _per_sample(theta_one, F_one):
+            apply = lambda d: model.apply(w, d)
+            J = jax.jacrev(apply)(theta_one).squeeze()
+            J_inv = jnp.linalg.pinv(J)
+            Q = J_inv.T @ F_one @ J_inv
+            eye = jnp.eye(n_params)
+            return jnp.sqrt(jnp.sum((Q - eye) ** 2))
+        return jnp.mean(jax.vmap(_per_sample)(theta_batch, F_batch))
+
     saved_epochs: list[int] = []
+    saved_frob_scores: list[float] = []
+    # Snapshot-time validation slice — frozen at the same shape as the
+    # training-loop's val slice (last 5 batches, in theta/F space).
+    # Populated once below, after the data is reshaped.
+    _val_theta_for_score: Optional[jnp.ndarray] = None
+    _val_F_for_score: Optional[jnp.ndarray] = None
 
     def _maybe_save(j_global: int, w) -> None:
         if not enable_snapshots:
@@ -431,8 +475,20 @@ def fit_flattening_with_snapshots(
         if (j_global - burn_in) % save_every != 0:
             return
         eta_grid = np.asarray(_eta_on_grid(w))
-        _save_eta_snapshot(snapshots_outdir, j_global, eta_grid)
+        score: Optional[float] = None
+        if _val_theta_for_score is not None and _val_F_for_score is not None:
+            try:
+                s = float(np.asarray(
+                    _frob_score_on_batch(w, _val_theta_for_score, _val_F_for_score)
+                ))
+                # Guard against the occasional inf / nan early in training.
+                score = s if np.isfinite(s) else None
+            except Exception as exc:  # noqa: BLE001
+                print(f"WARNING: frob score failed at epoch {j_global}: {exc}")
+                score = None
+        _save_eta_snapshot(snapshots_outdir, j_global, eta_grid, frob_score=score)
         saved_epochs.append(j_global)
+        saved_frob_scores.append(float("nan") if score is None else score)
 
     # ---------------------- LOSS DEFINITION (identical to upstream) ---
     @jax.jit
@@ -544,6 +600,17 @@ def fit_flattening_with_snapshots(
     F_fishnets_shuffled = F_fishnets[shuffle_idx]
     theta_true = θs_shuffled.reshape(-1, batch_size, n_params)
     F_fishnets = F_fishnets_shuffled.reshape(-1, batch_size, n_params, n_params)
+
+    # Fixed snapshot-time validation slice for the Frobenius score:
+    # matches the training-loop convention (last 5 batches, flattened).
+    _val_size_for_score = 5
+    if theta_true.shape[0] >= _val_size_for_score:
+        _val_theta_for_score = theta_true[-_val_size_for_score:].reshape(
+            -1, n_params
+        )
+        _val_F_for_score = F_fishnets[-_val_size_for_score:].reshape(
+            -1, n_params, n_params
+        )
 
     # ---------------------- TRAINING LOOP -----------------------
     _pbar_stride = max(1, int(update_pbar_every))
@@ -843,6 +910,7 @@ def fit_flattening_with_snapshots(
             param_names=param_names,
             saved_epochs=saved_epochs,
             final_global_epoch=final_global_epoch,
+            saved_frob_scores=saved_frob_scores,
             notes=(
                 f"phase 1 ran {epochs_done_p1} epochs; phase 2 ran "
                 f"{epochs_done_p2} epochs. Snapshots are from the main "

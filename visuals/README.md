@@ -327,6 +327,38 @@ network's learned curvature. `nonlinearity_rotation` is the
 algorithm from `degeneracy_distillery.align_coords.nonlinearity_rotation`,
 vendored JAX-free into `make_eta_grid_gif`. `both` combines them.
 
+## Showing the flatness Frobenius score in the gif title
+
+`fit_flattening_with_snapshots` now also evaluates the validation
+flatness score `mean_b ||Q_b − I||_F` (with `Q = J^{-T} F J^{-1}`) at
+each snapshot and stores it as `frob_score` in the per-epoch `.npz`
+and `saved_frob_scores` in `metadata.json`.
+
+`make_eta_grid_gif` exposes a `show_loss=False` switch (CLI flag
+`--show-loss`) to display the score next to the epoch number:
+
+```python
+gif_path, _, data_path = make_eta_grid_gif(
+    "runs/flat_exp/snapshots",
+    out_path="runs/flat_exp/eta_grid.gif",
+    show_loss=True,        # append "||Q-I||_F = 0.43" to the title
+    loss_fmt=".2f",        # one or two decimals (default ".2f")
+)
+```
+
+Other knobs:
+
+* `loss_label` — override the math-text label (default
+  `r"\|Q-I\|_F"`).
+* `loss_fmt` — Python format spec, e.g. `".1f"`, `".2e"`. Very large
+  or very small values automatically fall back to scientific.
+
+For snapshots written before this feature existed, `show_loss=True`
+prints a one-time warning and falls back to epoch-only titles
+(no crash). The portable `.npz` always includes a `frob_scores`
+column (`NaN`-filled for missing values) so a local replotter can
+draw a small loss inset alongside the contour gif.
+
 Same transform is also exposed as a function so you can apply it
 to an already-saved `.npz` locally:
 

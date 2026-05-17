@@ -2,19 +2,32 @@
 
 Public API
 ----------
-- :func:`train_fishnets_with_snapshots`: drop-in replacement for
-  :func:`degeneracy_distillery.training_loop_fishnets.train_fishnets`
-  that additionally writes per-model Fisher snapshots on the validation
-  set every ``save_every`` epochs. Same positional signature, same
-  return tuple ``(ws, ensemble_weights, models, data_scaler, outputs)``.
-- :func:`make_gif`: render a .gif of the ensemble-averaged
-  ``val_detF`` evolving over training, and (by default) also write a
-  self-contained ``.npz`` for local replotting.
-- :func:`display_gif`: notebook helper that returns an
-  ``IPython.display.Image`` for inline display.
-- :func:`save_timeseries_npz`, :func:`load_snapshots`,
-  :func:`build_frames`: lower-level building blocks reused by
-  :func:`make_gif`.
+Fisher network (val_detF over training)
+    - :func:`train_fishnets_with_snapshots`: drop-in for
+      :func:`degeneracy_distillery.training_loop_fishnets.train_fishnets`
+      that writes per-model Fisher snapshots on the validation set every
+      ``save_every`` epochs. Same positional signature, same return tuple.
+    - :func:`make_gif`: render the ensemble-averaged val_detF over
+      ``(theta_1, theta_2)`` evolving over training, plus a portable
+      ``.npz`` for local replotting.
+
+Flattener network (learned eta over training)
+    - :func:`fit_flattening_with_snapshots`: drop-in for
+      :func:`degeneracy_distillery.training_loop_flatten.fit_flattening`
+      that writes grid-based snapshots of the **main model** ``eta``
+      every ``save_every`` epochs after a ``burn_in``. Same return
+      contract as ``fit_flattening``.
+    - :func:`make_eta_grid_gif`: render a 2-panel contour gif of
+      ``eta_1`` and ``eta_2`` over ``(theta_1, theta_2)`` evolving over
+      training, plus a portable ``.npz``.
+
+Shared
+    - :func:`display_gif`: notebook helper returning an
+      ``IPython.display.Image`` for inline display.
+    - Lower-level building blocks: :func:`load_snapshots`,
+      :func:`build_frames`, :func:`save_timeseries_npz` (Fisher side);
+      :func:`load_eta_snapshots`, :func:`save_eta_timeseries_npz`
+      (flattener side).
 
 The JAX-dependent training symbols are loaded lazily (PEP 562), so the
 GIF / replotting half of the API stays usable on a machine without
@@ -28,23 +41,34 @@ From a notebook in ``notebooks/`` (sibling of ``visuals/``)::
     import sys, os
     sys.path.insert(0, os.path.abspath(".."))   # put repo root on sys.path
 
-    from visuals import (
-        train_fishnets_with_snapshots, make_gif, display_gif,
-    )
+    # --- Fisher network (val_detF gif) ---
+    from visuals import train_fishnets_with_snapshots, make_gif, display_gif
 
     ws, ew, models, scaler, outputs = train_fishnets_with_snapshots(
         theta, data, theta_test, data_test,
         data_shape=n_d, num_models=20,
         train_epochs=4000, save_every=5,
-        outdir="runs/my_experiment", param_names=["mu", "sigma^2"],
+        outdir="runs/fisher_exp", param_names=["mu", "sigma^2"],
     )
-
     gif_path, epochs, data_path = make_gif(
-        "runs/my_experiment/snapshots",
-        out_path="runs/my_experiment/val_detF.gif",
-        fps=12,
+        "runs/fisher_exp/snapshots", out_path="runs/fisher_exp/val_detF.gif", fps=12,
     )
-    display_gif(gif_path)   # inline display
+    display_gif(gif_path)
+
+    # --- Flattener network (learned-coordinates gif) ---
+    from visuals import fit_flattening_with_snapshots, make_eta_grid_gif
+
+    w, ensemble_ws, output_dict = fit_flattening_with_snapshots(
+        outputs["Fs"], outputs["theta"], ew,
+        snapshots_outdir="runs/flat_exp/snapshots",
+        save_every=5, burn_in=500, grid_num_pts=30,
+        param_names=["mu", "sigma^2"],
+        output_prefix="runs/flat_exp/flattened_coords",
+    )
+    gif_path, epochs, data_path = make_eta_grid_gif(
+        "runs/flat_exp/snapshots", out_path="runs/flat_exp/eta_grid.gif", fps=12,
+    )
+    display_gif(gif_path)
 """
 from __future__ import annotations
 
@@ -55,6 +79,11 @@ from .make_detF_gif import (
     load_snapshots,
     make_gif,
     save_timeseries_npz,
+)
+from .make_eta_grid_gif import (
+    load_eta_snapshots,
+    make_eta_grid_gif,
+    save_eta_timeseries_npz,
 )
 
 
@@ -90,10 +119,13 @@ def display_gif(gif_path: str, embed: bool = True):
 
 # Lazy-loaded names. Listed here for tab-completion and for the
 # `__all__` contract; actually imported on first attribute access.
-_LAZY_TRAIN_NAMES = (
+_LAZY_FISHNETS_NAMES = (
     "train_fishnets_with_snapshots",
     "predicted_fishers",
     "predicted_mle",
+)
+_LAZY_FLATTEN_NAMES = (
+    "fit_flattening_with_snapshots",
 )
 
 
@@ -103,20 +135,32 @@ def __getattr__(name: str):
     Keeps ``import visuals`` cheap and JAX-free until the user actually
     asks for a training symbol.
     """
-    if name in _LAZY_TRAIN_NAMES:
+    if name in _LAZY_FISHNETS_NAMES:
         from . import training_loop_fishnets_snapshots as _t
 
-        for attr in _LAZY_TRAIN_NAMES:
+        for attr in _LAZY_FISHNETS_NAMES:
+            globals()[attr] = getattr(_t, attr)
+        return globals()[name]
+    if name in _LAZY_FLATTEN_NAMES:
+        from . import training_loop_flatten_snapshots as _t
+
+        for attr in _LAZY_FLATTEN_NAMES:
             globals()[attr] = getattr(_t, attr)
         return globals()[name]
     raise AttributeError(f"module 'visuals' has no attribute {name!r}")
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_LAZY_TRAIN_NAMES) | set(__all__))
+    return sorted(
+        set(globals())
+        | set(_LAZY_FISHNETS_NAMES)
+        | set(_LAZY_FLATTEN_NAMES)
+        | set(__all__)
+    )
 
 
 __all__ = [
+    # Fisher side
     "train_fishnets_with_snapshots",
     "predicted_fishers",
     "predicted_mle",
@@ -124,5 +168,11 @@ __all__ = [
     "save_timeseries_npz",
     "load_snapshots",
     "build_frames",
+    # Flattener side
+    "fit_flattening_with_snapshots",
+    "make_eta_grid_gif",
+    "save_eta_timeseries_npz",
+    "load_eta_snapshots",
+    # Shared
     "display_gif",
 ]

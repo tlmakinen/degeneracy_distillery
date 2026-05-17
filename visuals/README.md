@@ -1,27 +1,35 @@
 # visuals/
 
-Scripts for generating visualisations of distillery training dynamics for
-the blog post / paper release.
+Scripts for generating visualisations of distillery training dynamics
+for the blog post / paper release.
 
-The pipeline is two stages:
+Two parallel pipelines, both two-stage (train + snapshot, then render):
 
-1. **Train + snapshot.** Run a modified copy of
-   `degeneracy_distillery.training_loop_fishnets.train_fishnets` that
-   writes per-model Fisher predictions on the validation set every
-   `save_every` epochs. Because the ensemble is trained sequentially in
-   the original code, we cannot ensemble-average at training time;
-   instead we store every member's Fisher snapshot and let the GIF
-   builder reconstruct the ensemble average on a common epoch axis.
+**Fisher network — `val_detF` evolution**
+- `training_loop_fishnets_snapshots.py` →
+  `train_fishnets_with_snapshots`: drop-in for
+  `degeneracy_distillery.training_loop_fishnets.train_fishnets`.
+  Writes per-model Fisher predictions on the validation set every
+  `save_every` epochs.
+- `make_detF_gif.py` → `make_gif`: ensemble-averages the Fisher at each
+  saved epoch (same recipe as
+  `degeneracy_distillery.diagnostics._aggregate_fisher`), takes the
+  determinant, and animates a 2D scatter of `log10 det F` over two
+  parameters (style of the first panel of `diagnose_low_information`).
+  Also writes a portable `.npz` timeseries for local restyling.
 
-2. **Build the GIF.** Load the snapshots, ensemble-average the Fisher at
-   each saved epoch using the same weighted mean as
-   `degeneracy_distillery.diagnostics._aggregate_fisher`, take the
-   determinant, and animate a 2D scatter of `log10 det F` over two
-   parameters in the style of the first panel of
-   `diagnose_low_information`. The script also writes a portable
-   `.npz` timeseries dump (alongside the `.gif`, same stem) containing
-   everything needed to re-render the plots locally with custom font /
-   styling.
+**Flattener network — learned-coordinates evolution**
+- `training_loop_flatten_snapshots.py` →
+  `fit_flattening_with_snapshots`: drop-in for
+  `degeneracy_distillery.training_loop_flatten.fit_flattening`. Every
+  `save_every` epochs (past a `burn_in`) it evaluates the **main
+  model** `model.apply(w, X)` on a 2D grid in `(theta_1, theta_2)`
+  (extra dims pinned to the midpoint of training range, exactly as the
+  legacy `do_plot=True` block does) and writes `eta_grid` to disk.
+  Ensemble fine-tuning is intentionally **not** snapshotted.
+- `make_eta_grid_gif.py` → `make_eta_grid_gif`: animates a 2-panel
+  contour gif of `eta_1` and `eta_2` over `(theta_1, theta_2)`. Also
+  writes the portable `.npz`.
 
 ## Quick start (toy mu/sigma problem, CLI)
 
@@ -95,7 +103,53 @@ _, epochs, data_path = make_gif(
 )
 ```
 
-## Snapshot layout
+### Flattener-network notebook usage
+
+`fit_flattening_with_snapshots` mirrors `fit_flattening`'s positional
+signature and return tuple, plus a handful of snapshot-specific
+keyword arguments (`snapshots_outdir`, `save_every=5`, `burn_in=500`,
+`grid_num_pts=30`, `save_initial`, `param_names`). The Fisher inputs
+typically come from the output of `train_fishnets_with_snapshots`:
+
+```python
+from visuals import fit_flattening_with_snapshots, make_eta_grid_gif
+
+w, ensemble_ws, output_dict = fit_flattening_with_snapshots(
+    outputs["Fs"],                 # (n_models, n_train, n_p, n_p)
+    outputs["theta"],              # (n_train, n_p)
+    ensemble_weights=ew,
+    snapshots_outdir="runs/flat_exp/snapshots",
+    save_every=5,
+    burn_in=500,                   # discard wild early-training coords
+    grid_num_pts=30,               # 30x30 grid in (theta_1, theta_2)
+    param_names=["mu", "sigma^2"],
+    output_prefix="runs/flat_exp/flattened_coords",
+    # ...any other fit_flattening kwargs (hidden_size, n_layers, lr_*, etc.)
+)
+
+gif_path, epochs, data_path = make_eta_grid_gif(
+    "runs/flat_exp/snapshots",
+    out_path="runs/flat_exp/eta_grid.gif",
+    fps=12,
+    cmap="viridis",
+    levels=20,
+)
+display_gif(gif_path)
+```
+
+The gif is a 2-panel `contourf` showing `eta_1(theta_1, theta_2)` on
+the left and `eta_2(theta_1, theta_2)` on the right, with the
+super-title updating to the current global epoch — the same layout as
+the legacy `do_plot=True` block.
+
+Why `burn_in`? The flattener starts very far from sensible coordinates;
+the first few hundred epochs produce visually distracting frames. With
+`burn_in=500` (default) snapshotting only kicks in once the network is
+in a recognisable basin.
+
+## Snapshot layouts
+
+**Fisher side** (`train_fishnets_with_snapshots`):
 
 ```
 outdir/
@@ -106,7 +160,6 @@ outdir/
         model_00/
             epoch_00000.npz           # F_val: (n_val, n_params, n_params), untrained
             epoch_00005.npz
-            epoch_00010.npz
             ...
         model_01/
             ...
@@ -115,6 +168,24 @@ outdir/
 Each `epoch_{j:05d}.npz` is a compressed `npz` with a single key
 `F_val`. Storage scales as
 `num_models * (train_epochs / save_every) * n_val * n_params**2 * 4 B`.
+
+**Flattener side** (`fit_flattening_with_snapshots`):
+
+```
+snapshots_outdir/
+    metadata.json                     # save_every, burn_in, param_names, grid_num_pts, saved_epochs, ...
+    grid_axes.npz                     # xs_mesh, ys_mesh, X_grid (shape (G*G, n_params)), min_x, max_x
+    epoch_00500.npz                   # eta_grid: (G*G, n_params)  -- first kept frame after burn-in
+    epoch_00505.npz
+    ...
+```
+
+Each `epoch_{j:05d}.npz` is a compressed `npz` with a single key
+`eta_grid`. Storage scales as
+`((total_epochs - burn_in) / save_every) * grid_num_pts**2 * n_params * 4 B`
+— for the defaults (1500 effective epochs, save_every=5, 30x30 grid,
+n_params=2) that's `300 * 900 * 2 * 4 B ≈ 2 MB`, trivial compared to
+the Fisher snapshots.
 
 ## Notes
 
@@ -132,43 +203,86 @@ Each `epoch_{j:05d}.npz` is a compressed `npz` with a single key
 
 ## Portable `.npz` timeseries
 
-Every call to `make_detF_gif.py` also writes a self-contained
-`.npz` (default: same stem as the gif). Copy this single file to your
-laptop to re-render plots / gifs with custom fonts, axis styling, etc.
+Both `make_detF_gif.py` and `make_eta_grid_gif.py` write a
+self-contained `.npz` alongside the gif (same stem). Copy a single
+file to your laptop to re-render plots / gifs with custom fonts,
+axis styling, etc.
 
-Arrays / scalars inside the `.npz`:
+### Fisher side (`make_detF_gif.py`)
 
 | key                | shape                 | meaning                                                                 |
 | ------------------ | --------------------- | ----------------------------------------------------------------------- |
 | `epochs`           | `(n_frames,)` int     | epoch number for each frame                                             |
 | `theta_val`        | `(n_val, n_params)`   | validation parameters (scatter support)                                 |
 | `det_F`            | `(n_frames, n_val)`   | ensemble-averaged det F at each frame                                   |
-| `log_det_F`        | `(n_frames, n_val)`   | log10 |det F| at each frame (what the GIF colours by)                   |
+| `log_det_F`        | `(n_frames, n_val)`   | log10 \|det F\| at each frame (what the GIF colours by)                 |
 | `param_names`      | `(n_params,)` str     | display names for axis labels                                           |
 | `ensemble_weights` | `(num_models,)`       | per-member weights used in the weighted Fisher average                  |
 | `vmin`, `vmax`     | scalar                | the colour-scale limits chosen by the percentile rule                   |
 | `snapshots_dir`    | str                   | absolute path the data was built from (provenance)                      |
 
-Minimal local replotting example::
+### Flattener side (`make_eta_grid_gif.py`)
 
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
+| key                | shape                                       | meaning                                                       |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------- |
+| `epochs`           | `(n_frames,)` int                           | global epoch number for each frame                            |
+| `xs_mesh`          | `(G, G)`                                    | mesh of theta_1 values used for the contour grid              |
+| `ys_mesh`          | `(G, G)`                                    | mesh of theta_2 values                                        |
+| `X_grid`           | `(G*G, n_params)`                           | flat list of grid points used to evaluate the model           |
+| `eta_stack`        | `(n_frames, G*G, n_params)`                 | raw model output per grid point per frame                     |
+| `eta_grid_2d`      | `(n_frames, G, G, n_params)`                | reshaped to a 2D contour grid for direct plotting             |
+| `eta_vmins`        | `(2,)`                                      | per-panel vmin (eta_1, eta_2) used for fixed colour scale     |
+| `eta_vmaxs`        | `(2,)`                                      | per-panel vmax                                                |
+| `param_names`      | `(n_params,)` str                           | axis labels                                                   |
+| `min_x`, `max_x`   | `(n_params,)`                               | training-range bounds (for axis limits / extras)              |
+| `snapshots_dir`    | str                                         | absolute path the data was built from (provenance)            |
 
-    d = np.load("val_detF_mu_sigma.npz", allow_pickle=False)
-    epochs, theta, log_det = d["epochs"], d["theta_val"], d["log_det_F"]
-    norm = Normalize(vmin=float(d["vmin"]), vmax=float(d["vmax"]))
+Minimal local replotting examples:
 
-    plt.rcParams.update({"font.family": "serif", "font.size": 14})
-    fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
-    sc = ax.scatter(theta[:, 0], theta[:, 1], c=log_det[-1],
-                    cmap="viridis", norm=norm, s=12)
+```python
+# Fisher side
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+
+d = np.load("val_detF_mu_sigma.npz", allow_pickle=False)
+epochs, theta, log_det = d["epochs"], d["theta_val"], d["log_det_F"]
+norm = Normalize(vmin=float(d["vmin"]), vmax=float(d["vmax"]))
+
+plt.rcParams.update({"font.family": "serif", "font.size": 14})
+fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
+sc = ax.scatter(theta[:, 0], theta[:, 1], c=log_det[-1],
+                cmap="viridis", norm=norm, s=12)
+ax.set_xlabel(str(d["param_names"][0]))
+ax.set_ylabel(str(d["param_names"][1]))
+plt.colorbar(sc, ax=ax, label=r"$\log_{10}\,\det F_\theta$")
+plt.savefig("final_frame.pdf")
+```
+
+```python
+# Flattener side
+import numpy as np
+import matplotlib.pyplot as plt
+
+d = np.load("eta_grid.npz", allow_pickle=False)
+xs, ys = d["xs_mesh"], d["ys_mesh"]
+eta = d["eta_grid_2d"]                    # (n_frames, G, G, n_p)
+vmins, vmaxs = d["eta_vmins"], d["eta_vmaxs"]
+
+plt.rcParams.update({"font.family": "serif", "font.size": 14})
+fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+for k, ax in enumerate(axes):
+    cs = ax.contourf(xs, ys, eta[-1, :, :, k],
+                     levels=np.linspace(vmins[k], vmaxs[k], 21),
+                     cmap="viridis", extend="both")
     ax.set_xlabel(str(d["param_names"][0]))
     ax.set_ylabel(str(d["param_names"][1]))
-    plt.colorbar(sc, ax=ax, label=r"$\log_{10}\,\det F_\theta$")
-    plt.savefig("final_frame.pdf")
+    ax.set_title(rf"$\eta_{k + 1}$")
+    plt.colorbar(cs, ax=ax)
+plt.savefig("final_frame.pdf")
+```
 
-CLI flags controlling the data dump:
+CLI flags controlling the data dump (both gif scripts):
 
 * `--data-out PATH` — explicit output path; defaults to the gif path
   with `.npz` extension.

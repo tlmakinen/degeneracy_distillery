@@ -37,27 +37,28 @@ The training script ships with a runnable `__main__` block that mirrors
 the toy example at the bottom of `training_loop_fishnets.py`:
 
 ```bash
-cd visuals
+cd degeneracy_distillery/visuals
 python training_loop_fishnets_snapshots.py
 python make_detF_gif.py fishnets-log-snapshots/snapshots --out val_detF_mu_sigma.gif
 ```
 
 ## Notebook usage (drop-in for `train_fishnets`)
 
-`visuals/` is a Python package with `__init__.py`, so it imports just
-like `degeneracy_distillery`. From a notebook in `notebooks/` (sibling
-of `visuals/`), add the repo root to `sys.path` once, then import:
+`degeneracy_distillery.visuals` is a true subpackage of
+`degeneracy_distillery`, so after `pip install -e .` you can import
+from anywhere:
 
 ```python
-import sys, os
-sys.path.insert(0, os.path.abspath(".."))   # repo root on sys.path
-
-from visuals import (
+from degeneracy_distillery.visuals import (
     train_fishnets_with_snapshots,   # drop-in for train_fishnets
     make_gif,                        # build the .gif + .npz
     display_gif,                     # inline-display the .gif
 )
 ```
+
+> The legacy `from visuals import ...` spelling is also still supported
+> via a tiny top-level shim in the repo root, so existing notebooks/scripts
+> continue to work without edits.
 
 `train_fishnets_with_snapshots` has the **same positional signature
 and same return tuple** as `train_fishnets`, plus four snapshot-
@@ -112,7 +113,7 @@ keyword arguments (`snapshots_outdir`, `save_every=5`, `burn_in=500`,
 typically come from the output of `train_fishnets_with_snapshots`:
 
 ```python
-from visuals import fit_flattening_with_snapshots, make_eta_grid_gif
+from degeneracy_distillery.visuals import fit_flattening_with_snapshots, make_eta_grid_gif
 
 w, ensemble_ws, output_dict = fit_flattening_with_snapshots(
     outputs["Fs"],                 # (n_models, n_train, n_p, n_p)
@@ -363,7 +364,7 @@ Same transform is also exposed as a function so you can apply it
 to an already-saved `.npz` locally:
 
 ```python
-from visuals import align_eta_stack
+from degeneracy_distillery.visuals import align_eta_stack
 import numpy as np
 
 d = np.load("eta_grid.npz", allow_pickle=False)

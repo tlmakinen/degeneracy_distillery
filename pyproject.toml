@@ -103,10 +103,11 @@ Repository = "https://github.com/tlmakinen/degeneracy_distillery"
 Issues = "https://github.com/tlmakinen/degeneracy_distillery/issues"
 
 [tool.setuptools]
-packages = ["degeneracy_distillery"]
+packages = ["degeneracy_distillery", "degeneracy_distillery.visuals"]
 
 [tool.setuptools.package-data]
 degeneracy_distillery = ["*.yaml", "*.yml"]
+"degeneracy_distillery.visuals" = ["README.md"]
 
 [tool.black]
 line-length = 100

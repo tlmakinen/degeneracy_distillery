@@ -11,6 +11,9 @@ Main modules:
     - plot_utils: Plotting utilities for Fisher matrices and visualizations
     - io_utils: I/O utilities with FlexibleDict for flexible naming conventions
     - diagnostics: Fisher-information diagnostics for low-information regions
+    - visuals: Snapshot-based training visualisations and gif builders
+      (Fisher det F + flattener eta over training; see
+      :mod:`degeneracy_distillery.visuals` for the public API)
 """
 
 __version__ = "0.1.0"

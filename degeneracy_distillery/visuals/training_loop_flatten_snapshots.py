@@ -38,7 +38,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 from typing import Any, Callable, Literal, Optional, Sequence, Union
 
 import flax.linen as nn
@@ -50,13 +49,10 @@ import optax
 import scipy
 from tqdm import tqdm
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
-from degeneracy_distillery.io_utils import create_results_dict  # noqa: E402
-from degeneracy_distillery.training_loop_flatten import (  # noqa: E402
+# `visuals` is a subpackage of `degeneracy_distillery`, so the parent
+# package is importable directly — no sys.path bootstrapping needed.
+from degeneracy_distillery.io_utils import create_results_dict
+from degeneracy_distillery.training_loop_flatten import (
     ForwardBackwardMLP,
     RealNVPWrapper,
     WhitenedForwardBackwardMLP,

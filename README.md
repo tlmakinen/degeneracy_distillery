@@ -4,7 +4,7 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yourusername/degeneracy_distillery/blob/main/notebooks/example.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A research package for analyzing degeneracy in neural networks and performing symbolic regression analysis using network flattening techniques.
+A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
 
 
 ### Distill in three steps from simulations or labelled data
@@ -38,7 +38,7 @@ exprs = postprocess(exprs)                           # prune / rotate for sparsi
 - Symbolic regression integration with PyOperon
 - JAX/Flax-based neural network training
 - Preprocessing and postprocessing utilities for network analysis
-- Support for various network architectures (FishNets, inverted architectures)
+- Support for various network architectures
 
 ## Installation
 

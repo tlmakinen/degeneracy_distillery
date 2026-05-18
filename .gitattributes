@@ -1,0 +1,64 @@
+# =============================================================================
+# GitHub Linguist: language-stat overrides
+# -----------------------------------------------------------------------------
+# The repo is a Python package; notebooks are *examples and exploration*, not
+# the library itself. Tag them as documentation so the GitHub language banner
+# reflects the actual source code (mostly Python).
+# =============================================================================
+
+# Exploratory / exploratory-plot notebooks (not part of the package surface)
+notebooks/**           linguist-documentation
+plots/**               linguist-documentation
+
+# Official user-facing examples — still "documentation" for linguist purposes
+tutorial_notebooks/**  linguist-documentation
+
+# Catch-all: any other .ipynb anywhere in the tree
+*.ipynb                linguist-documentation
+
+# Vendored / third-party trees (only present in local clones; harmless if absent)
+ESR/**                 linguist-vendored
+pyoperon/**            linguist-vendored
+
+# =============================================================================
+# git archive / "Download ZIP" exclusions
+# -----------------------------------------------------------------------------
+# Keep release tarballs slim: ship the package, tests, scripts, and tutorials;
+# leave behind exploratory notebooks, intermediate results, internal notes,
+# the paper source, and any vendored third-party trees.
+# =============================================================================
+
+notebooks/             export-ignore
+plots/                 export-ignore
+results/               export-ignore
+notes/                 export-ignore
+paper/                 export-ignore
+visuals/               export-ignore
+.github/               export-ignore
+ESR/                   export-ignore
+pyoperon/              export-ignore
+
+# Local-only / dev artifacts
+setup.sh               export-ignore
+output.txt             export-ignore
+pyproject_old.toml     export-ignore
+uv.lock                export-ignore
+.gitattributes         export-ignore
+.gitignore             export-ignore
+
+# =============================================================================
+# Diff / merge behavior
+# =============================================================================
+
+# Nicer notebook diffs on github.com (and locally if you install nbdime).
+*.ipynb                diff=jupyter
+
+# Treat lockfiles and generated assets as binary for diff purposes
+uv.lock                -diff
+*.npz                  binary
+*.npy                  binary
+*.pdf                  binary
+*.gif                  binary
+*.png                  binary
+*.jpg                  binary
+*.jpeg                 binary

@@ -42,6 +42,10 @@ ipython_config.py
 # pyenv
 .python-version
 
+# MD files
+notes/
+
+
 # Environments
 .env
 .venv

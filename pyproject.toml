@@ -138,6 +138,9 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 addopts = "-v --cov=degeneracy_distillery --cov-report=html --cov-report=term-missing"
+markers = [
+    "slow: end-to-end pipeline tests (~minutes). Run with `pytest -m slow`; skip with `pytest -m 'not slow'`.",
+]
 
 [tool.mypy]
 python_version = "3.10"

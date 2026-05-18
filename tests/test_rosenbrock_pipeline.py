@@ -1,10 +1,11 @@
 """End-to-end smoke test of the Distillery pipeline on the Rosenbrock toy.
 
 Mirrors ``tutorial_notebooks/tiny_quick_rosenbrock_example.ipynb`` but with
-*tiny* configs so the full pipeline finishes in ~5 minutes:
+a *small* ensemble so the full pipeline finishes in ~10–15 minutes:
 
-  * 3-member Fisher-network ensemble, ~50 epochs each
-  * short flattening run (phase 1 + phase 2 + finetune, all small)
+  * 3-member Fisher-network ensemble, notebook-grade epoch budget so the
+    nets actually converge rather than early-stopping at first chance
+  * full flattening run (phase 1 + phase 2 + per-member finetune)
   * coordinate alignment via ``load_and_process_data_v2``
   * ~30 s of pyoperon symbolic regression
   * ``analyze_equations`` + ``regroup_like_terms`` postprocessing
@@ -73,18 +74,29 @@ pytestmark = pytest.mark.slow
 
 
 # ---------------------------------------------------------------------------
-# Tiny tunables — keep aligned with the docstring's "~5 min" budget.
+# Tunables. The early-stopping knobs (``*_MIN_EPOCHS``, ``*_PATIENCE``) must
+# stay reasonably high relative to the epoch caps below — otherwise the
+# bumped caps never get used and the networks early-stop before learning
+# anything useful. Mirror the notebook's settings here.
 # ---------------------------------------------------------------------------
 NUM_FISHNETS = 3
 NSIMS = 200
 N_D = 25  # samples per simulation; flatten_dim = 2 * N_D = 50
-FISHNET_EPOCHS = 100  # ~60 was just enough to let one member diverge with this seed
+
+# Fisher networks
+FISHNET_EPOCHS = 1000
+FISHNET_MIN_EPOCHS = 100
+FISHNET_PATIENCE = 20
 FISHNET_BATCH = 25
-FLATTEN_EPOCHS_PHASE1 = 40
-FLATTEN_EPOCHS_PHASE2 = 80
-FLATTEN_FINETUNE_EPOCHS = 20
-FLATTEN_MIN_EPOCHS = 20
-FLATTEN_PATIENCE = 25
+
+# Flattening network
+FLATTEN_EPOCHS_PHASE1 = 1000
+FLATTEN_EPOCHS_PHASE2 = 1000
+FLATTEN_FINETUNE_EPOCHS = 250
+FLATTEN_MIN_EPOCHS = 250
+FLATTEN_PATIENCE = 40
+
+# Symbolic regression / alignment
 SR_TIME_LIMIT = 30  # seconds, per component
 ALIGN_SUBSAMPLE = 800
 
@@ -148,8 +160,8 @@ def fishnets_run(simulator_data, scaled_data, workdir) -> Path:
         hids_max=64,
         n_layers=[2, 3],
         train_epochs=FISHNET_EPOCHS,
-        train_min_epochs=20,
-        patience=15,
+        train_min_epochs=FISHNET_MIN_EPOCHS,
+        patience=FISHNET_PATIENCE,
         train_batch_size=FISHNET_BATCH,
         lr=5e-5,
         seed_model=201,

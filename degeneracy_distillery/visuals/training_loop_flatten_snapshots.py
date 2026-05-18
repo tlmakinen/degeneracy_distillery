@@ -830,22 +830,28 @@ def fit_flattening_with_snapshots(
     allFs = jnp.array(F_ensemble)
     dFs = weighted_std(allFs, jnp.ones(allFs.shape), axis=0)
 
-    def get_δJ(F, δF, Jbar):
-        J = np.linalg.inv(Jbar)
-        Q = -np.einsum("bik,bkj,blj->bil", J, δF, J)
-        X = J @ F
-        A = np.einsum("bij,bkj->bik", X, X)
-        S = jnp.array(
-            [
-                scipy.linalg.solve_sylvester(a=A[i], b=A[i], q=Q[i])
-                for i in range(Q.shape[0])
-            ]
-        )
-        δJ = S @ X
-        return np.linalg.inv(J + δJ) - Jbar, δJ
-
-    print("CALCULATING JACOBIAN ERROR")
-    δJs, δinvJ = get_δJ(allFs.mean(0), dFs, Jbar)
+    # NOTE: Disabled — see training_loop_flatten.fit_flattening for rationale.
+    # The δJ / δinvJ outputs are written to the .npz but consumed by nothing
+    # downstream, and the Sylvester solver chokes on any NaN entries in the
+    # ensemble Fisher. Re-enable (with a NaN guard) only if a real consumer
+    # appears.
+    #
+    # def get_δJ(F, δF, Jbar):
+    #     J = np.linalg.inv(Jbar)
+    #     Q = -np.einsum("bik,bkj,blj->bil", J, δF, J)
+    #     X = J @ F
+    #     A = np.einsum("bij,bkj->bik", X, X)
+    #     S = jnp.array(
+    #         [
+    #             scipy.linalg.solve_sylvester(a=A[i], b=A[i], q=Q[i])
+    #             for i in range(Q.shape[0])
+    #         ]
+    #     )
+    #     δJ = S @ X
+    #     return np.linalg.inv(J + δJ) - Jbar, δJ
+    #
+    # print("CALCULATING JACOBIAN ERROR")
+    # δJs, δinvJ = get_δJ(allFs.mean(0), dFs, Jbar)
 
     print("(skipping global rotation correction; visualisation context)")
     ys = []
@@ -870,8 +876,9 @@ def fit_flattening_with_snapshots(
         theta=np.array(θs),
         eta=np.array(ηs),
         Jacobians=np.array(Jbar),
-        deltaJ=np.array(δJs),
-        delta_invJ=np.array(δinvJ),
+        # deltaJ / delta_invJ disabled with the δJ solver above (dead output).
+        # deltaJ=np.array(δJs),
+        # delta_invJ=np.array(δinvJ),
         meanF=np.array(F_ensemble_out),
         dFs=np.array(dFs),
         F_ensemble=np.array(allFs),

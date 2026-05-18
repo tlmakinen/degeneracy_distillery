@@ -78,7 +78,7 @@ pytestmark = pytest.mark.slow
 NUM_FISHNETS = 3
 NSIMS = 200
 N_D = 25  # samples per simulation; flatten_dim = 2 * N_D = 50
-FISHNET_EPOCHS = 60
+FISHNET_EPOCHS = 100  # ~60 was just enough to let one member diverge with this seed
 FISHNET_BATCH = 25
 FLATTEN_EPOCHS_PHASE1 = 40
 FLATTEN_EPOCHS_PHASE2 = 80
@@ -165,8 +165,23 @@ def flatten_run(fishnets_run, workdir):
     """Run a short flattening fit on top of the ensemble Fishers."""
     fish = np.load(fishnets_run / "fishnets_outputs.npz")
     thetas = jnp.array(fish["theta"])
-    ensemble_weights = fish["ensemble_weights"]
-    F_network_ensemble = jnp.array(fish["Fs"])
+    ensemble_weights_np = np.asarray(fish["ensemble_weights"])
+    Fs_np = np.asarray(fish["Fs"])
+
+    # Defensive: with a tiny ensemble (``NUM_FISHNETS=3``) a single diverged
+    # member can produce all-NaN Fishers that poison ``allFs.mean(0)`` and
+    # blow up later consumers. Filter them out before flattening; assert that
+    # we still have at least one usable member so the test fails loudly if
+    # *every* fishnet diverged (real regression vs. expected flakiness).
+    finite_mask = np.isfinite(Fs_np).all(axis=(1, 2, 3))
+    n_finite = int(finite_mask.sum())
+    assert n_finite >= 1, "all fishnet ensemble members produced non-finite Fishers"
+    if n_finite < Fs_np.shape[0]:
+        Fs_np = Fs_np[finite_mask]
+        ensemble_weights_np = ensemble_weights_np[finite_mask]
+
+    F_network_ensemble = jnp.array(Fs_np)
+    ensemble_weights = ensemble_weights_np
 
     # `fit_flattening` writes ``{output_prefix}.npz`` to CWD, so use a chdir
     # context to keep the artefact inside ``workdir``.

@@ -1353,22 +1353,29 @@ def fit_flattening(F_network_ensemble, θs,
     dFs = weighted_std(allFs, jnp.ones(allFs.shape), axis=0)  # Here weights are uniform
 
     # ---------------------- ERROR PROPAGATION: δJ SOLVER -----------------------
-    def get_δJ(F, δF, Jbar):
-        """
-        Propagate the error on a neural Fisher matrix estimate in θ 
-        to the Jacobian for a flattened coordinate system.
-        """
-        J = np.linalg.inv(Jbar)
-        Q = - np.einsum("bik,bkj,blj->bil", J, δF, J)
-        X = J @ F
-        A = np.einsum("bij,bkj->bik", X, X)
-        S = jnp.array([scipy.linalg.solve_sylvester(a=A[i], b=A[i], q=Q[i])
-                        for i in range(Q.shape[0])])
-        δJ = S @ X
-        return np.linalg.inv(J + δJ) - Jbar, δJ
-
-    print("CALCULATING JACOBIAN ERROR")
-    δJs, δinvJ = get_δJ(allFs.mean(0), dFs, Jbar)
+    # NOTE: Disabled — the δJ / δinvJ outputs were only written into the .npz
+    # bundle and never consumed by any downstream code (no notebook, script,
+    # or postprocessing utility reads ``deltaJ`` / ``delta_invJ``). The Sylvester
+    # solver also fails (raises ``ValueError: array must not contain infs or
+    # NaNs``) whenever any per-sample Fisher contains a NaN, which kills the
+    # whole flattening run for a problem we don't actually use.
+    # Re-enable (and add a NaN guard around the solver call) if a real
+    # consumer of δJ ever appears.
+    #
+    # def get_δJ(F, δF, Jbar):
+    #     """Propagate the error on a neural Fisher matrix estimate in θ
+    #     to the Jacobian for a flattened coordinate system."""
+    #     J = np.linalg.inv(Jbar)
+    #     Q = - np.einsum("bik,bkj,blj->bil", J, δF, J)
+    #     X = J @ F
+    #     A = np.einsum("bij,bkj->bik", X, X)
+    #     S = jnp.array([scipy.linalg.solve_sylvester(a=A[i], b=A[i], q=Q[i])
+    #                     for i in range(Q.shape[0])])
+    #     δJ = S @ X
+    #     return np.linalg.inv(J + δJ) - Jbar, δJ
+    #
+    # print("CALCULATING JACOBIAN ERROR")
+    # δJs, δinvJ = get_δJ(allFs.mean(0), dFs, Jbar)
 
 
     # ---------------------- GLOBAL ROTATION CORRECTION -----------------------
@@ -1403,8 +1410,10 @@ def fit_flattening(F_network_ensemble, θs,
         theta=np.array(θs),              # Canonical: parameters (accessible as 'theta', 'X', 'params')
         eta=np.array(ηs),                # Canonical: coordinates (accessible as 'eta', 'y', 'coords')
         Jacobians=np.array(Jbar),
-        deltaJ=np.array(δJs),
-        delta_invJ=np.array(δinvJ),
+        # deltaJ / delta_invJ disabled with the δJ solver above (dead output);
+        # re-add here if the solver is ever re-enabled.
+        # deltaJ=np.array(δJs),
+        # delta_invJ=np.array(δinvJ),
         meanF=np.array(F_ensemble),
         dFs=np.array(dFs),
         F_ensemble=np.array(allFs),

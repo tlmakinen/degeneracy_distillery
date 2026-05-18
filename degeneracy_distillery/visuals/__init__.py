@@ -70,9 +70,6 @@ the visuals are a real subpackage::
     )
     display_gif(gif_path)
 
-The legacy ``from visuals import ...`` spelling is also kept alive by
-a thin top-level shim in the repo root, so existing notebooks /
-scripts continue to work unchanged.
 """
 from __future__ import annotations
 
@@ -113,7 +110,7 @@ def display_gif(gif_path: str, embed: bool = True):
 
     Examples
     --------
-    >>> from visuals import make_gif, display_gif
+    >>> from degeneracy_distillery.visuals import make_gif, display_gif
     >>> gif_path, _, _ = make_gif("runs/exp/snapshots")
     >>> display_gif(gif_path)   # inline in the next cell output
     """
@@ -137,8 +134,8 @@ _LAZY_FLATTEN_NAMES = (
 def __getattr__(name: str):
     """PEP 562 lazy loader for JAX-dependent symbols.
 
-    Keeps ``import visuals`` cheap and JAX-free until the user actually
-    asks for a training symbol.
+    Keeps ``import degeneracy_distillery.visuals`` cheap and JAX-free
+    until the user actually asks for a training symbol.
     """
     if name in _LAZY_FISHNETS_NAMES:
         from . import training_loop_fishnets_snapshots as _t

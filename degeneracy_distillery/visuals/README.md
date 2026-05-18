@@ -56,10 +56,6 @@ from degeneracy_distillery.visuals import (
 )
 ```
 
-> The legacy `from visuals import ...` spelling is also still supported
-> via a tiny top-level shim in the repo root, so existing notebooks/scripts
-> continue to work without edits.
-
 `train_fishnets_with_snapshots` has the **same positional signature
 and same return tuple** as `train_fishnets`, plus four snapshot-
 related kwargs (`save_every`, `save_initial`, `save_final`,

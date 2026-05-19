@@ -322,6 +322,10 @@ def save_eta_timeseries_npz(
     align_info: Optional[Dict[str, Any]] = None,
     eta_stack_raw: Optional[np.ndarray] = None,
     frob_scores: Optional[np.ndarray] = None,
+    xs_mesh_physical: Optional[np.ndarray] = None,
+    ys_mesh_physical: Optional[np.ndarray] = None,
+    theta_data_min: Optional[Sequence[float]] = None,
+    theta_data_max: Optional[Sequence[float]] = None,
 ) -> str:
     """Save a self-contained ``.npz`` for local replotting.
 
@@ -337,6 +341,14 @@ def save_eta_timeseries_npz(
     applicable. The pre-alignment stack is stored under
     ``eta_stack_raw`` when ``eta_stack_raw`` is supplied, so a local
     replotter can switch alignment modes without re-running training.
+
+    Physical-unit metadata (only present when both ``xs_mesh_physical``
+    and ``ys_mesh_physical`` are provided): ``xs_mesh_physical``,
+    ``ys_mesh_physical``, plus ``theta_data_min`` / ``theta_data_max``
+    if supplied. The (theta_1, theta_2) mesh in scaled coords is always
+    kept under ``xs_mesh`` / ``ys_mesh``; the physical-units mesh is an
+    additive payload so a local replotter can swap units without
+    re-running anything.
     """
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -373,8 +385,96 @@ def save_eta_timeseries_npz(
         )
     if frob_scores is not None:
         payload["frob_scores"] = np.asarray(frob_scores, dtype=np.float64)
+    if xs_mesh_physical is not None and ys_mesh_physical is not None:
+        payload["xs_mesh_physical"] = np.asarray(xs_mesh_physical)
+        payload["ys_mesh_physical"] = np.asarray(ys_mesh_physical)
+    if theta_data_min is not None:
+        payload["theta_data_min"] = np.asarray(theta_data_min, dtype=np.float64)
+    if theta_data_max is not None:
+        payload["theta_data_max"] = np.asarray(theta_data_max, dtype=np.float64)
     np.savez_compressed(out_path, **payload)
     return out_path
+
+
+# ----------------------------------------------------------------------------
+# Physical-unit axis conversion
+# ----------------------------------------------------------------------------
+
+def _resolve_theta_inverse_axes(
+    xs_mesh: np.ndarray,
+    ys_mesh: np.ndarray,
+    *,
+    theta_scaler: Optional[Any],
+    theta_data_min: Optional[Sequence[float]],
+    theta_data_max: Optional[Sequence[float]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map scaled (theta_1, theta_2) mesh axes back to physical units.
+
+    The flattener trains in MinMax-scaled theta space (typically
+    ``[0, 1]``), but for human-facing axis labels we usually want the
+    *physical* parameter values. Two routes are supported:
+
+    * ``theta_scaler``: a fitted scikit-learn ``MinMaxScaler``-like
+      object exposing ``data_min_`` and ``data_max_`` attributes
+      (the attributes ``MinMaxScaler`` populates after ``.fit``).
+    * ``theta_data_min`` / ``theta_data_max``: raw 1-D arrays giving
+      the original physical min/max per parameter. Assumes
+      ``feature_range=(0, 1)`` (i.e.
+      ``theta_scaled = (theta_phys - data_min) / (data_max - data_min)``).
+
+    Only the first two entries are consumed (the gif's two displayed
+    axes). The remaining parameter dims are not used for the contour
+    axes, but their full ``data_min`` / ``data_max`` arrays are also
+    returned so the caller can persist them in the portable ``.npz``.
+
+    Returns
+    -------
+    xs_mesh_phys, ys_mesh_phys : np.ndarray
+        The displayed (X, Y) meshes in physical units, same shapes as
+        ``xs_mesh`` / ``ys_mesh``.
+    data_min, data_max : np.ndarray
+        The full (n_features,) physical bounds resolved from the
+        scaler / arrays.
+    """
+    if theta_scaler is not None:
+        if not (
+            hasattr(theta_scaler, "data_min_") and hasattr(theta_scaler, "data_max_")
+        ):
+            raise TypeError(
+                "theta_scaler does not expose `data_min_` / `data_max_` "
+                "attributes (got "
+                f"{type(theta_scaler).__name__!r}). Provide an sklearn "
+                "MinMaxScaler-like object, or pass `theta_data_min` / "
+                "`theta_data_max` arrays directly."
+            )
+        data_min = np.asarray(theta_scaler.data_min_, dtype=np.float64)
+        data_max = np.asarray(theta_scaler.data_max_, dtype=np.float64)
+    elif theta_data_min is not None and theta_data_max is not None:
+        data_min = np.asarray(theta_data_min, dtype=np.float64)
+        data_max = np.asarray(theta_data_max, dtype=np.float64)
+    else:
+        raise ValueError(
+            "physical-units conversion requested but neither "
+            "`theta_scaler` nor (`theta_data_min`, `theta_data_max`) "
+            "was provided."
+        )
+    if data_min.size < 2 or data_max.size < 2:
+        raise ValueError(
+            "theta_data_min / theta_data_max must have length >= 2 "
+            f"(one entry per parameter axis); got sizes {data_min.size} "
+            f"and {data_max.size}."
+        )
+    span0 = data_max[0] - data_min[0]
+    span1 = data_max[1] - data_min[1]
+    if span0 == 0.0 or span1 == 0.0:
+        raise ValueError(
+            "physical-units conversion requires non-degenerate span on "
+            f"both displayed axes; got data_min={data_min[:2]!r}, "
+            f"data_max={data_max[:2]!r}."
+        )
+    xs_mesh_phys = xs_mesh * span0 + data_min[0]
+    ys_mesh_phys = ys_mesh * span1 + data_min[1]
+    return xs_mesh_phys, ys_mesh_phys, data_min, data_max
 
 
 # ----------------------------------------------------------------------------
@@ -402,6 +502,9 @@ def make_eta_grid_gif(
     loss_label: str = r"\|Q-I\|_F",
     loss_fmt: str = ".2f",
     show_align_blurb: bool = True,
+    theta_scaler: Optional[Any] = None,
+    theta_data_min: Optional[Sequence[float]] = None,
+    theta_data_max: Optional[Sequence[float]] = None,
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render a 2-panel contour gif of ``eta_1`` and ``eta_2`` vs
     ``(theta_1, theta_2)`` evolving over training.
@@ -487,6 +590,23 @@ def make_eta_grid_gif(
         minimal title — useful for README / promo gifs where the
         alignment scheme is documented in surrounding prose rather
         than on the frame itself.
+    theta_scaler : sklearn ``MinMaxScaler``-like, optional
+        If provided, display the X/Y axes in physical (un-scaled)
+        parameter units instead of the scaled ``[0, 1]`` coordinates
+        in which the flattener was actually trained. Must expose
+        ``data_min_`` and ``data_max_`` attributes (i.e. a fitted
+        ``MinMaxScaler`` with ``feature_range=(0, 1)``). The
+        flattening itself stays in scaled coords; only the contour
+        axes (and any ``.npz`` mesh dump) are converted. Mutually
+        exclusive with ``theta_data_min`` / ``theta_data_max``;
+        ``theta_scaler`` takes precedence if both are passed.
+    theta_data_min, theta_data_max : sequence of float, optional
+        Alternative to ``theta_scaler``: pass the physical
+        ``data_min_`` / ``data_max_`` arrays directly (length
+        ``>= 2`` ; only the first two entries are used for the
+        displayed axes). Same assumption: ``feature_range=(0, 1)``.
+        Default ``None`` keeps axes in scaled coordinates (legacy
+        behaviour).
 
     Returns
     -------
@@ -521,6 +641,36 @@ def make_eta_grid_gif(
     ys_mesh = np.asarray(grid["ys_mesh"])
     num_pts = xs_mesh.shape[0]
     n_p = eta_stack.shape[-1]
+
+    # ----- (optional) convert displayed axes to physical units -----
+    # The flattener trains in scaled (typically [0, 1]) theta space; the
+    # contour axes default to that scaled space (legacy behaviour). When
+    # a scaler / explicit data_min / data_max is supplied, only the
+    # X/Y axes are inverse-transformed for display — eta values,
+    # alignment, and percentile colour limits are unchanged.
+    _phys_units = (
+        theta_scaler is not None
+        or (theta_data_min is not None and theta_data_max is not None)
+    )
+    if _phys_units:
+        xs_mesh_disp, ys_mesh_disp, _data_min_full, _data_max_full = (
+            _resolve_theta_inverse_axes(
+                xs_mesh,
+                ys_mesh,
+                theta_scaler=theta_scaler,
+                theta_data_min=theta_data_min,
+                theta_data_max=theta_data_max,
+            )
+        )
+        print(
+            "physical-units axes: "
+            f"theta_1 in [{_data_min_full[0]:.4g}, {_data_max_full[0]:.4g}], "
+            f"theta_2 in [{_data_min_full[1]:.4g}, {_data_max_full[1]:.4g}]"
+        )
+    else:
+        xs_mesh_disp, ys_mesh_disp = xs_mesh, ys_mesh
+        _data_min_full = None
+        _data_max_full = None
 
     # ----- alignment: pop the nonlinear component out of eta -----
     eta_stack_raw = eta_stack
@@ -595,6 +745,10 @@ def make_eta_grid_gif(
             align_info=align_info,
             eta_stack_raw=eta_stack_raw if (align_info is not None and keep_raw_in_npz) else None,
             frob_scores=frob_scores,
+            xs_mesh_physical=xs_mesh_disp if _phys_units else None,
+            ys_mesh_physical=ys_mesh_disp if _phys_units else None,
+            theta_data_min=_data_min_full,
+            theta_data_max=_data_max_full,
         )
         print(
             f"saved eta timeseries to {saved_data_path} "
@@ -671,7 +825,7 @@ def make_eta_grid_gif(
         # Clip to per-panel fixed range so contour levels are stable.
         Z = np.clip(Z, eta_vmins[k], eta_vmaxs[k])
         cs = ax.contourf(
-            xs_mesh, ys_mesh, Z,
+            xs_mesh_disp, ys_mesh_disp, Z,
             levels=np.linspace(eta_vmins[k], eta_vmaxs[k], levels + 1),
             cmap=cmap, extend="both",
         )
@@ -855,6 +1009,29 @@ def _build_argparser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(show_align_blurb=True)
+    p.add_argument(
+        "--theta-data-min",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Physical lower bound per parameter axis (length >= 2; "
+            "first two are used for the X/Y axes). When provided "
+            "together with --theta-data-max, the contour axes are "
+            "displayed in physical units (assumes feature_range=(0,1) "
+            "MinMax scaling)."
+        ),
+    )
+    p.add_argument(
+        "--theta-data-max",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "Physical upper bound per parameter axis (length >= 2; "
+            "first two are used for the X/Y axes). See --theta-data-min."
+        ),
+    )
     return p
 
 
@@ -885,6 +1062,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         show_loss=args.show_loss,
         loss_fmt=args.loss_fmt,
         show_align_blurb=args.show_align_blurb,
+        theta_data_min=args.theta_data_min,
+        theta_data_max=args.theta_data_max,
     )
 
 

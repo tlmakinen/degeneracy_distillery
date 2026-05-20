@@ -679,31 +679,23 @@
       }
     }
 
-    /* === Embedded-in-iframe mode === */
-    body[data-embed="true"] { padding: 8px; }
-    body[data-embed="true"] .container { max-width: 100%; }
+    /* === Embedded-in-iframe mode ===
+     *
+     * Same strategy as the advanced edition: lay the page out at its natural
+     * 920px design width and have JS scale it down with `zoom` so the whole
+     * rig (decks + master + scope) shrinks proportionally to fit the iframe.
+     */
+    body[data-embed="true"] { padding: 0; overflow-x: hidden; }
     body[data-embed="true"] p.lede { display: none; }
-    body[data-embed="true"] h1 { font-size: 22px; }
-    body[data-embed="true"] .header-row { margin-bottom: 4px; }
-    body[data-embed="true"] .deck-header { padding: 8px 12px; }
-    body[data-embed="true"] .cassette-housing { padding: 8px; }
-    body[data-embed="true"] .cassette { max-width: 220px; }
-    body[data-embed="true"] .dj-rig {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-areas:
-        "deckA deckB"
-        "master master";
-    }
-    @media (max-width: 380px) {
-      body[data-embed="true"] .dj-rig {
-        grid-template-columns: 1fr;
-        grid-template-areas: "deckA" "deckB" "master";
-      }
+    body[data-embed="true"] .header-row { margin-bottom: 6px; }
+    body[data-embed="true"] .container {
+      width: 920px;        /* natural design width — JS zooms .container to fit */
+      max-width: 920px;
+      padding: 12px;
     }
 
-    /* "Open in new tab" link — only visible when embedded */
-    .popout-link { display: none; }
-    body[data-embed="true"] .popout-link {
+    /* "Open in new tab" link — always available; especially useful inside an iframe */
+    .popout-link {
       display: inline-block;
       margin-left: 6px;
       font-family: var(--pixel);
@@ -717,7 +709,7 @@
       text-transform: uppercase;
       transition: background 0.1s, color 0.1s;
     }
-    body[data-embed="true"] .popout-link:hover {
+    .popout-link:hover {
       background: var(--lcd-amber);
       color: var(--wood-0);
     }
@@ -1315,14 +1307,35 @@
     });
 
     // ===== Iframe / embed detection =====
-    // When loaded inside an <iframe>, compact the layout and expose an "open in new tab"
-    // link pointing back at this page so blog readers can break out of the iframe.
+    // When loaded inside an <iframe> we (a) proportionally scale the rig down
+    // via CSS `zoom` so it fits any blog content column, and (b) expose an
+    // "open in new tab" link pointing back at this page.
     (function setupEmbedMode() {
       const popout = document.getElementById('popoutLink');
       if (popout) popout.href = window.location.href;
+
       let embedded = false;
       try { embedded = window.self !== window.top; } catch (e) { embedded = true; }
-      if (embedded) document.body.setAttribute('data-embed', 'true');
+      if (!embedded) return;
+
+      document.body.setAttribute('data-embed', 'true');
+
+      const container = document.querySelector('.container');
+      const TARGET_WIDTH = 920;
+      const MIN_ZOOM = 0.4;
+      let lastRatio = -1;
+      function fitToFrame() {
+        const w = window.innerWidth || document.documentElement.clientWidth;
+        const ratio = Math.min(1, Math.max(MIN_ZOOM, w / TARGET_WIDTH));
+        if (Math.abs(ratio - lastRatio) < 0.005) return;
+        lastRatio = ratio;
+        if (container) container.style.zoom = ratio;
+      }
+      fitToFrame();
+      window.addEventListener('resize', fitToFrame);
+      if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(fitToFrame).observe(document.documentElement);
+      }
     })();
 </script>
 </body>

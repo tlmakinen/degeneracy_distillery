@@ -32,22 +32,22 @@ Branch: `main`, Folder: `/docs`**.
 Markdown supports raw HTML, so paste an `<iframe>` straight into your post:
 
 ```html
-<!-- Simple edition: tighter, fits ~640 px tall -->
+<!-- Simple edition (natural ratio ≈ 920×600 ⇒ ~3/2) -->
 <iframe
   src="https://tlmakinen.github.io/degeneracy_distillery/illustration/index_simple.html"
   title="Hearing Degeneracy"
   loading="lazy"
   allow="autoplay"
-  style="width: 100%; min-height: 640px; border: 0; border-radius: 8px;"
+  style="width: 100%; aspect-ratio: 3 / 2; min-height: 460px; border: 0; border-radius: 8px;"
 ></iframe>
 
-<!-- Advanced edition: needs more vertical space for the mixer + heatmaps -->
+<!-- Advanced edition (natural ratio ≈ 1100×860 ⇒ ~5/4) -->
 <iframe
   src="https://tlmakinen.github.io/degeneracy_distillery/illustration/index_tape.html"
   title="Hearing Degeneracy (advanced)"
   loading="lazy"
   allow="autoplay"
-  style="width: 100%; min-height: 1100px; border: 0; border-radius: 8px;"
+  style="width: 100%; aspect-ratio: 5 / 4; min-height: 700px; border: 0; border-radius: 8px;"
 ></iframe>
 ```
 
@@ -55,11 +55,18 @@ The pages auto-detect when they're loaded inside an `<iframe>`
 (`window.self !== window.top`) and switch into a compact "embed mode" that:
 
 - skips the simple/advanced chooser overlay (the host already chose),
-- hides the lede paragraph and tightens paddings,
-- keeps the two tape decks **side-by-side** and wraps the mixer below them
-  at typical blog content widths,
+- hides the lede paragraph,
+- **proportionally scales the entire rig down via CSS `zoom`** so the natural
+  desktop layout (decks side-by-side, mixer in the middle) shrinks to
+  whatever width the blog gives the iframe — JS recomputes the scale on
+  every resize / ResizeObserver tick,
 - exposes an **↗ Open in new tab** button in the header that opens the
   standalone, full-size version of the demo.
+
+Design widths (each edition is laid out at this width and zoomed down):
+
+- `index_tape.html` — 1100 px
+- `index_simple.html` — 920 px
 
 Tips:
 
@@ -70,10 +77,14 @@ Tips:
 - **Audio policy**: the demo requires a user click on `POWER ON` before any
   audio is created, so browser autoplay restrictions are satisfied without
   extra work. `allow="autoplay"` is belt-and-suspenders.
-- **Sizing**: use `min-height` rather than `aspect-ratio` — embed mode
-  reflows mostly vertically once the mixer/master drops below the decks.
-  ~640 px is enough for the simple edition; the advanced edition needs
-  ~1100 px because of the equation panel and the heatmaps.
+- **Sizing**: because of the proportional scaling, the iframe height should
+  track its width. Use `aspect-ratio` (3/2 for simple, 5/4 for advanced)
+  with a `min-height` floor for very narrow viewports. The popout button is
+  always available if a reader wants the un-scaled experience.
+- **Browser support**: scaling uses CSS `zoom`, which is supported in
+  Chrome, Edge, Safari, and Firefox 126+ (May 2024). Older browsers fall
+  back to overflow-clipping and will only show the left portion of the
+  rig — push readers to the popout button.
 
 ## Running locally
 

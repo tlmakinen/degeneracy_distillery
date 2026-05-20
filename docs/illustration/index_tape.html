@@ -788,34 +788,24 @@
       .output-grid { grid-template-columns: 1fr; }
     }
 
-    /* === Embedded-in-iframe mode (the demo squeezes itself into a blog post) === */
-    body[data-embed="true"] { padding: 8px; }
-    body[data-embed="true"] .container { max-width: 100%; }
+    /* === Embedded-in-iframe mode (the demo squeezes itself into a blog post) ===
+     *
+     * Strategy: render the page at its natural design width (1100 px), then
+     * proportionally scale it down with `zoom` so the whole rig — decks on the
+     * sides, mixer in the middle — shrinks to fit the iframe. JS sets `zoom`
+     * dynamically on every resize so the layout tracks the iframe size live.
+     */
+    body[data-embed="true"] { padding: 0; overflow-x: hidden; }
     body[data-embed="true"] p.lede { display: none; }
-    body[data-embed="true"] h1 { font-size: 22px; }
-    body[data-embed="true"] .header-row { margin-bottom: 4px; }
-    body[data-embed="true"] .deck-row { padding: 14px; gap: 12px; }
-    body[data-embed="true"] .cassette-housing { padding: 8px; }
-    body[data-embed="true"] .cassette { max-width: 240px; }
-    body[data-embed="true"] .deck-header { padding: 8px 12px; }
-    /* Force decks side-by-side in embed mode unless we're truly tiny */
-    body[data-embed="true"] .deck-row {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-areas:
-        "deckA deckB"
-        "mixer mixer";
-    }
-    body[data-embed="true"] .mixer-cell { width: 100%; max-width: 100%; }
-    @media (max-width: 420px) {
-      body[data-embed="true"] .deck-row {
-        grid-template-columns: 1fr;
-        grid-template-areas: "deckA" "deckB" "mixer";
-      }
+    body[data-embed="true"] .header-row { margin-bottom: 6px; }
+    body[data-embed="true"] .container {
+      width: 1100px;       /* natural design width — JS scales the body to fit */
+      max-width: 1100px;
+      padding: 12px;
     }
 
-    /* "Open in new tab" link — only visible when embedded */
-    .popout-link { display: none; }
-    body[data-embed="true"] .popout-link {
+    /* "Open in new tab" link — always available; especially useful inside an iframe */
+    .popout-link {
       display: inline-block;
       margin-left: 6px;
       font-family: var(--pixel);
@@ -829,7 +819,7 @@
       text-transform: uppercase;
       transition: background 0.1s, color 0.1s;
     }
-    body[data-embed="true"] .popout-link:hover {
+    .popout-link:hover {
       background: var(--lcd-amber);
       color: var(--wood-0);
     }
@@ -1766,23 +1756,52 @@
     });
 
     // ===== Iframe / embed detection =====
-    // When this page is loaded inside an <iframe> we (a) skip the simple/advanced chooser
-    // (the host already picked one), (b) compact the layout, and (c) expose an "open in
-    // new tab" link pointing back at the page's own URL so readers can break out.
+    // When this page is loaded inside an <iframe> we (a) skip the simple/advanced
+    // chooser (the host already picked one), (b) proportionally scale the entire
+    // rig down to fit the iframe via CSS `zoom`, and (c) expose an "open in new
+    // tab" link pointing back at the page's own URL so readers can break out.
     (function setupEmbedMode() {
       const popout = document.getElementById('popoutLink');
       if (popout) popout.href = window.location.href;
+
       let embedded = false;
       try { embedded = window.self !== window.top; } catch (e) { embedded = true; }
       if (!embedded) return;
+
       document.body.setAttribute('data-embed', 'true');
-      // Replace the two-card chooser with a single POWER ON button so embedded readers
-      // don't accidentally route themselves to a different page inside the iframe.
+
+      // Replace the two-card chooser with just the POWER ON button so embedded
+      // readers don't accidentally route themselves to a different page inside
+      // the iframe.
       const editionGrid = document.querySelector('.edition-grid');
       if (editionGrid) {
         editionGrid.style.gridTemplateColumns = '1fr';
         const otherEdition = editionGrid.querySelector('a.edition-card');
         if (otherEdition) otherEdition.style.display = 'none';
+      }
+
+      // Scale the main container to fit the iframe width. The page is laid out
+      // at its natural 1100px design width (see the .container rule above) and
+      // shrunk proportionally — decks stay side-by-side at any blog width.
+      // We zoom the .container (not body) so position:fixed overlays like the
+      // POWER ON splash keep behaving as full-viewport elements.
+      const container = document.querySelector('.container');
+      const TARGET_WIDTH = 1100;
+      const MIN_ZOOM = 0.4; // below this, text becomes unreadable
+      let lastRatio = -1;
+      function fitToFrame() {
+        const w = window.innerWidth || document.documentElement.clientWidth;
+        const ratio = Math.min(1, Math.max(MIN_ZOOM, w / TARGET_WIDTH));
+        // Guard against scrollbar-appearing oscillation loops (ResizeObserver feedback).
+        if (Math.abs(ratio - lastRatio) < 0.005) return;
+        lastRatio = ratio;
+        if (container) container.style.zoom = ratio;
+      }
+      fitToFrame();
+      window.addEventListener('resize', fitToFrame);
+      // ResizeObserver catches iframe size changes that don't fire window.resize.
+      if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(fitToFrame).observe(document.documentElement);
       }
     })();
   </script>

@@ -326,9 +326,13 @@
     /* === DJ rig (channel decks + master) === */
     .dj-rig {
       display: grid;
-      grid-template-columns: 1fr 130px 1fr;
+      grid-template-columns: minmax(0, 1fr) 130px minmax(0, 1fr);
+      grid-template-areas: "deckA master deckB";
       gap: 14px;
     }
+    .dj-rig > :nth-child(1) { grid-area: deckA; }
+    .dj-rig > :nth-child(2) { grid-area: master; }
+    .dj-rig > :nth-child(3) { grid-area: deckB; }
     .deck-cell {
       display: flex;
       flex-direction: column;
@@ -653,9 +657,69 @@
         0 2px 6px rgba(0,0,0,0.4);
     }
 
-    @media (max-width: 760px) {
-      .dj-rig { grid-template-columns: 1fr; }
+    /* Mid-width: keep both decks side-by-side; master moves below */
+    @media (max-width: 720px) {
+      .dj-rig {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-areas:
+          "deckA deckB"
+          "master master";
+      }
       .logic-presets { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* Mobile portrait: only here do we fully stack */
+    @media (max-width: 420px) {
+      .dj-rig {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "deckA"
+          "deckB"
+          "master";
+      }
+    }
+
+    /* === Embedded-in-iframe mode === */
+    body[data-embed="true"] { padding: 8px; }
+    body[data-embed="true"] .container { max-width: 100%; }
+    body[data-embed="true"] p.lede { display: none; }
+    body[data-embed="true"] h1 { font-size: 22px; }
+    body[data-embed="true"] .header-row { margin-bottom: 4px; }
+    body[data-embed="true"] .deck-header { padding: 8px 12px; }
+    body[data-embed="true"] .cassette-housing { padding: 8px; }
+    body[data-embed="true"] .cassette { max-width: 220px; }
+    body[data-embed="true"] .dj-rig {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-areas:
+        "deckA deckB"
+        "master master";
+    }
+    @media (max-width: 380px) {
+      body[data-embed="true"] .dj-rig {
+        grid-template-columns: 1fr;
+        grid-template-areas: "deckA" "deckB" "master";
+      }
+    }
+
+    /* "Open in new tab" link — only visible when embedded */
+    .popout-link { display: none; }
+    body[data-embed="true"] .popout-link {
+      display: inline-block;
+      margin-left: 6px;
+      font-family: var(--pixel);
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: var(--lcd-amber);
+      text-decoration: none;
+      padding: 6px 12px;
+      border: 2px solid var(--lcd-amber);
+      background: rgba(255, 170, 0, 0.05);
+      text-transform: uppercase;
+      transition: background 0.1s, color 0.1s;
+    }
+    body[data-embed="true"] .popout-link:hover {
+      background: var(--lcd-amber);
+      color: var(--wood-0);
     }
 </style>
 </head>
@@ -664,6 +728,7 @@
     <div class="header-row">
       <h1>Hearing Degeneracy <span class="model-tag">// SIMPLE EDITION</span></h1>
       <a class="switch-link" href="index_tape.html" title="Live equation, three faders, heatmaps">&#9656; Advanced</a>
+      <a class="popout-link" id="popoutLink" target="_blank" rel="noopener" title="Open the full demo in a new tab">&#8599; Open in new tab</a>
     </div>
     <p class="lede">
       A <em>degeneracy</em> is when very different settings of a system end up producing the same observable result. Pick a scenario below, hit <code>ENGAGE</code> on each channel, and slide the faders. Watch the scope; listen. The system math behind every preset is hand-picked to make degeneracy audible.
@@ -1248,6 +1313,17 @@
       initAudio();
       $('startOverlay').style.display = 'none';
     });
+
+    // ===== Iframe / embed detection =====
+    // When loaded inside an <iframe>, compact the layout and expose an "open in new tab"
+    // link pointing back at this page so blog readers can break out of the iframe.
+    (function setupEmbedMode() {
+      const popout = document.getElementById('popoutLink');
+      if (popout) popout.href = window.location.href;
+      let embedded = false;
+      try { embedded = window.self !== window.top; } catch (e) { embedded = true; }
+      if (embedded) document.body.setAttribute('data-embed', 'true');
+    })();
 </script>
 </body>
 </html>

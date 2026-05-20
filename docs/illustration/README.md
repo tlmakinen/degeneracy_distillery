@@ -32,14 +32,34 @@ Branch: `main`, Folder: `/docs`**.
 Markdown supports raw HTML, so paste an `<iframe>` straight into your post:
 
 ```html
+<!-- Simple edition: tighter, fits ~640 px tall -->
 <iframe
   src="https://tlmakinen.github.io/degeneracy_distillery/illustration/index_simple.html"
   title="Hearing Degeneracy"
   loading="lazy"
   allow="autoplay"
-  style="width: 100%; aspect-ratio: 5 / 4; min-height: 720px; border: 0; border-radius: 8px;"
+  style="width: 100%; min-height: 640px; border: 0; border-radius: 8px;"
+></iframe>
+
+<!-- Advanced edition: needs more vertical space for the mixer + heatmaps -->
+<iframe
+  src="https://tlmakinen.github.io/degeneracy_distillery/illustration/index_tape.html"
+  title="Hearing Degeneracy (advanced)"
+  loading="lazy"
+  allow="autoplay"
+  style="width: 100%; min-height: 1100px; border: 0; border-radius: 8px;"
 ></iframe>
 ```
+
+The pages auto-detect when they're loaded inside an `<iframe>`
+(`window.self !== window.top`) and switch into a compact "embed mode" that:
+
+- skips the simple/advanced chooser overlay (the host already chose),
+- hides the lede paragraph and tightens paddings,
+- keeps the two tape decks **side-by-side** and wraps the mixer below them
+  at typical blog content widths,
+- exposes an **↗ Open in new tab** button in the header that opens the
+  standalone, full-size version of the demo.
 
 Tips:
 
@@ -50,8 +70,10 @@ Tips:
 - **Audio policy**: the demo requires a user click on `POWER ON` before any
   audio is created, so browser autoplay restrictions are satisfied without
   extra work. `allow="autoplay"` is belt-and-suspenders.
-- **Sizing**: the advanced edition is ~900–1100 px tall on desktop. Use
-  `aspect-ratio` plus a `min-height` so it doesn't squash on narrow viewports.
+- **Sizing**: use `min-height` rather than `aspect-ratio` — embed mode
+  reflows mostly vertically once the mixer/master drops below the decks.
+  ~640 px is enough for the simple edition; the advanced edition needs
+  ~1100 px because of the equation panel and the heatmaps.
 
 ## Running locally
 

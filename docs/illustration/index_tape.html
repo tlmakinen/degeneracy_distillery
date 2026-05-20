@@ -293,6 +293,69 @@
       background: linear-gradient(180deg, #ccc 0%, #888 100%);
     }
 
+    /* Default tape buttons (loaded from tape_defaults.html). The "♫" side-link
+       opens a Spotify track in a new tab if one is configured for that tape. */
+    .tape-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .tape-btn {
+      background: linear-gradient(180deg, #c8a060 0%, #6e4810 100%);
+      border: 1px solid #2a1810;
+      color: #1a0e08;
+      padding: 4px 10px;
+      font-family: var(--mono);
+      font-size: 13px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      text-transform: uppercase;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.45),
+        inset 0 -1px 0 rgba(0,0,0,0.45);
+      transition: filter 0.05s, transform 0.05s;
+    }
+    .tape-btn:hover { background: linear-gradient(180deg, #e8c080 0%, #8a6020 100%); }
+    .tape-btn:active { transform: translateY(1px); }
+    .tape-btn.active {
+      background: linear-gradient(180deg, #ffcc40 0%, #d88010 100%);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.4),
+        0 0 8px rgba(255, 170, 0, 0.55);
+    }
+    .tape-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    /* Clickable-but-broken tape (config missing or audio failed to load) */
+    .tape-btn.error {
+      background: linear-gradient(180deg, #c84545 0%, #6a1818 100%);
+      color: #fff5f5;
+      border-color: #2a0000;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.25),
+        inset 0 -1px 0 rgba(0,0,0,0.5),
+        0 0 8px rgba(255, 60, 60, 0.5);
+    }
+    .tape-btn.error::before { content: "⚠ "; }
+    .tape-spotify {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #1db954;
+      color: #fff;
+      font-size: 14px;
+      text-decoration: none;
+      transition: transform 0.1s, background 0.1s;
+      margin-left: -2px;
+    }
+    .tape-spotify:hover { transform: scale(1.12); background: #1ed760; }
+    .tape-spotify[hidden] { display: none; }
+
     /* === Center mixer panel === */
     .mixer-cell {
       background: linear-gradient(180deg, #b8b8b8 0%, #888 100%);
@@ -958,6 +1021,12 @@
           <div class="deck-controls-strip">
             <audio id="audio1" controls loop></audio>
             <button class="engage-btn" data-deck="1" id="engage1">Engage Deck A</button>
+            <div class="row tape-row">
+              <button class="tape-btn" data-deck="1" data-tape-idx="0">Tape 1</button>
+              <a class="tape-spotify" data-deck="1" data-tape-idx="0" target="_blank" rel="noopener" hidden>&#9835;</a>
+              <button class="tape-btn" data-deck="1" data-tape-idx="1">Tape 2</button>
+              <a class="tape-spotify" data-deck="1" data-tape-idx="1" target="_blank" rel="noopener" hidden>&#9835;</a>
+            </div>
             <div class="row">
               <input type="file" id="file1" accept="audio/*" />
             </div>
@@ -1129,6 +1198,12 @@
           <div class="deck-controls-strip">
             <audio id="audio2" controls loop></audio>
             <button class="engage-btn" data-deck="2" id="engage2">Engage Deck B</button>
+            <div class="row tape-row">
+              <button class="tape-btn" data-deck="2" data-tape-idx="2">Tape 3</button>
+              <a class="tape-spotify" data-deck="2" data-tape-idx="2" target="_blank" rel="noopener" hidden>&#9835;</a>
+              <button class="tape-btn" data-deck="2" data-tape-idx="3">Tape 4</button>
+              <a class="tape-spotify" data-deck="2" data-tape-idx="3" target="_blank" rel="noopener" hidden>&#9835;</a>
+            </div>
             <div class="row">
               <input type="file" id="file2" accept="audio/*" />
             </div>
@@ -1401,25 +1476,34 @@
       });
     }
 
-    function setDeckFile(deckIdx, file) {
+    /**
+     * Point a deck's <audio> at any URL (a blob URL from a user upload, or a
+     * relative path to a hosted file like the default tapes), and route it
+     * through the deck's gain node. Auto-engages the deck so the user
+     * actually hears their selection.
+     */
+    function setDeckUrl(deckIdx, url) {
       const d = state.decks[deckIdx];
       const audioEl = audioEls[deckIdx];
-      audioEl.src = URL.createObjectURL(file);
+      audioEl.src = url;
       audioEl.load();
       d.hasTrack = true;
 
-      // Auto-engage on file upload — the user just selected audio, they want to hear it.
       if (!d.engaged) toggleEngage(deckIdx);
 
       if (d.mode !== 'track') {
-        // Switch to track mode (this also wires the audio graph and starts playback).
+        // Switch to track mode (also wires the audio graph and starts playback).
         setSource(deckIdx, 'track');
       } else {
-        // Already in track mode; the new src will play through the cached MediaElementSource.
+        // Already in track mode; the new src plays through the cached MediaElementSource.
         audioEl.play().catch(() => {});
         updateSourceButtons(deckIdx);
       }
       updatePlaying(deckIdx);
+    }
+
+    function setDeckFile(deckIdx, file) {
+      setDeckUrl(deckIdx, URL.createObjectURL(file));
     }
 
     // ===================== Equation =====================
@@ -1763,6 +1847,89 @@
       initAudio();
       startOverlay.style.display = 'none';
     });
+
+    // ===== Default tape configuration =====
+    // Loads tape_defaults.html and wires the tape buttons in each deck.
+    // Tape index 0,1 -> deck A (data-deck="1"); 2,3 -> deck B (data-deck="2").
+    //
+    // The buttons stay clickable even when the config fails to load, so the
+    // user gets a clear error message + visible red state instead of silent
+    // greyed-out buttons that look like the demo is broken.
+    (async function setupTapeDefaults() {
+      let tapes = [];
+      let configError = null;
+      try {
+        const resp = await fetch('tape_defaults.html');
+        if (!resp.ok) {
+          configError = `tape_defaults.html → HTTP ${resp.status}`;
+        } else {
+          const text = await resp.text();
+          const doc = new DOMParser().parseFromString(text, 'text/html');
+          const cfg = doc.querySelector('#tape-config');
+          if (!cfg) {
+            configError = 'tape_defaults.html has no <script id="tape-config">';
+          } else {
+            try { tapes = JSON.parse(cfg.textContent); }
+            catch (e) { configError = 'tape_defaults.html JSON parse error: ' + e.message; }
+          }
+        }
+      } catch (e) {
+        configError = 'fetch failed: ' + e.message;
+      }
+      if (configError) {
+        console.warn('[degeneracy-distillery] Tape defaults:', configError,
+          '\nMake sure docs/illustration/tape_defaults.html is committed and deployed.');
+      }
+
+      document.querySelectorAll('.tape-btn').forEach(btn => {
+        const tapeIdx = parseInt(btn.dataset.tapeIdx, 10);
+        const tape = tapes[tapeIdx];
+        const broken = !tape || !tape.audioUrl;
+        if (broken) {
+          btn.classList.add('error');
+          btn.title = configError
+            ? `Tape config missing: ${configError}`
+            : 'No audio configured for this tape — edit tape_defaults.html';
+        } else if (tape.label) {
+          btn.textContent = tape.label;
+        }
+        btn.addEventListener('click', () => {
+          if (broken) {
+            console.error('[degeneracy-distillery] tape click failed:', btn.title);
+            alert(`Tape not playable.\n\n${btn.title}`);
+            return;
+          }
+          const deckIdx = parseInt(btn.dataset.deck, 10) - 1;
+          initAudio();
+          setDeckUrl(deckIdx, tape.audioUrl);
+          document.querySelectorAll(`.tape-btn[data-deck="${btn.dataset.deck}"]`)
+            .forEach(b => b.classList.toggle('active', b === btn));
+        });
+      });
+
+      document.querySelectorAll('.tape-spotify').forEach(a => {
+        const tapeIdx = parseInt(a.dataset.tapeIdx, 10);
+        const tape = tapes[tapeIdx];
+        if (tape && tape.spotifyUrl) {
+          a.href = tape.spotifyUrl;
+          a.title = `Listen to "${tape.label || ('Tape ' + (tapeIdx + 1))}" on Spotify`;
+          a.hidden = false;
+        }
+      });
+
+      // If the audio file 404s after a click, mark the active tape as broken.
+      audioEls.forEach((el, deckIdx) => {
+        el.addEventListener('error', () => {
+          const deckAttr = String(deckIdx + 1);
+          document.querySelectorAll(`.tape-btn[data-deck="${deckAttr}"].active`)
+            .forEach(b => {
+              b.classList.add('error');
+              b.title = `Audio failed to load:\n${el.src}\n\nFile missing or wrong path? Check tape_defaults.html and audio/.`;
+              console.error('[degeneracy-distillery] audio load error:', el.src);
+            });
+        });
+      });
+    })();
 
     // ===== Iframe / embed detection =====
     // When this page is loaded inside an <iframe> we (a) skip the simple/advanced

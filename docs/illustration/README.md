@@ -85,6 +85,17 @@ Tips:
   Chrome, Edge, Safari, and Firefox 126+ (May 2024). Older browsers fall
   back to overflow-clipping and will only show the left portion of the
   rig — push readers to the popout button.
+- **Cache-busting after a CSS push**: GitHub Pages serves these files with
+  fairly aggressive cache headers, and `loading="lazy"` doesn't help. After
+  pushing visual changes, append a version query string to the iframe `src`
+  so browsers refetch the fresh file:
+
+  ```html
+  <iframe src="https://tlmakinen.github.io/degeneracy_distillery/illustration/index_tape.html?v=3" ...></iframe>
+  ```
+
+  Pages ignores the query string for routing; the browser treats `?v=N` as a
+  new URL. Bump `N` whenever you redeploy.
 
 ## Running locally
 
@@ -102,12 +113,46 @@ External dependencies are loaded from CDNs:
   to safely parse user-supplied equations (the simple edition has no math.js
   dependency).
 
+## Default tape buttons
+
+Each deck shows two **default tape** buttons next to the `Choose File` input,
+plus an optional small green ♫ link that opens a Spotify track in a new tab:
+
+```
+Deck A:  [ Tape 1 ♫ ]  [ Tape 2 ]   [Choose File]  no file loaded
+Deck B:  [ Tape 3 ♫ ]  [ Tape 4 ]   [Choose File]  no file loaded
+```
+
+The tapes are configured in [`tape_defaults.html`](./tape_defaults.html) and
+shared by both editions. To add or change a tape:
+
+1. Drop a short MP3 / OGG / WAV clip into [`audio/`](./audio/) (see
+   [`audio/README.md`](./audio/README.md) for recommended specs).
+2. Edit the JSON inside the `<script type="application/json" id="tape-config">`
+   block in `tape_defaults.html`. Each tape has:
+   - `label` — short button text.
+   - `audioUrl` — relative path to the clip (this is what plays *through the
+     fader chain* in the demo).
+   - `spotifyUrl` — optional. If set, a small green ♫ link appears next to
+     the button and opens the full track on Spotify in a new tab. Set to
+     `null` to omit.
+3. Bump the `?v=N` query string in your blog's `<iframe src>` so browsers
+   refetch the new config.
+
+> **Note**: Spotify embeds can't be processed by the Web Audio API (they're
+> sandboxed iframes), which is why the demo uses local clips for playback
+> and only links *out* to Spotify. Use 30–60 second clips you have rights to
+> distribute.
+
 ## Files
 
 ```
 docs/illustration/
-├── README.md          # this file
-├── index.html         # synthwave/CRT edition (advanced, original styling)
-├── index_simple.html  # tape-deck simple edition (presets, grandma-friendly)
-└── index_tape.html    # tape-deck advanced edition + simple/advanced chooser
+├── README.md           # this file
+├── tape_defaults.html  # config for the four default tape buttons
+├── audio/              # short clips referenced by tape_defaults.html
+│   └── README.md
+├── index.html          # synthwave/CRT edition (advanced, original styling)
+├── index_simple.html   # tape-deck simple edition (presets, grandma-friendly)
+└── index_tape.html     # tape-deck advanced edition + simple/advanced chooser
 ```

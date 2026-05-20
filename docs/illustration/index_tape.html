@@ -1314,6 +1314,11 @@
 
     // ===================== Audio init =====================
     function initAudio() {
+      // Idempotent: every tape-button / engage / source-toggle click re-calls this
+      // defensively. Without this guard we would spawn a new AudioContext on each
+      // click, orphaning the cached MediaElementSource (which can only be created
+      // once per <audio> element) and silently breaking subsequent tape switches.
+      if (state.ctx) return;
       const Ctx = window.AudioContext || window.webkitAudioContext;
       state.ctx = new Ctx();
 

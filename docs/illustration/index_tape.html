@@ -1,0 +1,1696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hearing Degeneracy &mdash; Tape Deck Edition</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=VT323&family=Silkscreen:wght@400;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/mathjs@13.2.2/lib/browser/math.js"></script>
+  <style>
+    :root {
+      --wood-0: #0e0604;
+      --wood-1: #1a0e08;
+      --wood-2: #2a1810;
+      --wood-3: #4a2818;
+      --metal-light: #c4c4c4;
+      --metal: #9a9a9a;
+      --metal-mid: #777;
+      --metal-dark: #555;
+      --metal-edge: #1a1a1a;
+      --recess: #0a0500;
+      --label-cream: #f0e0c0;
+      --label-cream-edge: #8a6a3a;
+      --label-dark: #2a1810;
+      --lcd-bg: #0a0500;
+      --lcd-amber: #ffaa00;
+      --lcd-dim: #6a4a10;
+      --led-red: #ff2030;
+      --led-green: #20ff60;
+      --led-amber: #ffaa00;
+      --text-light: #e0d0a8;
+      --text-dim: #8a7558;
+      --mono: 'VT323', 'Share Tech Mono', Menlo, Consolas, monospace;
+      --pixel: 'Silkscreen', 'Press Start 2P', monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: var(--mono);
+      font-size: 18px;
+      background: var(--wood-0);
+      background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(74, 40, 24, 0.6), transparent 60%),
+        radial-gradient(ellipse at 0% 100%, rgba(20, 10, 5, 0.5), transparent 60%),
+        linear-gradient(180deg, #1a0a04 0%, #0a0502 100%);
+      color: var(--text-light);
+      margin: 0;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    .container { max-width: 1100px; margin: 0 auto; position: relative; }
+
+    h1 {
+      font-family: var(--pixel);
+      font-weight: 700;
+      letter-spacing: 2px;
+      margin: 0 0 8px;
+      font-size: 22px;
+      color: var(--label-cream);
+      text-shadow: 0 2px 0 #000, 0 0 12px rgba(0,0,0,0.6);
+      text-transform: uppercase;
+    }
+    h1 .model-tag {
+      color: var(--lcd-amber);
+      font-size: 13px;
+      letter-spacing: 1.5px;
+      text-shadow: 0 0 6px rgba(255, 170, 0, 0.55);
+      margin-left: 8px;
+    }
+
+    .header-row {
+      display: flex;
+      align-items: baseline;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .header-row h1 { margin: 0; }
+    .switch-link {
+      margin-left: auto;
+      font-family: var(--pixel);
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: var(--lcd-amber);
+      text-decoration: none;
+      padding: 6px 12px;
+      border: 2px solid var(--lcd-amber);
+      background: rgba(255, 170, 0, 0.05);
+      transition: background 0.1s, color 0.1s;
+      text-transform: uppercase;
+    }
+    .switch-link:hover {
+      background: var(--lcd-amber);
+      color: var(--wood-0);
+    }
+
+    p.lede {
+      color: var(--text-dim);
+      max-width: 780px;
+      line-height: 1.4;
+      margin: 0 0 24px;
+      font-size: 18px;
+    }
+    p.lede em { color: var(--lcd-amber); font-style: normal; text-shadow: 0 0 6px rgba(255,170,0,0.5); }
+    p.lede code { color: var(--lcd-amber); font-family: var(--mono); }
+
+    /* === Tape deck unit === */
+    .tape-deck {
+      background: linear-gradient(180deg, var(--metal-light) 0%, var(--metal) 50%, var(--metal-mid) 100%);
+      border: 3px solid var(--metal-edge);
+      border-radius: 6px;
+      box-shadow:
+        inset 0 2px 0 rgba(255,255,255,0.55),
+        inset 0 -2px 0 rgba(0,0,0,0.5),
+        0 6px 22px rgba(0,0,0,0.7);
+      margin-bottom: 20px;
+      position: relative;
+    }
+    /* Brushed-metal vertical streaks */
+    .tape-deck::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        90deg,
+        rgba(255,255,255,0.04) 0,
+        rgba(255,255,255,0.04) 1px,
+        rgba(0,0,0,0.04) 1px,
+        rgba(0,0,0,0.04) 2px
+      );
+      pointer-events: none;
+      border-radius: 3px;
+    }
+
+    .deck-header {
+      background: linear-gradient(180deg, #2a2018 0%, #14100a 100%);
+      color: var(--label-cream);
+      padding: 8px 18px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border-bottom: 2px solid #000;
+      position: relative;
+      z-index: 2;
+      flex-wrap: wrap;
+    }
+    .deck-header .brand {
+      font-family: var(--pixel);
+      font-size: 14px;
+      letter-spacing: 2px;
+      color: var(--label-cream);
+      text-shadow: 0 0 6px rgba(240, 224, 192, 0.4);
+    }
+    .deck-header .model {
+      color: var(--text-dim);
+      font-size: 13px;
+      letter-spacing: 1.2px;
+      flex: 1;
+    }
+    .led-cluster {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+    }
+    .led {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--led-red);
+      box-shadow: 0 0 8px currentColor, inset 0 0 2px rgba(255,255,255,0.4);
+      color: var(--led-red);
+    }
+    .led.green { background: var(--led-green); color: var(--led-green); }
+    .led.amber { background: var(--led-amber); color: var(--led-amber); }
+    .led.off { background: #2a1810; box-shadow: inset 0 0 2px rgba(0,0,0,0.6); color: transparent; }
+
+    .deck-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 18px;
+      padding: 22px 22px 18px;
+      align-items: start;
+      position: relative;
+      z-index: 1;
+    }
+
+    .deck-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    /* === Cassette housing (recessed black well) === */
+    .cassette-housing {
+      background: linear-gradient(180deg, #050200 0%, #1a0e08 50%, #050200 100%);
+      border: 2px solid #000;
+      border-radius: 4px;
+      padding: 14px;
+      box-shadow:
+        inset 0 0 28px rgba(0,0,0,0.85),
+        inset 0 2px 4px rgba(0,0,0,0.6),
+        0 1px 0 rgba(255,255,255,0.15);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cassette {
+      width: 100%;
+      height: auto;
+      max-width: 300px;
+      display: block;
+    }
+
+    /* === Reel spinning animation === */
+    .cassette .reel {
+      animation: cassette-spin 2.5s linear infinite;
+      animation-play-state: paused;
+      transform-box: view-box;
+    }
+    .cassette .reel.reel-takeup { animation-duration: 2.15s; }
+    .cassette.playing .reel { animation-play-state: running; }
+    @keyframes cassette-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* Per-deck name plate */
+    .deck-nameplate {
+      background: var(--label-cream);
+      border: 1px solid var(--label-cream-edge);
+      padding: 4px 10px;
+      color: var(--label-dark);
+      font-family: var(--pixel);
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-align: center;
+      font-weight: 700;
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.15);
+    }
+
+    /* Per-deck control strip */
+    .deck-controls-strip {
+      background: linear-gradient(180deg, #2a2018 0%, #160e08 100%);
+      border: 1px solid #000;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: inset 0 0 8px rgba(0,0,0,0.55);
+    }
+    .deck-controls-strip audio {
+      width: 100%;
+      filter: contrast(1.1) brightness(0.9) sepia(0.4) hue-rotate(-15deg);
+    }
+    .deck-controls-strip .row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .deck-controls-strip input[type=file] {
+      flex: 1;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 14px;
+      min-width: 0;
+    }
+    .deck-controls-strip input[type=file]::file-selector-button {
+      background: linear-gradient(180deg, #aaa 0%, #777 100%);
+      border: 1px solid #000;
+      color: var(--label-dark);
+      padding: 2px 8px;
+      font-family: var(--mono);
+      font-size: 13px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), inset 0 -1px 0 rgba(0,0,0,0.4);
+      margin-right: 8px;
+    }
+    .deck-controls-strip input[type=file]::file-selector-button:hover {
+      background: linear-gradient(180deg, #ccc 0%, #888 100%);
+    }
+
+    /* === Center mixer panel === */
+    .mixer-cell {
+      background: linear-gradient(180deg, #b8b8b8 0%, #888 100%);
+      border: 2px solid var(--metal-edge);
+      border-radius: 4px;
+      padding: 14px;
+      min-width: 320px;
+      max-width: 380px;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.5),
+        inset 0 -1px 0 rgba(0,0,0,0.4),
+        2px 2px 6px rgba(0,0,0,0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* LCD-style equation panel */
+    .lcd-block {
+      background: linear-gradient(180deg, #1a0e00 0%, #0a0500 100%);
+      border: 2px solid #000;
+      padding: 8px 12px;
+      box-shadow:
+        inset 0 0 22px rgba(255, 170, 0, 0.18),
+        inset 0 2px 4px rgba(0,0,0,0.85);
+    }
+    .lcd-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .lcd-tag {
+      font-family: var(--mono);
+      color: var(--lcd-amber);
+      font-size: 12px;
+      letter-spacing: 2px;
+      opacity: 0.65;
+      text-shadow: 0 0 4px rgba(255,170,0,0.4);
+    }
+    .equation-input {
+      width: 100%;
+      background: transparent;
+      border: none;
+      border-bottom: 1px dashed rgba(255, 170, 0, 0.3);
+      color: var(--lcd-amber);
+      font-family: var(--mono);
+      font-size: 22px;
+      letter-spacing: 1px;
+      outline: none;
+      text-shadow: 0 0 6px rgba(255, 170, 0, 0.7);
+      caret-color: var(--lcd-amber);
+      padding: 2px 0;
+    }
+    .equation-input.error {
+      color: var(--led-red);
+      text-shadow: 0 0 6px rgba(255,32,48,0.7);
+      border-bottom-color: rgba(255, 32, 48, 0.4);
+    }
+    .lcd-counter {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 4px;
+      color: var(--lcd-amber);
+      font-family: var(--mono);
+      letter-spacing: 1px;
+      text-shadow: 0 0 4px rgba(255,170,0,0.5);
+    }
+    .lcd-counter .lcd-tag-sm { font-size: 13px; opacity: 0.7; }
+    .lcd-counter b {
+      font-size: 24px;
+      font-weight: 400;
+      letter-spacing: 2px;
+      text-shadow: 0 0 8px rgba(255, 170, 0, 0.85);
+    }
+    .lcd-counter .clipped {
+      color: var(--led-red);
+      font-size: 13px;
+      margin-left: 6px;
+      text-shadow: 0 0 6px rgba(255,32,48,0.7);
+    }
+
+    /* === Hardware buttons (Synth/Track, presets, refresh) === */
+    .btn,
+    .preset {
+      background: linear-gradient(180deg, #b8b8b8 0%, #777 100%);
+      border: 1px solid var(--metal-edge);
+      color: var(--label-dark);
+      padding: 4px 10px;
+      font-family: var(--mono);
+      font-size: 14px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.55),
+        inset 0 -1px 0 rgba(0,0,0,0.45),
+        1px 1px 2px rgba(0,0,0,0.6);
+      transition: filter 0.05s;
+      border-radius: 1px;
+    }
+    .btn:hover,
+    .preset:hover {
+      background: linear-gradient(180deg, #d8d8d8 0%, #888 100%);
+    }
+    .btn:active,
+    .preset:active {
+      box-shadow:
+        inset 0 1px 2px rgba(0,0,0,0.6),
+        inset 0 -1px 0 rgba(255,255,255,0.2);
+      transform: translateY(1px);
+    }
+    .btn.active {
+      background: linear-gradient(180deg, #ffcc40 0%, #d88010 100%);
+      color: #1a0a00;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.4),
+        inset 0 -1px 0 rgba(0,0,0,0.4),
+        0 0 10px rgba(255, 170, 0, 0.65),
+        1px 1px 2px rgba(0,0,0,0.6);
+      text-shadow: 0 0 4px rgba(255,255,255,0.4);
+    }
+    .btn:disabled, .btn[disabled] {
+      opacity: 0.42;
+      cursor: not-allowed;
+      pointer-events: none;
+      background: linear-gradient(180deg, #888 0%, #555 100%);
+      color: #444;
+      text-shadow: none;
+    }
+    .btn.small,
+    .preset { padding: 3px 8px; font-size: 13px; }
+
+    /* Big play/pause "engage" button per deck */
+    .engage-btn {
+      background: linear-gradient(180deg, #b8b8b8 0%, #777 100%);
+      border: 1px solid var(--metal-edge);
+      color: var(--label-dark);
+      padding: 8px 12px;
+      font-family: var(--pixel);
+      font-size: 11px;
+      letter-spacing: 2px;
+      cursor: pointer;
+      text-transform: uppercase;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.55),
+        inset 0 -1px 0 rgba(0,0,0,0.45),
+        1px 1px 2px rgba(0,0,0,0.6);
+      transition: filter 0.05s;
+    }
+    .engage-btn:hover { background: linear-gradient(180deg, #d8d8d8 0%, #888 100%); }
+    .engage-btn:active {
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.6);
+      transform: translateY(1px);
+    }
+    .engage-btn.active {
+      background: linear-gradient(180deg, #ffcc40 0%, #d88010 100%);
+      color: #1a0a00;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.4),
+        inset 0 -1px 0 rgba(0,0,0,0.4),
+        0 0 12px rgba(255, 170, 0, 0.7),
+        1px 1px 2px rgba(0,0,0,0.6);
+      text-shadow: 0 0 4px rgba(255,255,255,0.4);
+    }
+
+    .preset-buttons {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    /* === 3 fader columns === */
+    .mixer-faders {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 100%);
+      border: 1px solid #000;
+      padding: 12px 8px;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.7);
+    }
+    .fader-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .fader-label {
+      font-family: var(--mono);
+      color: var(--lcd-amber);
+      font-size: 18px;
+      letter-spacing: 1px;
+      text-shadow: 0 0 4px rgba(255,170,0,0.55);
+    }
+    .fader-value {
+      font-family: var(--mono);
+      color: var(--lcd-amber);
+      font-size: 14px;
+      letter-spacing: 1px;
+      text-shadow: 0 0 4px rgba(255,170,0,0.4);
+      background: var(--lcd-bg);
+      border: 1px solid #2a1a08;
+      padding: 0 4px;
+      min-width: 46px;
+      text-align: center;
+    }
+    .fader-track {
+      width: 32px;
+      height: 180px;
+      background: linear-gradient(180deg, #000 0%, #1a1a1a 50%, #000 100%);
+      border: 1px solid #444;
+      border-radius: 2px;
+      box-shadow:
+        inset 1px 1px 4px rgba(0,0,0,0.85),
+        inset -1px -1px 0 rgba(70,70,70,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    .fader-track::before {
+      content: '';
+      position: absolute;
+      left: 4px; right: 4px; top: 8px; bottom: 8px;
+      background-image: repeating-linear-gradient(
+        0deg,
+        transparent 0,
+        transparent 16px,
+        rgba(255, 170, 0, 0.16) 16px,
+        rgba(255, 170, 0, 0.16) 17px
+      );
+      pointer-events: none;
+    }
+
+    /* Twins row inside the brushed mixer */
+    .twins-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-family: var(--mono);
+      font-size: 14px;
+      color: var(--label-dark);
+      letter-spacing: 1px;
+      background: var(--label-cream);
+      padding: 6px 10px;
+      border: 1px solid var(--label-cream-edge);
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.15);
+    }
+    .twins-row > span:first-child {
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 1.5px;
+    }
+    .twin-chip {
+      background: #2a1a08;
+      border: 1px solid #1a0a00;
+      color: var(--lcd-amber);
+      padding: 2px 8px;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 14px;
+      text-shadow: 0 0 4px rgba(255,170,0,0.5);
+      box-shadow: 1px 1px 2px rgba(0,0,0,0.6);
+    }
+    .twin-chip:hover { background: #3a2818; }
+    .twin-empty {
+      color: #6a4a30;
+      font-style: italic;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    /* vertical slider inside the fader track */
+    input[type=range].fader {
+      -webkit-appearance: slider-vertical;
+      appearance: slider-vertical;
+      writing-mode: bt-lr;
+      width: 24px;
+      height: 160px;
+      background: transparent;
+      cursor: pointer;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* === Output rack === */
+    .output-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .rack-panel {
+      background: linear-gradient(180deg, var(--metal-light) 0%, var(--metal) 50%, var(--metal-mid) 100%);
+      border: 3px solid var(--metal-edge);
+      border-radius: 6px;
+      padding: 14px;
+      position: relative;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.45),
+        inset 0 -1px 0 rgba(0,0,0,0.5),
+        0 4px 14px rgba(0,0,0,0.6);
+    }
+    .rack-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        90deg,
+        rgba(255,255,255,0.04) 0,
+        rgba(255,255,255,0.04) 1px,
+        rgba(0,0,0,0.04) 1px,
+        rgba(0,0,0,0.04) 2px
+      );
+      pointer-events: none;
+      border-radius: 3px;
+    }
+    .rack-panel > * { position: relative; z-index: 1; }
+    .panel-title {
+      background: var(--label-cream);
+      border: 1px solid var(--label-cream-edge);
+      padding: 2px 10px;
+      color: var(--label-dark);
+      font-family: var(--pixel);
+      font-size: 10px;
+      letter-spacing: 1.8px;
+      display: inline-block;
+      margin: 0 0 10px;
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.15);
+    }
+    canvas { display: block; }
+    #waveform {
+      width: 100%;
+      height: 200px;
+      background: var(--lcd-bg);
+      border: 2px inset #333;
+      border-radius: 0;
+      box-shadow: inset 0 0 24px rgba(255, 170, 0, 0.12);
+    }
+
+    .heatmaps {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .heatmap-row {
+      background: linear-gradient(180deg, #2a2018 0%, #14100a 100%);
+      border: 1px solid #000;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: inset 0 0 6px rgba(0,0,0,0.6);
+    }
+    .heatmap-row canvas {
+      width: 100px;
+      height: 100px;
+      image-rendering: pixelated;
+      border: 1px solid #000;
+      cursor: crosshair;
+    }
+    .heatmap-row .label {
+      font-family: var(--mono);
+      font-size: 16px;
+      color: var(--lcd-amber);
+      line-height: 1.15;
+      text-shadow: 0 0 4px rgba(255,170,0,0.45);
+    }
+    .heatmap-row .label .sub {
+      color: var(--text-dim);
+      font-size: 13px;
+      text-shadow: none;
+    }
+
+    /* === Start overlay (POWER ON) === */
+    .start-overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(ellipse at center, #1a0a04 0%, #000 80%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      gap: 18px;
+      padding: 24px;
+    }
+    .start-overlay h2 {
+      font-family: var(--pixel);
+      color: var(--lcd-amber);
+      font-weight: 700;
+      letter-spacing: 3px;
+      margin: 0 0 2px;
+      font-size: 22px;
+      text-shadow: 0 0 12px rgba(255, 170, 0, 0.7);
+      text-transform: uppercase;
+    }
+    .start-overlay p {
+      color: var(--text-light);
+      max-width: 540px;
+      text-align: center;
+      margin: 0 0 6px;
+      font-family: var(--mono);
+      font-size: 18px;
+      line-height: 1.4;
+    }
+
+    /* Edition chooser */
+    .edition-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      max-width: 600px;
+      width: 100%;
+    }
+    .edition-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      background: linear-gradient(180deg, var(--metal-light) 0%, var(--metal-mid) 100%);
+      color: var(--label-dark);
+      border: 2px solid #1a0a00;
+      padding: 18px 20px;
+      cursor: pointer;
+      font-family: var(--mono);
+      text-decoration: none;
+      text-align: left;
+      box-shadow:
+        inset 0 2px 0 rgba(255,255,255,0.5),
+        inset 0 -2px 0 rgba(0,0,0,0.45),
+        0 4px 12px rgba(0,0,0,0.6);
+      transition: transform 0.05s, box-shadow 0.1s, background 0.1s;
+    }
+    .edition-card:hover {
+      background: linear-gradient(180deg, #ffcc40 0%, #d88010 100%);
+      color: #1a0a00;
+      box-shadow:
+        inset 0 2px 0 rgba(255,255,255,0.4),
+        inset 0 -2px 0 rgba(0,0,0,0.4),
+        0 0 24px rgba(255, 170, 0, 0.55),
+        0 4px 14px rgba(0,0,0,0.6);
+    }
+    .edition-card:active { transform: translateY(2px); }
+    .edition-name {
+      font-family: var(--pixel);
+      font-size: 18px;
+      letter-spacing: 3px;
+      margin-bottom: 2px;
+    }
+    .edition-tag {
+      font-size: 12px;
+      color: rgba(0,0,0,0.55);
+      letter-spacing: 1.5px;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+    .edition-card:hover .edition-tag { color: rgba(0,0,0,0.75); }
+    .edition-desc {
+      font-size: 14px;
+      line-height: 1.3;
+    }
+    @media (max-width: 560px) {
+      .edition-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 800px) {
+      .deck-row { grid-template-columns: 1fr; }
+      .output-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="header-row">
+      <h1>Hearing Degeneracy <span class="model-tag">// ADVANCED EDITION</span></h1>
+      <a class="switch-link" href="index_simple.html" title="Plain-language scenarios, no math required">&#9656; Simple</a>
+    </div>
+    <p class="lede">
+      Three faders, one equation. The faders <code>f&#x2081;, f&#x2082;, f&#x2083;</code> combine through your formula into a single master gain that scales the sound. When two different fader configurations evaluate to the same value, they produce <em>exactly the same sound</em> &mdash; that's a degeneracy. The maps to the right show the iso-contour of all configurations producing your current output.
+    </p>
+
+    <!-- === Tape Deck Unit === -->
+    <div class="tape-deck">
+      <div class="deck-header">
+        <span class="brand">DEGEN.HiFi &middot; DE-3001</span>
+        <span class="model">stereo cassette deck &middot parameter coupling explorer</span>
+        <div class="led-cluster"><span class="led green" id="powerLed"></span> POWER</div>
+        <div class="led-cluster"><span class="led off" id="clipLed"></span> CLIP</div>
+      </div>
+
+      <div class="deck-row">
+        <!-- Cassette A -->
+        <div class="deck-cell">
+          <div class="cassette-housing">
+            <svg class="cassette" id="cassette1" viewBox="0 0 240 150" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="caseGrad1" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#1a0e08"/>
+                  <stop offset="55%" stop-color="#0a0500"/>
+                  <stop offset="100%" stop-color="#000"/>
+                </linearGradient>
+                <linearGradient id="labelGrad1" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#f4e4c0"/>
+                  <stop offset="100%" stop-color="#d8c090"/>
+                </linearGradient>
+                <radialGradient id="reelGrad1" cx="50%" cy="50%" r="55%">
+                  <stop offset="0%" stop-color="#3a3a3a"/>
+                  <stop offset="80%" stop-color="#1a1a1a"/>
+                  <stop offset="100%" stop-color="#000"/>
+                </radialGradient>
+              </defs>
+
+              <rect x="2" y="2" width="236" height="146" rx="5" ry="5" fill="url(#caseGrad1)" stroke="#000" stroke-width="1.5"/>
+              <rect x="4" y="4" width="232" height="142" rx="4" ry="4" fill="none" stroke="#3a2010" stroke-width="0.5"/>
+
+              <rect x="14" y="10" width="212" height="42" rx="2" fill="url(#labelGrad1)" stroke="#8a6a3a" stroke-width="0.5"/>
+              <line x1="14" y1="22" x2="226" y2="22" stroke="#c0a070" stroke-width="0.4"/>
+              <text x="20" y="20" font-family="VT323, monospace" font-size="9" fill="#8a6a30">DEGEN-METAL</text>
+              <text x="220" y="20" text-anchor="end" font-family="VT323, monospace" font-size="9" fill="#8a6a30">90 MIN</text>
+              <text x="120" y="38" text-anchor="middle" font-family="Silkscreen, monospace" font-size="13" font-weight="700" fill="#2a1810">DECK A</text>
+              <text x="120" y="50" text-anchor="middle" font-family="VT323, monospace" font-size="10" fill="#6a4a20">SIDE A &middot; TYPE I FERRO</text>
+
+              <rect x="6" y="58" width="3" height="64" fill="#000" rx="1"/>
+              <rect x="231" y="58" width="3" height="64" fill="#000" rx="1"/>
+
+              <rect x="60" y="100" width="120" height="14" fill="#000" stroke="#1a1a1a" stroke-width="0.5"/>
+              <rect x="62" y="103" width="116" height="8" fill="#3a2010"/>
+              <rect x="100" y="105" width="40" height="4" fill="#1a0a00" opacity="0.5"/>
+
+              <circle cx="80" cy="135" r="2.5" fill="#000"/>
+              <circle cx="160" cy="135" r="2.5" fill="#000"/>
+              <circle cx="120" cy="138" r="2" fill="#000"/>
+
+              <circle cx="70" cy="100" r="28" fill="#000" stroke="#0a0500" stroke-width="1"/>
+              <g class="reel reel-supply" style="transform-origin: 70px 100px;">
+                <circle cx="70" cy="100" r="24" fill="url(#reelGrad1)" stroke="#444" stroke-width="0.5"/>
+                <circle cx="70" cy="100" r="22" fill="none" stroke="#666" stroke-width="0.5" stroke-dasharray="2 1"/>
+                <g stroke="#aaa" stroke-width="2.2" stroke-linecap="round" fill="none">
+                  <line x1="70" y1="80" x2="70" y2="120"/>
+                  <line x1="50.9" y1="93.8" x2="89.1" y2="106.2"/>
+                  <line x1="50.9" y1="106.2" x2="89.1" y2="93.8"/>
+                  <line x1="62.6" y1="80.7" x2="77.4" y2="119.3"/>
+                  <line x1="77.4" y1="80.7" x2="62.6" y2="119.3"/>
+                </g>
+                <circle cx="70" cy="100" r="7" fill="#aaa" stroke="#444" stroke-width="0.5"/>
+                <g fill="#888">
+                  <rect x="68.5" y="92" width="3" height="3"/>
+                  <rect x="68.5" y="105" width="3" height="3"/>
+                  <rect x="62" y="98.5" width="3" height="3"/>
+                  <rect x="75" y="98.5" width="3" height="3"/>
+                </g>
+                <circle cx="70" cy="100" r="2.5" fill="#0a0a0a" stroke="#666" stroke-width="0.3"/>
+              </g>
+
+              <circle cx="170" cy="100" r="28" fill="#000" stroke="#0a0500" stroke-width="1"/>
+              <g class="reel reel-takeup" style="transform-origin: 170px 100px;">
+                <circle cx="170" cy="100" r="24" fill="url(#reelGrad1)" stroke="#444" stroke-width="0.5"/>
+                <circle cx="170" cy="100" r="22" fill="none" stroke="#666" stroke-width="0.5" stroke-dasharray="2 1"/>
+                <g stroke="#aaa" stroke-width="2.2" stroke-linecap="round" fill="none">
+                  <line x1="170" y1="80" x2="170" y2="120"/>
+                  <line x1="150.9" y1="93.8" x2="189.1" y2="106.2"/>
+                  <line x1="150.9" y1="106.2" x2="189.1" y2="93.8"/>
+                  <line x1="162.6" y1="80.7" x2="177.4" y2="119.3"/>
+                  <line x1="177.4" y1="80.7" x2="162.6" y2="119.3"/>
+                </g>
+                <circle cx="170" cy="100" r="7" fill="#aaa" stroke="#444" stroke-width="0.5"/>
+                <g fill="#888">
+                  <rect x="168.5" y="92" width="3" height="3"/>
+                  <rect x="168.5" y="105" width="3" height="3"/>
+                  <rect x="162" y="98.5" width="3" height="3"/>
+                  <rect x="175" y="98.5" width="3" height="3"/>
+                </g>
+                <circle cx="170" cy="100" r="2.5" fill="#0a0a0a" stroke="#666" stroke-width="0.3"/>
+              </g>
+
+              <g fill="#666" stroke="#222" stroke-width="0.3">
+                <circle cx="14" cy="14" r="1.8"/>
+                <circle cx="226" cy="14" r="1.8"/>
+                <circle cx="14" cy="136" r="1.8"/>
+                <circle cx="226" cy="136" r="1.8"/>
+              </g>
+              <g stroke="#222" stroke-width="0.4">
+                <line x1="12.5" y1="14" x2="15.5" y2="14"/>
+                <line x1="224.5" y1="14" x2="227.5" y2="14"/>
+                <line x1="12.5" y1="136" x2="15.5" y2="136"/>
+                <line x1="224.5" y1="136" x2="227.5" y2="136"/>
+              </g>
+            </svg>
+          </div>
+          <div class="deck-nameplate">DECK A</div>
+          <div class="deck-controls-strip">
+            <audio id="audio1" controls loop></audio>
+            <button class="engage-btn" data-deck="1" id="engage1">Engage Deck A</button>
+            <div class="row">
+              <input type="file" id="file1" accept="audio/*" />
+            </div>
+            <div class="row">
+              <button class="btn small source-btn active" data-deck="1" data-source="synth">Synth</button>
+              <button class="btn small source-btn" data-deck="1" data-source="track" disabled>Track</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Center mixer -->
+        <div class="mixer-cell">
+          <div class="lcd-block">
+            <div class="lcd-header">
+              <span class="lcd-tag">FORMULA</span>
+              <span class="lcd-tag">E ( f&#x2081;, f&#x2082;, f&#x2083; )</span>
+            </div>
+            <input type="text" class="equation-input" id="equation"
+                   value="f_1 * f_2 * f_3"
+                   spellcheck="false" autocomplete="off"
+                   placeholder="e.g. f_1 * f_2 * f_3" />
+            <div class="lcd-counter">
+              <span class="lcd-tag-sm">OUT</span>
+              <b id="eq-value">0.000</b>
+              <span id="eq-clipped" class="clipped"></span>
+            </div>
+          </div>
+
+          <div class="preset-buttons">
+            <button class="preset" data-eq="f_1 * f_2 * f_3">f&#x2081;&middot;f&#x2082;&middot;f&#x2083;</button>
+            <button class="preset" data-eq="f_1 * exp(f_2 - 1) * f_3">f&#x2081;&middot;exp(f&#x2082;&minus;1)&middot;f&#x2083;</button>
+            <button class="preset" data-eq="(f_1 + f_2) * f_3 / 2">(f&#x2081;+f&#x2082;)&middot;f&#x2083;/2</button>
+            <button class="preset" data-eq="f_1^f_2 * f_3">f&#x2081;^f&#x2082;&middot;f&#x2083;</button>
+            <button class="preset" data-eq="sqrt(f_1 * f_2) * f_3">&radic;(f&#x2081;&middot;f&#x2082;)&middot;f&#x2083;</button>
+            <button class="preset" data-eq="sin(pi*f_1)*sin(pi*f_2)*f_3">sin(&pi;f&#x2081;)&middot;sin(&pi;f&#x2082;)&middot;f&#x2083;</button>
+            <button class="preset" data-eq="0.5*(f_1 + f_2 + f_3)/1.5">linear</button>
+          </div>
+
+          <div class="mixer-faders">
+            <div class="fader-col">
+              <span class="fader-label">f&#x2081;</span>
+              <div class="fader-track">
+                <input type="range" class="fader" id="f1" min="0" max="1" step="0.001" value="0.7" />
+              </div>
+              <span class="fader-value" id="f1-val">0.700</span>
+            </div>
+            <div class="fader-col">
+              <span class="fader-label">f&#x2082;</span>
+              <div class="fader-track">
+                <input type="range" class="fader" id="f2" min="0" max="1" step="0.001" value="0.7" />
+              </div>
+              <span class="fader-value" id="f2-val">0.700</span>
+            </div>
+            <div class="fader-col">
+              <span class="fader-label">f&#x2083;</span>
+              <div class="fader-track">
+                <input type="range" class="fader" id="f3" min="0" max="1" step="0.001" value="0.7" />
+              </div>
+              <span class="fader-value" id="f3-val">0.700</span>
+            </div>
+          </div>
+
+          <div class="twins-row">
+            <span>Twins:</span>
+            <span id="twins-list" class="twin-empty">&mdash;</span>
+            <button class="btn small" id="refresh-twins">refresh</button>
+          </div>
+        </div>
+
+        <!-- Cassette B -->
+        <div class="deck-cell">
+          <div class="cassette-housing">
+            <svg class="cassette" id="cassette2" viewBox="0 0 240 150" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="caseGrad2" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#1a0e08"/>
+                  <stop offset="55%" stop-color="#0a0500"/>
+                  <stop offset="100%" stop-color="#000"/>
+                </linearGradient>
+                <linearGradient id="labelGrad2" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#f4e4c0"/>
+                  <stop offset="100%" stop-color="#d8c090"/>
+                </linearGradient>
+                <radialGradient id="reelGrad2" cx="50%" cy="50%" r="55%">
+                  <stop offset="0%" stop-color="#3a3a3a"/>
+                  <stop offset="80%" stop-color="#1a1a1a"/>
+                  <stop offset="100%" stop-color="#000"/>
+                </radialGradient>
+              </defs>
+
+              <rect x="2" y="2" width="236" height="146" rx="5" ry="5" fill="url(#caseGrad2)" stroke="#000" stroke-width="1.5"/>
+              <rect x="4" y="4" width="232" height="142" rx="4" ry="4" fill="none" stroke="#3a2010" stroke-width="0.5"/>
+
+              <rect x="14" y="10" width="212" height="42" rx="2" fill="url(#labelGrad2)" stroke="#8a6a3a" stroke-width="0.5"/>
+              <line x1="14" y1="22" x2="226" y2="22" stroke="#c0a070" stroke-width="0.4"/>
+              <text x="20" y="20" font-family="VT323, monospace" font-size="9" fill="#8a6a30">DEGEN-METAL</text>
+              <text x="220" y="20" text-anchor="end" font-family="VT323, monospace" font-size="9" fill="#8a6a30">90 MIN</text>
+              <text x="120" y="38" text-anchor="middle" font-family="Silkscreen, monospace" font-size="13" font-weight="700" fill="#2a1810">DECK B</text>
+              <text x="120" y="50" text-anchor="middle" font-family="VT323, monospace" font-size="10" fill="#6a4a20">SIDE B &middot; TYPE I FERRO</text>
+
+              <rect x="6" y="58" width="3" height="64" fill="#000" rx="1"/>
+              <rect x="231" y="58" width="3" height="64" fill="#000" rx="1"/>
+
+              <rect x="60" y="100" width="120" height="14" fill="#000" stroke="#1a1a1a" stroke-width="0.5"/>
+              <rect x="62" y="103" width="116" height="8" fill="#3a2010"/>
+              <rect x="100" y="105" width="40" height="4" fill="#1a0a00" opacity="0.5"/>
+
+              <circle cx="80" cy="135" r="2.5" fill="#000"/>
+              <circle cx="160" cy="135" r="2.5" fill="#000"/>
+              <circle cx="120" cy="138" r="2" fill="#000"/>
+
+              <circle cx="70" cy="100" r="28" fill="#000" stroke="#0a0500" stroke-width="1"/>
+              <g class="reel reel-supply" style="transform-origin: 70px 100px;">
+                <circle cx="70" cy="100" r="24" fill="url(#reelGrad2)" stroke="#444" stroke-width="0.5"/>
+                <circle cx="70" cy="100" r="22" fill="none" stroke="#666" stroke-width="0.5" stroke-dasharray="2 1"/>
+                <g stroke="#aaa" stroke-width="2.2" stroke-linecap="round" fill="none">
+                  <line x1="70" y1="80" x2="70" y2="120"/>
+                  <line x1="50.9" y1="93.8" x2="89.1" y2="106.2"/>
+                  <line x1="50.9" y1="106.2" x2="89.1" y2="93.8"/>
+                  <line x1="62.6" y1="80.7" x2="77.4" y2="119.3"/>
+                  <line x1="77.4" y1="80.7" x2="62.6" y2="119.3"/>
+                </g>
+                <circle cx="70" cy="100" r="7" fill="#aaa" stroke="#444" stroke-width="0.5"/>
+                <g fill="#888">
+                  <rect x="68.5" y="92" width="3" height="3"/>
+                  <rect x="68.5" y="105" width="3" height="3"/>
+                  <rect x="62" y="98.5" width="3" height="3"/>
+                  <rect x="75" y="98.5" width="3" height="3"/>
+                </g>
+                <circle cx="70" cy="100" r="2.5" fill="#0a0a0a" stroke="#666" stroke-width="0.3"/>
+              </g>
+
+              <circle cx="170" cy="100" r="28" fill="#000" stroke="#0a0500" stroke-width="1"/>
+              <g class="reel reel-takeup" style="transform-origin: 170px 100px;">
+                <circle cx="170" cy="100" r="24" fill="url(#reelGrad2)" stroke="#444" stroke-width="0.5"/>
+                <circle cx="170" cy="100" r="22" fill="none" stroke="#666" stroke-width="0.5" stroke-dasharray="2 1"/>
+                <g stroke="#aaa" stroke-width="2.2" stroke-linecap="round" fill="none">
+                  <line x1="170" y1="80" x2="170" y2="120"/>
+                  <line x1="150.9" y1="93.8" x2="189.1" y2="106.2"/>
+                  <line x1="150.9" y1="106.2" x2="189.1" y2="93.8"/>
+                  <line x1="162.6" y1="80.7" x2="177.4" y2="119.3"/>
+                  <line x1="177.4" y1="80.7" x2="162.6" y2="119.3"/>
+                </g>
+                <circle cx="170" cy="100" r="7" fill="#aaa" stroke="#444" stroke-width="0.5"/>
+                <g fill="#888">
+                  <rect x="168.5" y="92" width="3" height="3"/>
+                  <rect x="168.5" y="105" width="3" height="3"/>
+                  <rect x="162" y="98.5" width="3" height="3"/>
+                  <rect x="175" y="98.5" width="3" height="3"/>
+                </g>
+                <circle cx="170" cy="100" r="2.5" fill="#0a0a0a" stroke="#666" stroke-width="0.3"/>
+              </g>
+
+              <g fill="#666" stroke="#222" stroke-width="0.3">
+                <circle cx="14" cy="14" r="1.8"/>
+                <circle cx="226" cy="14" r="1.8"/>
+                <circle cx="14" cy="136" r="1.8"/>
+                <circle cx="226" cy="136" r="1.8"/>
+              </g>
+              <g stroke="#222" stroke-width="0.4">
+                <line x1="12.5" y1="14" x2="15.5" y2="14"/>
+                <line x1="224.5" y1="14" x2="227.5" y2="14"/>
+                <line x1="12.5" y1="136" x2="15.5" y2="136"/>
+                <line x1="224.5" y1="136" x2="227.5" y2="136"/>
+              </g>
+            </svg>
+          </div>
+          <div class="deck-nameplate">DECK B</div>
+          <div class="deck-controls-strip">
+            <audio id="audio2" controls loop></audio>
+            <button class="engage-btn" data-deck="2" id="engage2">Engage Deck B</button>
+            <div class="row">
+              <input type="file" id="file2" accept="audio/*" />
+            </div>
+            <div class="row">
+              <button class="btn small source-btn active" data-deck="2" data-source="synth">Synth</button>
+              <button class="btn small source-btn" data-deck="2" data-source="track" disabled>Track</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output rack -->
+    <div class="output-grid">
+      <div class="rack-panel">
+        <div class="panel-title">Oscilloscope</div>
+        <canvas id="waveform"></canvas>
+      </div>
+      <div class="rack-panel heatmaps-panel">
+        <div class="panel-title">Iso-contour Maps</div>
+        <div class="heatmaps">
+          <div class="heatmap-row">
+            <canvas id="heatmap-12" width="100" height="100"></canvas>
+            <div class="label">
+              (f&#x2081;, f&#x2082;)
+              <div class="sub">f&#x2083; held fixed</div>
+              <div class="sub">white = same out</div>
+            </div>
+          </div>
+          <div class="heatmap-row">
+            <canvas id="heatmap-13" width="100" height="100"></canvas>
+            <div class="label">
+              (f&#x2081;, f&#x2083;)
+              <div class="sub">f&#x2082; held fixed</div>
+              <div class="sub">click to snap</div>
+            </div>
+          </div>
+          <div class="heatmap-row">
+            <canvas id="heatmap-23" width="100" height="100"></canvas>
+            <div class="label">
+              (f&#x2082;, f&#x2083;)
+              <div class="sub">f&#x2081; held fixed</div>
+              <div class="sub">amber = current</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="start-overlay" id="startOverlay">
+    <h2>&laquo; DEGEN.HiFi &middot; D-3000 &raquo;</h2>
+    <p>Choose your edition.</p>
+    <div class="edition-grid">
+      <a class="edition-card" href="index_simple.html">
+        <div class="edition-name">SIMPLE</div>
+        <div class="edition-tag">For the curious</div>
+        <div class="edition-desc">Plain-language scenarios that show what a degeneracy sounds like, no math required.</div>
+      </a>
+      <button class="edition-card" id="startBtn" type="button">
+        <div class="edition-name">ADVANCED</div>
+        <div class="edition-tag">For the technical</div>
+        <div class="edition-desc">Type your own equation. Three faders, live iso-contour heatmaps, audible degenerate twins.</div>
+      </button>
+    </div>
+  </div>
+
+  <script>
+    // ===================== State =====================
+    const state = {
+      ctx: null,
+      master: null,
+      analyser: null,
+      decks: [
+        { gain: null, oscillator: null, lfo: null, mediaSource: null, mode: 'synth', hasTrack: false, engaged: false },
+        { gain: null, oscillator: null, lfo: null, mediaSource: null, mode: 'synth', hasTrack: false, engaged: false }
+      ],
+      f: [0.7, 0.7, 0.7],
+      compiledEq: null,
+      lastValue: 0,
+      lastClipped: false
+    };
+
+    // Per-deck mix gain when engaged (each deck contributes 50% so summed signal stays in [-1, 1]).
+    const ENGAGED_GAIN = 0.5;
+
+    const SYNTH_FREQS = [220, 330];
+    const GAIN_CLAMP = 1.2;     // hard ceiling on master gain to avoid speaker pain
+    const SAFE_TARGET = 0.9;    // gain we *aim* for at full unity (gives headroom for two decks)
+
+    // ===================== DOM =====================
+    const $ = id => document.getElementById(id);
+    const equationInput = $('equation');
+    const eqValueEl = $('eq-value');
+    const eqClippedEl = $('eq-clipped');
+    const startOverlay = $('startOverlay');
+    const startBtn = $('startBtn');
+    const fSliders = [$('f1'), $('f2'), $('f3')];
+    const fValues = [$('f1-val'), $('f2-val'), $('f3-val')];
+    const audioEls = [$('audio1'), $('audio2')];
+    const fileEls = [$('file1'), $('file2')];
+    const sourceBtns = document.querySelectorAll('.source-btn');
+    const engageBtns = [$('engage1'), $('engage2')];
+    const twinsList = $('twins-list');
+    const refreshTwinsBtn = $('refresh-twins');
+    const cassetteEls = [$('cassette1'), $('cassette2')];
+    const clipLed = $('clipLed');
+
+    // ===================== Audio init =====================
+    function initAudio() {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      state.ctx = new Ctx();
+
+      state.master = state.ctx.createGain();
+      state.master.gain.value = 0;
+
+      state.analyser = state.ctx.createAnalyser();
+      state.analyser.fftSize = 2048;
+      state.analyser.smoothingTimeConstant = 0.4;
+
+      state.master.connect(state.analyser);
+      state.analyser.connect(state.ctx.destination);
+
+      for (let i = 0; i < 2; i++) {
+        const g = state.ctx.createGain();
+        g.gain.value = 0; // start silent — user must click "Engage" to hear the synth
+        g.connect(state.master);
+        state.decks[i].gain = g;
+        startSynth(i);
+        updateSourceButtons(i);
+        updateEngageButton(i);
+        updatePlaying(i);
+      }
+
+      // React to context suspend/resume (e.g. browser backgrounding) so reels stop too.
+      if (state.ctx.onstatechange !== undefined) {
+        state.ctx.addEventListener('statechange', () => {
+          for (let i = 0; i < 2; i++) updatePlaying(i);
+        });
+      }
+
+      compileEquation();
+      updateAudio();
+      animate();
+      refreshTwins();
+    }
+
+    // Toggle the .playing class on a cassette SVG based on whether the deck is producing sound.
+    function updatePlaying(deckIdx) {
+      const cassette = cassetteEls[deckIdx];
+      if (!cassette) return;
+      const d = state.decks[deckIdx];
+      let playing = false;
+      if (state.ctx && state.ctx.state === 'running' && d.engaged) {
+        if (d.mode === 'synth') playing = !!d.oscillator;
+        else if (d.mode === 'track') playing = !audioEls[deckIdx].paused && !audioEls[deckIdx].ended;
+      }
+      cassette.classList.toggle('playing', playing);
+    }
+
+    // Engage = "this deck contributes to the mix". Default off so users don't get a drone on power-on.
+    function toggleEngage(deckIdx) {
+      const d = state.decks[deckIdx];
+      d.engaged = !d.engaged;
+      const t = state.ctx.currentTime;
+      d.gain.gain.setTargetAtTime(d.engaged ? ENGAGED_GAIN : 0, t, 0.02);
+      // For uploaded tracks, also play/pause the underlying audio element.
+      if (d.mode === 'track') {
+        if (d.engaged) audioEls[deckIdx].play().catch(() => {});
+        else           audioEls[deckIdx].pause();
+      }
+      updateEngageButton(deckIdx);
+      updatePlaying(deckIdx);
+    }
+
+    function updateEngageButton(deckIdx) {
+      const btn = engageBtns[deckIdx];
+      if (!btn) return;
+      const engaged = state.decks[deckIdx].engaged;
+      const label = deckIdx === 0 ? 'Deck A' : 'Deck B';
+      btn.classList.toggle('active', engaged);
+      btn.textContent = engaged ? `Halt ${label}` : `Engage ${label}`;
+    }
+
+    // ===================== Source management =====================
+    function startSynth(deckIdx) {
+      const ctx = state.ctx;
+      const freq = SYNTH_FREQS[deckIdx];
+
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+
+      // Slow tremolo to keep the tone alive
+      const lfo = ctx.createOscillator();
+      lfo.type = 'sine';
+      lfo.frequency.value = 0.5 + deckIdx * 0.3;
+      const lfoDepth = ctx.createGain();
+      lfoDepth.gain.value = 0.15;
+      const tremGain = ctx.createGain();
+      tremGain.gain.value = 0.85;
+      lfo.connect(lfoDepth);
+      lfoDepth.connect(tremGain.gain);
+
+      osc.connect(tremGain);
+      tremGain.connect(state.decks[deckIdx].gain);
+
+      osc.start();
+      lfo.start();
+
+      state.decks[deckIdx].oscillator = osc;
+      state.decks[deckIdx].lfo = lfo;
+      state.decks[deckIdx].mode = 'synth';
+    }
+
+    function stopActiveSource(deckIdx) {
+      const d = state.decks[deckIdx];
+      if (d.oscillator) {
+        try { d.oscillator.stop(); } catch (e) {}
+        try { d.oscillator.disconnect(); } catch (e) {}
+        d.oscillator = null;
+      }
+      if (d.lfo) {
+        try { d.lfo.stop(); } catch (e) {}
+        try { d.lfo.disconnect(); } catch (e) {}
+        d.lfo = null;
+      }
+      if (d.mediaSource) {
+        try { d.mediaSource.disconnect(); } catch (e) {}
+        // mediaSource is cached on the audio element; we re-connect when switching back to track
+      }
+      audioEls[deckIdx].pause();
+    }
+
+    /**
+     * Switch a deck between 'synth' and 'track' modes.
+     * 'track' is only available once a file has been uploaded for that deck.
+     */
+    function setSource(deckIdx, mode) {
+      const d = state.decks[deckIdx];
+      if (mode === 'track' && !d.hasTrack) return;
+      if (d.mode === mode) {
+        updateSourceButtons(deckIdx);
+        return;
+      }
+      stopActiveSource(deckIdx);
+      if (mode === 'synth') {
+        startSynth(deckIdx);
+      } else {
+        // createMediaElementSource may only be called once per element; cache it.
+        if (!d.mediaSource) {
+          d.mediaSource = state.ctx.createMediaElementSource(audioEls[deckIdx]);
+        }
+        d.mediaSource.connect(d.gain);
+        d.mode = 'track';
+        // Only autoplay if the deck is engaged; otherwise the track stays paused until the user engages.
+        if (d.engaged) audioEls[deckIdx].play().catch(() => {});
+      }
+      updateSourceButtons(deckIdx);
+      updatePlaying(deckIdx);
+    }
+
+    function updateSourceButtons(deckIdx) {
+      const d = state.decks[deckIdx];
+      sourceBtns.forEach(btn => {
+        if (parseInt(btn.dataset.deck) - 1 !== deckIdx) return;
+        const src = btn.dataset.source;
+        btn.classList.toggle('active', src === d.mode);
+        if (src === 'track') btn.disabled = !d.hasTrack;
+      });
+    }
+
+    function setDeckFile(deckIdx, file) {
+      const d = state.decks[deckIdx];
+      const audioEl = audioEls[deckIdx];
+      audioEl.src = URL.createObjectURL(file);
+      audioEl.load();
+      d.hasTrack = true;
+
+      // Auto-engage on file upload — the user just selected audio, they want to hear it.
+      if (!d.engaged) toggleEngage(deckIdx);
+
+      if (d.mode !== 'track') {
+        // Switch to track mode (this also wires the audio graph and starts playback).
+        setSource(deckIdx, 'track');
+      } else {
+        // Already in track mode; the new src will play through the cached MediaElementSource.
+        audioEl.play().catch(() => {});
+        updateSourceButtons(deckIdx);
+      }
+      updatePlaying(deckIdx);
+    }
+
+    // ===================== Equation =====================
+    function compileEquation() {
+      const expr = equationInput.value.trim();
+      if (!expr) {
+        equationInput.classList.add('error');
+        return;
+      }
+      try {
+        const compiled = math.compile(expr);
+        // sanity check
+        const v = compiled.evaluate({ f_1: 0.5, f_2: 0.5, f_3: 0.5, f1: 0.5, f2: 0.5, f3: 0.5 });
+        if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error('non-numeric');
+        state.compiledEq = compiled;
+        equationInput.classList.remove('error');
+      } catch (e) {
+        equationInput.classList.add('error');
+      }
+    }
+
+    function evalEq(f1, f2, f3) {
+      if (!state.compiledEq) return 0;
+      try {
+        const v = state.compiledEq.evaluate({ f_1: f1, f_2: f2, f_3: f3, f1, f2, f3 });
+        return Number.isFinite(v) ? v : 0;
+      } catch (e) {
+        return 0;
+      }
+    }
+
+    // ===================== Audio update =====================
+    function updateAudio() {
+      if (!state.ctx) return;
+      const v = evalEq(state.f[0], state.f[1], state.f[2]);
+      state.lastValue = v;
+      const target = Math.max(0, Math.min(GAIN_CLAMP, v * SAFE_TARGET));
+      state.lastClipped = (v * SAFE_TARGET) > GAIN_CLAMP || v < 0;
+      state.master.gain.setTargetAtTime(target, state.ctx.currentTime, 0.015);
+      eqValueEl.textContent = v.toFixed(3);
+      eqClippedEl.textContent = state.lastClipped ? '(clipped)' : '';
+      if (clipLed) clipLed.classList.toggle('off', !state.lastClipped);
+    }
+
+    // ===================== Visualization =====================
+    function drawWaveform() {
+      const canvas = $('waveform');
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+        canvas.width = cssW * dpr;
+        canvas.height = cssH * dpr;
+      }
+      const w = canvas.width, h = canvas.height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0a0500';
+      ctx.fillRect(0, 0, w, h);
+
+      if (!state.analyser) return;
+      const bufLen = state.analyser.fftSize;
+      const data = new Float32Array(bufLen);
+      state.analyser.getFloatTimeDomainData(data);
+
+      // Faint amber grid lines like an old scope graticule
+      ctx.strokeStyle = 'rgba(255, 170, 0, 0.10)';
+      ctx.lineWidth = 1;
+      const gridLines = 5;
+      for (let i = 0; i <= gridLines; i++) {
+        const y = (i / gridLines) * h;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+        ctx.stroke();
+      }
+      const vGridLines = 8;
+      for (let i = 0; i <= vGridLines; i++) {
+        const x = (i / vGridLines) * w;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(255, 170, 0, 0.25)';
+      ctx.beginPath();
+      ctx.moveTo(0, h / 2);
+      ctx.lineTo(w, h / 2);
+      ctx.stroke();
+
+      // Waveform: amber phosphor with glow
+      ctx.strokeStyle = '#ffaa00';
+      ctx.lineWidth = 2 * dpr;
+      ctx.shadowColor = '#ffaa00';
+      ctx.shadowBlur = 10 * dpr;
+      ctx.beginPath();
+      for (let i = 0; i < bufLen; i++) {
+        const x = (i / bufLen) * w;
+        const y = h / 2 - data[i] * h * 0.45;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // VU meter on the right (analog-deck style): green → amber → red LEDs
+      let sum = 0;
+      for (let i = 0; i < bufLen; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / bufLen);
+      const barMax = h - 20 * dpr;
+      const barH = Math.min(1, rms * 4) * barMax;
+      const segCount = 16;
+      const segH = barMax / segCount;
+      const lit = Math.round((barH / barMax) * segCount);
+      const barX = w - 14 * dpr;
+      const barW = 6 * dpr;
+      for (let s = 0; s < segCount; s++) {
+        const segY = h - 10 * dpr - (s + 1) * segH + 2;
+        const on = s < lit;
+        let col;
+        if (s >= segCount - 3) col = on ? '#ff2030' : '#3a0a0a';      // top: red
+        else if (s >= segCount - 7) col = on ? '#ffaa00' : '#3a2a08'; // mid: amber
+        else col = on ? '#20ff60' : '#0a3a18';                         // bottom: green
+        ctx.fillStyle = col;
+        ctx.fillRect(barX, segY, barW, segH - 2);
+      }
+    }
+
+    function viridisColor(t) {
+      // approximate viridis ramp
+      t = Math.max(0, Math.min(1, t));
+      const r = 255 * Math.max(0, Math.min(1, 0.267 + 0.105 * t + 1.55 * t * t - 0.92 * t * t * t));
+      const g = 255 * Math.max(0, Math.min(1, 0.005 + 1.4 * t - 0.5 * t * t));
+      const b = 255 * Math.max(0, Math.min(1, 0.33 + 1.1 * t - 1.4 * t * t));
+      return [r, g, b];
+    }
+
+    function drawHeatmap(canvasId, varA, varB, fixedIdx) {
+      const canvas = $(canvasId);
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width, h = canvas.height;
+      const img = ctx.createImageData(w, h);
+
+      const grid = new Float32Array(w * h);
+      let vmin = Infinity, vmax = -Infinity;
+      const fixed = state.f[fixedIdx];
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          const fa = i / (w - 1);
+          const fb = (h - 1 - j) / (h - 1);
+          const fs = [0, 0, 0];
+          fs[varA] = fa;
+          fs[varB] = fb;
+          fs[fixedIdx] = fixed;
+          const v = evalEq(fs[0], fs[1], fs[2]);
+          grid[j * w + i] = v;
+          if (v < vmin) vmin = v;
+          if (v > vmax) vmax = v;
+        }
+      }
+
+      const range = (vmax - vmin) || 1;
+      const current = state.lastValue;
+      // tolerance for the iso-band (a hair of the value range)
+      const isoTol = Math.max(1e-6, 0.025 * range);
+
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          const v = grid[j * w + i];
+          const t = (v - vmin) / range;
+          let [r, g, b] = viridisColor(t);
+          if (Math.abs(v - current) < isoTol) {
+            r = 255; g = 255; b = 255;
+          }
+          const idx = (j * w + i) * 4;
+          img.data[idx] = r;
+          img.data[idx + 1] = g;
+          img.data[idx + 2] = b;
+          img.data[idx + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+
+      // current point marker (amber crosshair) — matches the LCD theme
+      const ca = state.f[varA];
+      const cb = state.f[varB];
+      const px = ca * (w - 1);
+      const py = (h - 1) - cb * (h - 1);
+      ctx.strokeStyle = '#ffaa00';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    function animate() {
+      drawWaveform();
+      drawHeatmap('heatmap-12', 0, 1, 2);
+      drawHeatmap('heatmap-13', 0, 2, 1);
+      drawHeatmap('heatmap-23', 1, 2, 0);
+      requestAnimationFrame(animate);
+    }
+
+    // ===================== Equivalent configurations =====================
+    function refreshTwins() {
+      const target = state.lastValue;
+      const SAMPLES = 4000;
+      const candidates = [];
+      for (let i = 0; i < SAMPLES; i++) {
+        const f = [Math.random(), Math.random(), Math.random()];
+        const v = evalEq(f[0], f[1], f[2]);
+        candidates.push({ f, dist: Math.abs(v - target) });
+      }
+      candidates.sort((a, b) => a.dist - b.dist);
+
+      // pick top matches that are also "different enough" from current and each other
+      const cur = state.f;
+      const selected = [];
+      const minSep = 0.15;
+      for (const c of candidates) {
+        if (c.dist > 0.01 * Math.max(1, Math.abs(target))) break;
+        const sepFromCur = Math.hypot(c.f[0]-cur[0], c.f[1]-cur[1], c.f[2]-cur[2]);
+        if (sepFromCur < minSep) continue;
+        const farEnough = selected.every(s =>
+          Math.hypot(s.f[0]-c.f[0], s.f[1]-c.f[1], s.f[2]-c.f[2]) > minSep
+        );
+        if (!farEnough) continue;
+        selected.push(c);
+        if (selected.length >= 3) break;
+      }
+
+      twinsList.innerHTML = '';
+      if (selected.length === 0) {
+        const span = document.createElement('span');
+        span.className = 'twin-empty';
+        span.textContent = '(none found — try different fader values)';
+        twinsList.appendChild(span);
+        return;
+      }
+      for (const s of selected) {
+        const chip = document.createElement('span');
+        chip.className = 'twin-chip';
+        chip.textContent = `(${s.f[0].toFixed(2)}, ${s.f[1].toFixed(2)}, ${s.f[2].toFixed(2)})`;
+        chip.title = 'Click to snap faders here';
+        chip.addEventListener('click', () => snapFaders(s.f));
+        twinsList.appendChild(chip);
+      }
+    }
+
+    function snapFaders(f) {
+      for (let i = 0; i < 3; i++) {
+        state.f[i] = f[i];
+        fSliders[i].value = f[i];
+        fValues[i].textContent = f[i].toFixed(3);
+      }
+      updateAudio();
+    }
+
+    // ===================== Heatmap click → snap =====================
+    function attachHeatmapClicks() {
+      const map = [
+        { id: 'heatmap-12', a: 0, b: 1 },
+        { id: 'heatmap-13', a: 0, b: 2 },
+        { id: 'heatmap-23', a: 1, b: 2 }
+      ];
+      for (const m of map) {
+        const c = $(m.id);
+        c.addEventListener('click', (e) => {
+          const rect = c.getBoundingClientRect();
+          const fa = (e.clientX - rect.left) / rect.width;
+          const fb = 1 - (e.clientY - rect.top) / rect.height;
+          state.f[m.a] = Math.max(0, Math.min(1, fa));
+          state.f[m.b] = Math.max(0, Math.min(1, fb));
+          fSliders[m.a].value = state.f[m.a];
+          fSliders[m.b].value = state.f[m.b];
+          fValues[m.a].textContent = state.f[m.a].toFixed(3);
+          fValues[m.b].textContent = state.f[m.b].toFixed(3);
+          updateAudio();
+        });
+      }
+    }
+
+    // ===================== Events =====================
+    fSliders.forEach((s, i) => {
+      s.addEventListener('input', (e) => {
+        state.f[i] = parseFloat(e.target.value);
+        fValues[i].textContent = state.f[i].toFixed(3);
+        updateAudio();
+      });
+    });
+
+    let twinDebounce = null;
+    equationInput.addEventListener('input', () => {
+      compileEquation();
+      updateAudio();
+      clearTimeout(twinDebounce);
+      twinDebounce = setTimeout(refreshTwins, 250);
+    });
+
+    document.querySelectorAll('.preset').forEach(btn => {
+      btn.addEventListener('click', () => {
+        equationInput.value = btn.dataset.eq;
+        compileEquation();
+        updateAudio();
+        refreshTwins();
+      });
+    });
+
+    fileEls.forEach((el, i) => {
+      el.addEventListener('change', (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (f) setDeckFile(i, f);
+      });
+    });
+
+    sourceBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const deckIdx = parseInt(btn.dataset.deck) - 1;
+        const mode = btn.dataset.source;
+        setSource(deckIdx, mode);
+      });
+    });
+
+    engageBtns.forEach((btn, i) => {
+      btn.addEventListener('click', () => {
+        if (state.ctx) toggleEngage(i);
+      });
+    });
+
+    // Reels stop spinning when the audio element pauses or ends, and start when it plays.
+    audioEls.forEach((el, i) => {
+      el.addEventListener('play', () => updatePlaying(i));
+      el.addEventListener('pause', () => updatePlaying(i));
+      el.addEventListener('ended', () => updatePlaying(i));
+      el.addEventListener('playing', () => updatePlaying(i));
+    });
+
+    refreshTwinsBtn.addEventListener('click', refreshTwins);
+
+    attachHeatmapClicks();
+
+    startBtn.addEventListener('click', () => {
+      initAudio();
+      startOverlay.style.display = 'none';
+    });
+  </script>
+</body>
+</html>

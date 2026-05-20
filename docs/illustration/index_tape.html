@@ -704,10 +704,10 @@
       line-height: 1.4;
     }
 
-    /* Edition chooser */
+    /* Edition chooser — always side-by-side, shrinks to fit narrow viewports */
     .edition-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 14px;
       max-width: 600px;
       width: 100%;
@@ -758,8 +758,17 @@
       font-size: 14px;
       line-height: 1.3;
     }
+    /* Narrow viewports: shrink card padding/font so the two cards still fit
+       side-by-side instead of stacking. */
     @media (max-width: 560px) {
-      .edition-grid { grid-template-columns: 1fr; }
+      .edition-card { padding: 12px 12px; }
+      .edition-name { font-size: 14px; letter-spacing: 2px; }
+      .edition-tag  { font-size: 10px; }
+      .edition-desc { font-size: 12px; }
+    }
+    @media (max-width: 380px) {
+      .edition-card { padding: 10px 8px; }
+      .edition-name { font-size: 12px; letter-spacing: 1.5px; }
     }
 
     /* Mid-width: keep both decks side-by-side, push mixer below them */
@@ -1769,16 +1778,6 @@
       if (!embedded) return;
 
       document.body.setAttribute('data-embed', 'true');
-
-      // Replace the two-card chooser with just the POWER ON button so embedded
-      // readers don't accidentally route themselves to a different page inside
-      // the iframe.
-      const editionGrid = document.querySelector('.edition-grid');
-      if (editionGrid) {
-        editionGrid.style.gridTemplateColumns = '1fr';
-        const otherEdition = editionGrid.querySelector('a.edition-card');
-        if (otherEdition) otherEdition.style.display = 'none';
-      }
 
       // Scale the main container to fit the iframe width. The page is laid out
       // at its natural 1100px design width (see the .container rule above) and

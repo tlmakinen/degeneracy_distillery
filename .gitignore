@@ -82,7 +82,7 @@ dmypy.json
 # Project specific
 data/
 # plots/
-animations/
+# animations/
 sr_results/
 results/
 example_*/
@@ -92,6 +92,11 @@ ex_*/
 *.jpg
 *.jpeg
 *.zip
+# Allow images and animations under docs/
+!docs/**/*.png
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.gif
 *.tar
 *.npy
 *.npz

@@ -288,6 +288,8 @@ def make_gif(
     ellipse_n_sub: Optional[int] = None,
     ellipse_alpha: float = 0.75,
     ellipse_lw: float = 0.4,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
     # Kept for backwards compatibility; no longer used for rendering.
     point_size: float = 12.0,
     quiver_direction: Literal["hardest", "softest"] = "hardest",
@@ -366,6 +368,12 @@ def make_gif(
         Opacity of the ellipse faces.
     ellipse_lw : float, default 0.4
         Ellipse edge linewidth (``0`` for no edge).
+    xlim, ylim : (lo, hi) or None, default None
+        Fixed axis limits for the displayed parameter axes
+        (``theta_1`` / ``theta_2``). When ``None``, limits are chosen
+        automatically from ``theta_val`` with a small padding margin.
+        Use these to crop or standardise the view across gifs (e.g.
+        physical parameter bounds for a blog post).
 
     Returns
     -------
@@ -501,6 +509,18 @@ def make_gif(
     _figsize = figsize if figsize is not None else (7.0, 6.0)
     norm = Normalize(vmin=vmin_det, vmax=vmax_det)
     pad = 0.03 * data_range
+    if xlim is not None:
+        if len(xlim) != 2 or xlim[0] >= xlim[1]:
+            raise ValueError(f"xlim must be (lo, hi) with lo < hi; got {xlim!r}")
+        _xlim = (float(xlim[0]), float(xlim[1]))
+    else:
+        _xlim = (float(m1.min() - pad), float(m1.max() + pad))
+    if ylim is not None:
+        if len(ylim) != 2 or ylim[0] >= ylim[1]:
+            raise ValueError(f"ylim must be (lo, hi) with lo < hi; got {ylim!r}")
+        _ylim = (float(ylim[0]), float(ylim[1]))
+    else:
+        _ylim = (float(m2.min() - pad), float(m2.max() + pad))
 
     fig, ax = plt.subplots(figsize=_figsize, constrained_layout=True)
 
@@ -522,8 +542,8 @@ def make_gif(
             edgecolors="face",
         )
         ax.add_collection(ec)
-        ax.set_xlim(m1.min() - pad, m1.max() + pad)
-        ax.set_ylim(m2.min() - pad, m2.max() + pad)
+        ax.set_xlim(*_xlim)
+        ax.set_ylim(*_ylim)
         ax.set_xlabel(param_names[0])
         ax.set_ylabel(param_names[1])
         _label = title if title is not None else f"{title_prefix} $\\log_{{10}}\\,\\det F$"
@@ -614,6 +634,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--ellipse-lw", type=float, default=0.4,
         help="Ellipse edge linewidth (0 = no edge). Default 0.4.",
     )
+    p.add_argument(
+        "--xlim", nargs=2, type=float, default=None, metavar=("LO", "HI"),
+        help="Fixed x-axis limits (theta_1). Default: auto from theta_val.",
+    )
+    p.add_argument(
+        "--ylim", nargs=2, type=float, default=None, metavar=("LO", "HI"),
+        help="Fixed y-axis limits (theta_2). Default: auto from theta_val.",
+    )
     return p
 
 
@@ -643,6 +671,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ellipse_n_sub=args.ellipse_n_sub,
         ellipse_alpha=args.ellipse_alpha,
         ellipse_lw=args.ellipse_lw,
+        xlim=tuple(args.xlim) if args.xlim is not None else None,
+        ylim=tuple(args.ylim) if args.ylim is not None else None,
     )
 
 

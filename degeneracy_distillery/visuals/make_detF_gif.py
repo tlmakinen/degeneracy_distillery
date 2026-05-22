@@ -84,7 +84,7 @@ def build_frames(
     return_geometry: bool = False,
 ) -> Union[
     Tuple[List[int], np.ndarray],
-    Tuple[List[int], np.ndarray, np.ndarray, np.ndarray],
+    Tuple[List[int], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
     """Build per-frame ensemble-averaged Fisher statistics.
 
@@ -100,18 +100,25 @@ def build_frames(
     per_model : list of (epochs, Fs)
         Per-model snapshot stacks (from :func:`load_snapshots`).
     return_geometry : bool, default False
-        When True, also return ``lmax_frames`` (largest eigenvalue) and
-        ``vmax_frames`` (corresponding eigenvector — the "hardest
-        direction") computed from the ensemble-averaged Fisher at each
-        frame. Setting this to True does not affect the determinant
-        arrays in the first two return values.
+        When True, also return per-frame Fisher geometry arrays.
+        Setting this to True does not affect the determinant arrays in
+        the first two return values.
 
     Returns
     -------
     epochs : list of int
     det_frames : (n_frames, n_val) array
-    lmax_frames : (n_frames, n_val) array  — only when ``return_geometry=True``
-    vmax_frames : (n_frames, n_val, n_params) array — only when ``return_geometry=True``
+    lmax_frames : (n_frames, n_val) — only when ``return_geometry=True``
+        Largest eigenvalue of the full ``n_params × n_params`` Fisher.
+    vmax_frames : (n_frames, n_val, n_params) — only when ``return_geometry=True``
+        Corresponding hardest-direction eigenvector.
+    evals_2d_frames : (n_frames, n_val, 2) — only when ``return_geometry=True``
+        Both eigenvalues (ascending) of the ``2 × 2`` displayed subblock
+        ``F_bar[:, :2, :2]``.  Used to draw the 1-σ Fisher ellipses.
+    vmin_2d_frames : (n_frames, n_val, 2) — only when ``return_geometry=True``
+        Eigenvector of ``λ_min`` of the 2 × 2 subblock (semi-major axis
+        direction of the 1-σ ellipse, i.e. the degeneracy direction in the
+        displayed parameter plane).
     """
     snapshot_epochs = sorted(
         {int(e) for epochs, _ in per_model for e in epochs}
@@ -141,8 +148,10 @@ def build_frames(
         raise RuntimeError("all per-model snapshot stacks are empty")
 
     det_frames = np.empty((len(snapshot_epochs), n_val), dtype=float)
-    lmax_frames = np.empty((len(snapshot_epochs), n_val), dtype=float) if return_geometry else None
-    vmax_frames = np.empty((len(snapshot_epochs), n_val, n_p), dtype=float) if return_geometry else None
+    lmax_frames  = np.empty((len(snapshot_epochs), n_val), dtype=float)       if return_geometry else None
+    vmax_frames  = np.empty((len(snapshot_epochs), n_val, n_p), dtype=float)   if return_geometry else None
+    evals_2d_frames = np.empty((len(snapshot_epochs), n_val, 2), dtype=float)  if return_geometry else None
+    vmin_2d_frames  = np.empty((len(snapshot_epochs), n_val, 2), dtype=float)  if return_geometry else None
 
     for fi, k in enumerate(snapshot_epochs):
         F_acc = np.zeros((n_val, n_p, n_p), dtype=float)
@@ -161,17 +170,25 @@ def build_frames(
             if return_geometry:
                 lmax_frames[fi] = np.nan
                 vmax_frames[fi] = np.nan
+                evals_2d_frames[fi] = np.nan
+                vmin_2d_frames[fi] = np.nan
             continue
         F_bar = F_acc / w_acc
         F_bar = 0.5 * (F_bar + np.swapaxes(F_bar, -1, -2))
         det_frames[fi] = np.linalg.det(F_bar)
         if return_geometry:
+            # Full-matrix: largest eigenvalue + eigenvector (for quiver if needed).
             evals, evecs = np.linalg.eigh(F_bar)   # ascending; last = largest
             lmax_frames[fi] = evals[:, -1]
             vmax_frames[fi] = evecs[:, :, -1]
+            # 2×2 displayed subblock: both eigenvalues + v_min for ellipse drawing.
+            F_2d = F_bar[:, :2, :2]
+            evals_2d, evecs_2d = np.linalg.eigh(F_2d)   # ascending: 0=min, 1=max
+            evals_2d_frames[fi] = evals_2d
+            vmin_2d_frames[fi]  = evecs_2d[:, :, 0]     # semi-major axis direction
 
     if return_geometry:
-        return snapshot_epochs, det_frames, lmax_frames, vmax_frames
+        return snapshot_epochs, det_frames, lmax_frames, vmax_frames, evals_2d_frames, vmin_2d_frames
     return snapshot_epochs, det_frames
 
 
@@ -258,7 +275,6 @@ def make_gif(
     param_names: Optional[Sequence[str]] = None,
     figsize: Optional[Tuple[float, float]] = None,
     cmap: str = "viridis",
-    point_size: float = 12.0,
     norm_percentiles: Tuple[float, float] = (2.0, 98.0),
     title_prefix: str = "ensemble-averaged",
     writer: str = "pillow",
@@ -266,6 +282,12 @@ def make_gif(
     save_gif: bool = True,
     burn_in: int = 0,
     viz_mode: Literal["det", "geometry"] = "det",
+    ellipse_scale: float = 0.05,
+    ellipse_n_sub: Optional[int] = None,
+    ellipse_alpha: float = 0.75,
+    ellipse_lw: float = 0.4,
+    # Kept for backwards compatibility; no longer used for rendering.
+    point_size: float = 12.0,
     quiver_direction: Literal["hardest", "softest"] = "hardest",
     quiver_n_sub: int = 300,
     quiver_scale: float = 25.0,
@@ -274,6 +296,14 @@ def make_gif(
     quiver_scale_by_magnitude: bool = False,
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render the evolution of the ensemble-averaged Fisher geometry as a .gif.
+
+    Both ``viz_mode="det"`` and ``viz_mode="geometry"`` now show a single
+    panel of **1-σ Fisher ellipses** drawn at each validation parameter
+    location, coloured by ``log10(det F)``. The ellipses encode the full
+    local Fisher geometry: their orientation shows the degeneracy direction
+    and their aspect ratio shows how anisotropic the constraint is. As
+    training progresses the ellipses shrink, rotate, and sharpen, making
+    the emerging "mountain range" of Fisher information viscerally visible.
 
     Parameters
     ----------
@@ -286,87 +316,54 @@ def make_gif(
     param_names : sequence of str, optional
         Override the axis labels from metadata.
     figsize : (w, h), optional
-        Matplotlib figure size. Defaults to ``(7, 6)`` for ``"det"``
-        mode and ``(16, 5)`` for ``"geometry"`` mode.
+        Matplotlib figure size. Default ``(7, 6)``.
     cmap : str
-        Colormap for the log det F panel (default ``"viridis"``).
-    point_size : float
-        Scatter marker size.
+        Colormap for ``log10(det F)`` (default ``"viridis"``).
     norm_percentiles : (lo, hi)
-        Percentiles of log10 det F (across all frames) used to fix the
-        colour scale, so the colormap is consistent across frames.
+        Percentiles of ``log10 det F`` across all frames used to fix the
+        colour scale so it is consistent across frames.
     title_prefix : str
-        Prepended to the per-frame title.
+        Prepended to the per-frame super-title.
     writer : str
-        matplotlib animation writer (``"pillow"`` or ``"imagemagick"``).
+        Matplotlib animation writer (``"pillow"`` or ``"imagemagick"``).
     data_out_path : str, None, or ``"auto"``
         Where to save the portable ``.npz`` timeseries. ``"auto"``
         (default) saves alongside the gif with the same stem; ``None``
-        disables the data dump; any other string is used verbatim.
+        disables the dump; any other string is used verbatim.
     save_gif : bool
-        If False, skip rendering the gif (useful when you only want the
-        ``.npz`` for shipping locally).
+        If False, skip rendering the gif (data dump only).
     burn_in : int, default 0
         Render-time burn-in: drop frames with epoch < this value before
         computing colour limits, writing the ``.npz``, and animating.
     viz_mode : {"det", "geometry"}, default ``"det"``
-        ``"det"`` — the original single-panel ``log10(det F)`` scatter
-        (unchanged legacy behaviour).
-
-        ``"geometry"`` — a 3-panel layout that captures the full
-        Fisher "mountain range" as it emerges over training:
-
-        * **Panel 1** — ``log10(det F)`` scatter (same as ``"det"``
-          mode; coloured by ``cmap``).
-        * **Panel 2** — ``log10(λ_max)`` scatter coloured by
-          ``lmax_cmap``, showing *where* the Fisher peaks (the
-          mountain tops). This is the most visceral view of the
-          degeneracy structure.
-        * **Panel 3** — ``log10(λ_max)`` background with a quiver
-          overlay of the hardest (or softest, see
-          ``quiver_direction``) eigenvector, showing the *orientation*
-          of the dominant Fisher sensitivity.
-    quiver_direction : {"hardest", "softest"}, default ``"hardest"``
-        Which eigenvector to overlay in panel 3 of ``"geometry"`` mode.
-        ``"hardest"`` = eigenvector of λ_max (where the posterior is
-        most constrained); ``"softest"`` = eigenvector of λ_min (the
-        degeneracy direction).
-    quiver_n_sub : int, default 300
-        Number of scatter points subsampled for the quiver arrows.
-        A fixed random seed (0) is used so arrows don't jump between
-        frames.
-    quiver_scale : float, default 25.0
-        Passed directly to ``matplotlib.axes.Axes.quiver`` as
-        ``scale``. Larger values → shorter arrows.
-    quiver_color : str, default ``"k"``
-        Arrow colour for the quiver overlay.
-    lmax_cmap : str, default ``"plasma"``
-        Colormap for the λ_max panels in ``"geometry"`` mode.
-    quiver_scale_by_magnitude : bool, default False
-        If True, scale each arrow's length by the corresponding
-        eigenvalue (λ_max for ``"hardest"``, λ_min for ``"softest"``),
-        so strong Fisher peaks produce long arrows and flat regions
-        produce short ones. The lengths are normalised to the 98th
-        percentile of the eigenvalue distribution across **all frames**
-        before being multiplied by the unit eigenvectors, so the
-        scaling is consistent across the animation (strong peaks keep
-        growing visibly as the network trains). If False (default),
-        all arrows are unit length — only direction is shown.
+        Kept for API compatibility. Both modes now render the same
+        single-panel 1-σ Fisher ellipse visualisation.
+    ellipse_scale : float, default 0.05
+        Controls the overall size of the ellipses. The semi-major axis
+        of the *median* ellipse at the **last** (most-trained) frame is
+        set to ``ellipse_scale × data_range`` (where ``data_range`` is
+        the larger of the ``theta_1`` / ``theta_2`` ranges). All
+        earlier frames use the same absolute normalisation, so you can
+        watch ellipses grow/shrink/sharpen as training progresses.
+        Increase this value if ellipses are too small to see; decrease
+        if they overlap too much.
+    ellipse_n_sub : int or None, default None
+        Subsample the validation set to this many ellipses for
+        rendering performance. ``None`` draws all validation points.
+        Recommended: 300–800 for a clean visual.
+    ellipse_alpha : float, default 0.75
+        Opacity of the ellipse faces.
+    ellipse_lw : float, default 0.4
+        Ellipse edge linewidth (``0`` for no edge).
 
     Returns
     -------
     (gif_path_or_None, epochs, data_path_or_None)
     """
-    _geometry = viz_mode == "geometry"
-
     meta, theta_val, per_model = load_snapshots(snapshots_dir)
-    if _geometry:
-        epochs, det_frames, lmax_frames, vmax_frames_arr = build_frames(
-            meta, per_model, return_geometry=True
-        )
-    else:
-        epochs, det_frames = build_frames(meta, per_model)
-        lmax_frames = vmax_frames_arr = None
+    epochs, det_frames, lmax_frames, vmax_frames, evals_2d_frames, vmin_2d_frames = (
+        build_frames(meta, per_model, return_geometry=True)
+    )
 
     if burn_in and burn_in > 0:
         keep = np.asarray([e >= burn_in for e in epochs])
@@ -376,11 +373,12 @@ def make_gif(
                 f"burn_in={burn_in} removed every frame; "
                 f"max epoch was {epochs[-1] if epochs else 0}."
             )
-        epochs = [e for e, k in zip(epochs, keep) if k]
-        det_frames = det_frames[keep]
-        if lmax_frames is not None:
-            lmax_frames = lmax_frames[keep]
-            vmax_frames_arr = vmax_frames_arr[keep]
+        epochs        = [e for e, k in zip(epochs, keep) if k]
+        det_frames    = det_frames[keep]
+        lmax_frames   = lmax_frames[keep]
+        vmax_frames   = vmax_frames[keep]
+        evals_2d_frames = evals_2d_frames[keep]
+        vmin_2d_frames  = vmin_2d_frames[keep]
         print(
             f"render-time burn_in={burn_in}: dropped {n_dropped} early "
             f"frame(s); {len(epochs)} frame(s) remaining "
@@ -401,23 +399,16 @@ def make_gif(
         raise RuntimeError("no finite log10 det F values across frames")
     vmin_det, vmax_det = np.percentile(finite_log, norm_percentiles)
 
-    log_lmax: Optional[np.ndarray] = None
-    lmax_vmin_v = lmax_vmax_v = None
-    if _geometry and lmax_frames is not None:
-        log_lmax = _safe_log10(lmax_frames)
-        finite_lmax = log_lmax[np.isfinite(log_lmax)]
-        if finite_lmax.size:
-            lmax_vmin_v, lmax_vmax_v = np.percentile(finite_lmax, norm_percentiles)
-        else:
-            lmax_vmin_v, lmax_vmax_v = 0.0, 1.0
+    log_lmax = _safe_log10(lmax_frames)
+    _lmax_finite = log_lmax[np.isfinite(log_lmax)]
+    lmax_vmin_v = float(np.percentile(_lmax_finite, norm_percentiles[0])) if _lmax_finite.size else 0.0
+    lmax_vmax_v = float(np.percentile(_lmax_finite, norm_percentiles[1])) if _lmax_finite.size else 1.0
 
     # Resolve the data output path.
     resolved_data_path: Optional[str]
     if data_out_path == "auto":
         if out_path is None:
-            resolved_data_path = os.path.join(
-                snapshots_dir, "val_detF_timeseries.npz"
-            )
+            resolved_data_path = os.path.join(snapshots_dir, "val_detF_timeseries.npz")
         else:
             base, _ = os.path.splitext(out_path)
             resolved_data_path = base + ".npz"
@@ -445,7 +436,7 @@ def make_gif(
             snapshots_dir=snapshots_dir,
             lmax_frames=lmax_frames,
             log_lmax_frames=log_lmax,
-            vmax_frames=vmax_frames_arr,
+            vmax_frames=vmax_frames,
             lmax_vmin=lmax_vmin_v,
             lmax_vmax=lmax_vmax_v,
         )
@@ -459,133 +450,86 @@ def make_gif(
 
     import matplotlib.pyplot as plt
     import matplotlib.animation as animation
+    from matplotlib.collections import EllipseCollection
     from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
 
     m1 = theta_val[:, 0]
     m2 = theta_val[:, 1]
 
     # ------------------------------------------------------------------
-    # Single-panel "det" mode (legacy, unchanged)
+    # Ellipse normalisation: scale so the median semi-major axis at the
+    # last (most-trained) frame equals ellipse_scale × data_range.
+    # This normalisation is frozen for all frames, so early frames show
+    # large uncertain ellipses that shrink and sharpen as training proceeds.
     # ------------------------------------------------------------------
-    if not _geometry:
-        _figsize = figsize if figsize is not None else (7.0, 6.0)
-        norm = Normalize(vmin=vmin_det, vmax=vmax_det)
-        fig, ax = plt.subplots(figsize=_figsize, constrained_layout=True)
-        sc = ax.scatter(m1, m2, c=log_det[0], cmap=cmap, norm=norm, s=point_size)
+    data_range = max(float(m1.max() - m1.min()), float(m2.max() - m2.min()), 1e-8)
+    _lmin_last = np.clip(evals_2d_frames[-1, :, 0], 1e-30, None)
+    med_sigma_last = float(np.nanmedian(1.0 / np.sqrt(_lmin_last)))
+    _norm_factor = (ellipse_scale * data_range / med_sigma_last) if med_sigma_last > 0 else (ellipse_scale * data_range)
+
+    # Subsample (fixed seed → arrows/ellipses stay at same locations each frame).
+    rng = np.random.RandomState(0)
+    n_sub = min(ellipse_n_sub or len(m1), len(m1))
+    sub_idx = rng.choice(len(m1), size=n_sub, replace=False)
+    m1_sub, m2_sub = m1[sub_idx], m2[sub_idx]
+
+    def _ellipse_arrays(fi):
+        """Return (widths, heights, angles_deg, colors) for frame fi."""
+        lmin_i = np.clip(evals_2d_frames[fi, sub_idx, 0], 1e-30, None)
+        lmax_i = np.clip(evals_2d_frames[fi, sub_idx, 1], 1e-30, None)
+        semi_major = _norm_factor / np.sqrt(lmin_i)   # 1/√λ_min — degeneracy direction
+        semi_minor = _norm_factor / np.sqrt(lmax_i)   # 1/√λ_max — constrained direction
+        angle_deg = np.degrees(
+            np.arctan2(vmin_2d_frames[fi, sub_idx, 1],
+                       vmin_2d_frames[fi, sub_idx, 0])
+        )
+        colors = log_det[fi, sub_idx]
+        return 2 * semi_major, 2 * semi_minor, angle_deg, colors  # full diameters
+
+    _figsize = figsize if figsize is not None else (7.0, 6.0)
+    norm = Normalize(vmin=vmin_det, vmax=vmax_det)
+    pad = 0.03 * data_range
+
+    fig, ax = plt.subplots(figsize=_figsize, constrained_layout=True)
+
+    # Colorbar via an independent ScalarMappable so it survives ax.cla().
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label=r"$\log_{10}\,\det F_\theta$")
+
+    def _draw_frame(fi):
+        ax.cla()
+        w, h, ang, col = _ellipse_arrays(fi)
+        ec = EllipseCollection(
+            widths=w, heights=h, angles=ang,
+            units="x",
+            array=col, cmap=cmap, norm=norm,
+            offsets=np.column_stack([m1_sub, m2_sub]),
+            transOffset=ax.transData,
+            alpha=ellipse_alpha, linewidths=ellipse_lw,
+            edgecolors="face",
+        )
+        ax.add_collection(ec)
+        ax.set_xlim(m1.min() - pad, m1.max() + pad)
+        ax.set_ylim(m2.min() - pad, m2.max() + pad)
         ax.set_xlabel(param_names[0])
         ax.set_ylabel(param_names[1])
-        title = ax.set_title(
-            f"{title_prefix} $\\log_{{10}}\\,\\det F$  |  epoch {epochs[0]}"
+        ax.set_title(
+            f"{title_prefix} $\\log_{{10}}\\,\\det F$  |  epoch {epochs[fi]}"
         )
-        plt.colorbar(sc, ax=ax, label=r"$\log_{10}\,\det F_\theta$")
+        return (ec,)
 
-        def update(i):
-            sc.set_array(log_det[i])
-            title.set_text(
-                f"{title_prefix} $\\log_{{10}}\\,\\det F$  |  epoch {epochs[i]}"
-            )
-            return sc, title
-
-        ani = animation.FuncAnimation(
-            fig, update, frames=len(epochs), interval=1000.0 / max(1, fps), blit=False
-        )
-        out_path = os.path.abspath(out_path)
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        ani.save(out_path, writer=writer, fps=fps)
-        plt.close(fig)
-        print(f"saved gif to {out_path} ({len(epochs)} frames)")
-        return out_path, list(epochs), saved_data_path
-
-    # ------------------------------------------------------------------
-    # 3-panel "geometry" mode: log_det | log_lmax | quiver(v_max/v_min)
-    # ------------------------------------------------------------------
-    _figsize = figsize if figsize is not None else (16.0, 5.0)
-    norm_det = Normalize(vmin=vmin_det, vmax=vmax_det)
-    norm_lmax = Normalize(vmin=lmax_vmin_v, vmax=lmax_vmax_v)
-
-    # Fixed subsample index for quiver so arrows stay put across frames.
-    rng = np.random.RandomState(0)
-    n_sub = min(quiver_n_sub, len(m1))
-    sub_idx = rng.choice(len(m1), size=n_sub, replace=False)
-
-    # Which eigenvector to display in panel 3.
-    _use_hardest = quiver_direction == "hardest"
-    if _use_hardest:
-        _vec_frames = vmax_frames_arr          # hardest direction (lambda_max)
-        _mag_frames = lmax_frames              # magnitudes for optional scaling
-        _quiver_title = r"hardest direction $v_{\max}(\lambda_{\max})$"
-    else:
-        if theta_val.shape[1] == 2:
-            # Rotate v_max by 90 degrees to get v_min for the 2-param case.
-            _vec_frames = vmax_frames_arr[..., ::-1] * np.array([-1.0, 1.0])
-        else:
-            print(
-                "WARNING: quiver_direction='softest' with n_params>2 requires "
-                "v_min which is not stored in the snapshot. Falling back to "
-                "the hardest direction. Re-run with quiver_direction='hardest' "
-                "to suppress this warning."
-            )
-            _vec_frames = vmax_frames_arr
-        # lambda_min is not stored; lambda_max is still a useful magnitude proxy.
-        _mag_frames = lmax_frames
-        _quiver_title = r"softest direction $v_{\min}(\lambda_{\min})$"
-
-    # Optionally weight each arrow by its eigenvalue magnitude, normalised
-    # to the 98th-percentile across all frames so the scale is stable
-    # across the whole animation (peaks grow visibly as the network trains).
-    if quiver_scale_by_magnitude and _mag_frames is not None:
-        _mag_ref = float(np.nanpercentile(_mag_frames, 98))
-        _mag_ref = _mag_ref if _mag_ref > 0 else 1.0
-        _scaled_vec_frames = _vec_frames * (_mag_frames[..., None] / _mag_ref)
-    else:
-        _scaled_vec_frames = _vec_frames
-
-    fig, axes = plt.subplots(1, 3, figsize=_figsize, constrained_layout=True)
-
-    sc0 = axes[0].scatter(m1, m2, c=log_det[0], s=point_size, cmap=cmap, norm=norm_det)
-    axes[0].set_xlabel(param_names[0]); axes[0].set_ylabel(param_names[1])
-    axes[0].set_title(r"$\log_{10}\,\det F_\theta$")
-    plt.colorbar(sc0, ax=axes[0])
-
-    sc1 = axes[1].scatter(m1, m2, c=log_lmax[0], s=point_size, cmap=lmax_cmap, norm=norm_lmax)
-    axes[1].set_xlabel(param_names[0]); axes[1].set_ylabel(param_names[1])
-    axes[1].set_title(r"$\log_{10}\,\lambda_{\max}(F_\theta)$")
-    plt.colorbar(sc1, ax=axes[1])
-
-    sc2 = axes[2].scatter(m1, m2, c=log_lmax[0], s=point_size * 0.4,
-                          cmap=lmax_cmap, norm=norm_lmax, alpha=0.35)
-    _U0 = _scaled_vec_frames[0][sub_idx, 0]
-    _V0 = _scaled_vec_frames[0][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
-    Q = axes[2].quiver(
-        m1[sub_idx], m2[sub_idx], _U0, _V0,
-        angles="xy", pivot="middle",
-        scale=quiver_scale, width=0.003,
-        color=quiver_color, alpha=0.75,
-    )
-    axes[2].set_xlabel(param_names[0]); axes[2].set_ylabel(param_names[1])
-    axes[2].set_title(_quiver_title)
-
-    suptitle = fig.suptitle(f"{title_prefix}  |  epoch {epochs[0]}")
-
-    def update_geometry(i):
-        sc0.set_array(log_det[i])
-        sc1.set_array(log_lmax[i])
-        sc2.set_array(log_lmax[i])
-        U = _scaled_vec_frames[i][sub_idx, 0]
-        V = _scaled_vec_frames[i][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
-        Q.set_UVC(U, V)
-        suptitle.set_text(f"{title_prefix}  |  epoch {epochs[i]}")
-        return sc0, sc1, sc2, Q, suptitle
-
+    _draw_frame(0)
     ani = animation.FuncAnimation(
-        fig, update_geometry, frames=len(epochs),
+        fig, _draw_frame, frames=len(epochs),
         interval=1000.0 / max(1, fps), blit=False,
     )
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     ani.save(out_path, writer=writer, fps=fps)
     plt.close(fig)
-    print(f"saved gif to {out_path} ({len(epochs)} frames, viz_mode='geometry')")
+    print(f"saved gif to {out_path} ({len(epochs)} frames, 1-σ Fisher ellipses)")
     return out_path, list(epochs), saved_data_path
 
 
@@ -596,8 +540,9 @@ def make_gif(
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
-            "Render a .gif of ensemble-averaged val_detF over training "
-            "from per-model Fisher snapshots."
+            "Render a .gif of the ensemble-averaged Fisher geometry evolving "
+            "over training, as 1-σ ellipses at each validation parameter "
+            "location coloured by log10(det F)."
         )
     )
     p.add_argument(
@@ -607,112 +552,56 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="val_detF_evolution.gif", help="Output .gif path.")
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--cmap", default="viridis")
-    p.add_argument("--point-size", type=float, default=12.0)
     p.add_argument(
         "--norm-percentiles",
-        nargs=2,
-        type=float,
-        default=(2.0, 98.0),
-        metavar=("LO", "HI"),
+        nargs=2, type=float, default=(2.0, 98.0), metavar=("LO", "HI"),
         help="Percentiles of log10 det F used to fix colour scale (default 2 98).",
     )
     p.add_argument(
-        "--param-names",
-        nargs="+",
-        default=None,
+        "--param-names", nargs="+", default=None,
         help="Override axis labels (need at least two).",
     )
     p.add_argument(
-        "--writer",
-        default="pillow",
-        choices=("pillow", "imagemagick"),
+        "--writer", default="pillow", choices=("pillow", "imagemagick"),
     )
     p.add_argument(
-        "--data-out",
-        default=None,
+        "--data-out", default=None,
         help=(
             "Path for the portable .npz timeseries dump. Defaults to the "
             "gif path with .npz extension. Pass an empty string to disable."
         ),
     )
+    p.add_argument("--no-data", action="store_true",
+                   help="Skip writing the .npz timeseries dump.")
+    p.add_argument("--no-gif", action="store_true",
+                   help="Skip rendering the .gif (data dump only).")
     p.add_argument(
-        "--no-data",
-        action="store_true",
-        help="Skip writing the .npz timeseries dump.",
+        "--burn-in", type=int, default=0,
+        help="Drop frames with epoch < this value. Default 0 (keep all).",
     )
     p.add_argument(
-        "--no-gif",
-        action="store_true",
+        "--viz-mode", default="det", choices=("det", "geometry"),
+        help="Kept for compatibility; both modes render 1-σ ellipses.",
+    )
+    p.add_argument(
+        "--ellipse-scale", type=float, default=0.05,
         help=(
-            "Skip rendering the .gif. Useful when you only want the .npz "
-            "to ship locally for replotting."
+            "Scales ellipse sizes: the median semi-major axis at the last "
+            "frame = ellipse_scale × data_range. Default 0.05."
         ),
     )
     p.add_argument(
-        "--burn-in",
-        type=int,
-        default=0,
-        help=(
-            "Render-time burn-in: drop frames with epoch < this value "
-            "before computing colour limits and animating. Default 0 "
-            "(keep all)."
-        ),
+        "--ellipse-n-sub", type=int, default=None,
+        help="Subsample validation set to this many ellipses. Default: all.",
     )
     p.add_argument(
-        "--viz-mode",
-        default="det",
-        choices=("det", "geometry"),
-        help=(
-            "'det' (default): single-panel log10(det F) scatter. "
-            "'geometry': 3-panel layout showing log_det, log_lmax, and "
-            "a quiver of the hardest (or softest) Fisher eigenvector."
-        ),
+        "--ellipse-alpha", type=float, default=0.75,
+        help="Ellipse face opacity. Default 0.75.",
     )
     p.add_argument(
-        "--quiver-direction",
-        default="hardest",
-        choices=("hardest", "softest"),
-        help=(
-            "Which eigenvector to overlay in geometry mode. "
-            "'hardest' (default) = v_max of lambda_max; "
-            "'softest' = v_min of lambda_min."
-        ),
+        "--ellipse-lw", type=float, default=0.4,
+        help="Ellipse edge linewidth (0 = no edge). Default 0.4.",
     )
-    p.add_argument(
-        "--quiver-n-sub",
-        type=int,
-        default=300,
-        help="Number of subsampled points for the quiver overlay. Default 300.",
-    )
-    p.add_argument(
-        "--quiver-scale",
-        type=float,
-        default=25.0,
-        help="Quiver scale (larger = shorter arrows). Default 25.",
-    )
-    p.add_argument(
-        "--quiver-color",
-        default="k",
-        help="Quiver arrow colour. Default 'k' (black).",
-    )
-    p.add_argument(
-        "--lmax-cmap",
-        default="plasma",
-        help="Colormap for the lambda_max panels in geometry mode. Default 'plasma'.",
-    )
-    p.add_argument(
-        "--scale-by-magnitude",
-        dest="quiver_scale_by_magnitude",
-        action="store_true",
-        help=(
-            "Scale each quiver arrow by the corresponding eigenvalue magnitude "
-            "(lambda_max for 'hardest', lambda_max proxy for 'softest'), "
-            "normalised to the 98th-percentile across all frames. "
-            "Makes Fisher peaks visibly grow taller as training progresses. "
-            "Default: unit-length arrows (direction only)."
-        ),
-    )
-    p.set_defaults(quiver_scale_by_magnitude=False)
     return p
 
 
@@ -731,7 +620,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         out_path=args.out,
         fps=args.fps,
         cmap=args.cmap,
-        point_size=args.point_size,
         norm_percentiles=tuple(args.norm_percentiles),
         param_names=args.param_names,
         writer=args.writer,
@@ -739,12 +627,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         save_gif=not args.no_gif,
         burn_in=args.burn_in,
         viz_mode=args.viz_mode,
-        quiver_direction=args.quiver_direction,
-        quiver_n_sub=args.quiver_n_sub,
-        quiver_scale=args.quiver_scale,
-        quiver_color=args.quiver_color,
-        lmax_cmap=args.lmax_cmap,
-        quiver_scale_by_magnitude=args.quiver_scale_by_magnitude,
+        ellipse_scale=args.ellipse_scale,
+        ellipse_n_sub=args.ellipse_n_sub,
+        ellipse_alpha=args.ellipse_alpha,
+        ellipse_lw=args.ellipse_lw,
     )
 
 

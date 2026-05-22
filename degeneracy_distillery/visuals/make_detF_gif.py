@@ -271,6 +271,7 @@ def make_gif(
     quiver_scale: float = 25.0,
     quiver_color: str = "k",
     lmax_cmap: str = "plasma",
+    quiver_scale_by_magnitude: bool = False,
 ) -> Tuple[Optional[str], List[int], Optional[str]]:
     """Render the evolution of the ensemble-averaged Fisher geometry as a .gif.
 
@@ -341,6 +342,16 @@ def make_gif(
         Arrow colour for the quiver overlay.
     lmax_cmap : str, default ``"plasma"``
         Colormap for the λ_max panels in ``"geometry"`` mode.
+    quiver_scale_by_magnitude : bool, default False
+        If True, scale each arrow's length by the corresponding
+        eigenvalue (λ_max for ``"hardest"``, λ_min for ``"softest"``),
+        so strong Fisher peaks produce long arrows and flat regions
+        produce short ones. The lengths are normalised to the 98th
+        percentile of the eigenvalue distribution across **all frames**
+        before being multiplied by the unit eigenvectors, so the
+        scaling is consistent across the animation (strong peaks keep
+        growing visibly as the network trains). If False (default),
+        all arrows are unit length — only direction is shown.
 
     Returns
     -------
@@ -500,20 +511,12 @@ def make_gif(
     # Which eigenvector to display in panel 3.
     _use_hardest = quiver_direction == "hardest"
     if _use_hardest:
-        _vec_frames = vmax_frames_arr          # hardest direction (λ_max)
+        _vec_frames = vmax_frames_arr          # hardest direction (lambda_max)
+        _mag_frames = lmax_frames              # magnitudes for optional scaling
         _quiver_title = r"hardest direction $v_{\max}(\lambda_{\max})$"
     else:
-        # softest: eigenvector of λ_min = evecs[:, :, 0].
-        # We don't store it separately; recompute once from vmax_frames_arr
-        # if needed — but we didn't save v_min. Fall back gracefully: if
-        # the user wants softest they should use quiver_direction="softest"
-        # and we warn that we'd need a separate build_frames call.  In
-        # practice, re-derive v_min here from the eigh we already have
-        # stored by rebuilding per-frame. But we only stored v_max…
-        # For now just use the negative orthogonal (90° rotation for 2D)
-        # as a proxy when n_params==2, or warn and fall back to hardest.
         if theta_val.shape[1] == 2:
-            # Rotate v_max by 90° to get v_min for the 2-param case.
+            # Rotate v_max by 90 degrees to get v_min for the 2-param case.
             _vec_frames = vmax_frames_arr[..., ::-1] * np.array([-1.0, 1.0])
         else:
             print(
@@ -523,7 +526,19 @@ def make_gif(
                 "to suppress this warning."
             )
             _vec_frames = vmax_frames_arr
+        # lambda_min is not stored; lambda_max is still a useful magnitude proxy.
+        _mag_frames = lmax_frames
         _quiver_title = r"softest direction $v_{\min}(\lambda_{\min})$"
+
+    # Optionally weight each arrow by its eigenvalue magnitude, normalised
+    # to the 98th-percentile across all frames so the scale is stable
+    # across the whole animation (peaks grow visibly as the network trains).
+    if quiver_scale_by_magnitude and _mag_frames is not None:
+        _mag_ref = float(np.nanpercentile(_mag_frames, 98))
+        _mag_ref = _mag_ref if _mag_ref > 0 else 1.0
+        _scaled_vec_frames = _vec_frames * (_mag_frames[..., None] / _mag_ref)
+    else:
+        _scaled_vec_frames = _vec_frames
 
     fig, axes = plt.subplots(1, 3, figsize=_figsize, constrained_layout=True)
 
@@ -539,8 +554,8 @@ def make_gif(
 
     sc2 = axes[2].scatter(m1, m2, c=log_lmax[0], s=point_size * 0.4,
                           cmap=lmax_cmap, norm=norm_lmax, alpha=0.35)
-    _U0 = _vec_frames[0][sub_idx, 0]
-    _V0 = _vec_frames[0][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
+    _U0 = _scaled_vec_frames[0][sub_idx, 0]
+    _V0 = _scaled_vec_frames[0][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
     Q = axes[2].quiver(
         m1[sub_idx], m2[sub_idx], _U0, _V0,
         angles="xy", pivot="middle",
@@ -556,8 +571,8 @@ def make_gif(
         sc0.set_array(log_det[i])
         sc1.set_array(log_lmax[i])
         sc2.set_array(log_lmax[i])
-        U = _vec_frames[i][sub_idx, 0]
-        V = _vec_frames[i][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
+        U = _scaled_vec_frames[i][sub_idx, 0]
+        V = _scaled_vec_frames[i][sub_idx, 1] if theta_val.shape[1] >= 2 else np.zeros(n_sub)
         Q.set_UVC(U, V)
         suptitle.set_text(f"{title_prefix}  |  epoch {epochs[i]}")
         return sc0, sc1, sc2, Q, suptitle
@@ -685,6 +700,19 @@ def _build_argparser() -> argparse.ArgumentParser:
         default="plasma",
         help="Colormap for the lambda_max panels in geometry mode. Default 'plasma'.",
     )
+    p.add_argument(
+        "--scale-by-magnitude",
+        dest="quiver_scale_by_magnitude",
+        action="store_true",
+        help=(
+            "Scale each quiver arrow by the corresponding eigenvalue magnitude "
+            "(lambda_max for 'hardest', lambda_max proxy for 'softest'), "
+            "normalised to the 98th-percentile across all frames. "
+            "Makes Fisher peaks visibly grow taller as training progresses. "
+            "Default: unit-length arrows (direction only)."
+        ),
+    )
+    p.set_defaults(quiver_scale_by_magnitude=False)
     return p
 
 
@@ -716,6 +744,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         quiver_scale=args.quiver_scale,
         quiver_color=args.quiver_color,
         lmax_cmap=args.lmax_cmap,
+        quiver_scale_by_magnitude=args.quiver_scale_by_magnitude,
     )
 
 

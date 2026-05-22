@@ -277,6 +277,8 @@ def make_gif(
     cmap: str = "viridis",
     norm_percentiles: Tuple[float, float] = (2.0, 98.0),
     title_prefix: str = "ensemble-averaged",
+    title: Optional[str] = None,
+    show_epoch: bool = True,
     writer: str = "pillow",
     data_out_path: Optional[str] = "auto",
     save_gif: bool = True,
@@ -324,6 +326,15 @@ def make_gif(
         colour scale so it is consistent across frames.
     title_prefix : str
         Prepended to the per-frame super-title.
+    title : str or None, default None
+        If set, replaces ``title_prefix`` as the label part of the
+        per-frame title. The epoch counter is still appended (see
+        ``show_epoch``).  Pass an empty string (``""``) for a blank
+        label with only the epoch number.
+    show_epoch : bool, default True
+        If False, suppress the epoch counter from the title entirely —
+        useful for blog-post gifs where technical details should stay
+        off the frame.
     writer : str
         Matplotlib animation writer (``"pillow"`` or ``"imagemagick"``).
     data_out_path : str, None, or ``"auto"``
@@ -515,8 +526,9 @@ def make_gif(
         ax.set_ylim(m2.min() - pad, m2.max() + pad)
         ax.set_xlabel(param_names[0])
         ax.set_ylabel(param_names[1])
+        _label = title if title is not None else f"{title_prefix} $\\log_{{10}}\\,\\det F$"
         ax.set_title(
-            f"{title_prefix} $\\log_{{10}}\\,\\det F$  |  epoch {epochs[fi]}"
+            f"{_label}  |  epoch {epochs[fi]}" if show_epoch else _label
         )
         return (ec,)
 

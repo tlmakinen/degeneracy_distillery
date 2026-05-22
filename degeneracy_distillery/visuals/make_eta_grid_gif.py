@@ -491,6 +491,8 @@ def make_eta_grid_gif(
     levels: int = 20,
     norm_percentiles: Tuple[float, float] = (2.0, 98.0),
     title_prefix: str = "learned coordinates",
+    title: Optional[str] = None,
+    show_epoch: bool = True,
     writer: str = "pillow",
     data_out_path: Optional[str] = "auto",
     save_gif: bool = True,
@@ -533,6 +535,14 @@ def make_eta_grid_gif(
         frames.
     title_prefix : str
         Prepended to the per-frame super-title.
+    title : str or None, default None
+        If set, replaces ``title_prefix`` as the label part of every
+        frame's super-title. The epoch counter is still appended (see
+        ``show_epoch``). Pass ``""`` for a blank label with only the
+        epoch number.
+    show_epoch : bool, default True
+        If False, suppress the epoch counter from the super-title
+        entirely — useful for clean blog-post gifs.
     writer : str
         matplotlib animation writer (``"pillow"`` or ``"imagemagick"``).
     data_out_path : str, None, or ``"auto"``
@@ -854,7 +864,8 @@ def make_eta_grid_gif(
         )
 
     def _title_text(i: int) -> str:
-        base = f"{_suptitle_prefix}  |  epoch {epochs[i]}"
+        _label = title if title is not None else _suptitle_prefix
+        base = f"{_label}  |  epoch {epochs[i]}" if show_epoch else _label
         if _scores_available:
             score_str = _format_score(float(frob_scores[i]))
             if score_str:

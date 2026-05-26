@@ -14,7 +14,7 @@ A package for mapping information geometry and identifying degeneracies from dat
 ```python
 # Degeneracy Distillery — conceptual API (each block ≈ one main library call)
 
-# Step 1 — Fisher networks (ensemble)
+# Step 1 — learn info geometry with Fisher networks (ensemble)
 theta, x = sample_prior_and_simulate(nsims)          # your simulator
 W = train_fishnets(theta, x)                         # θ̂ and F(θ|x) per datum
 
@@ -68,30 +68,6 @@ pip install -e ".[jupyter]"
 
 ## Usage
 
-### Option 1: Import as a Package (Recommended for Colab/External Use)
-
-```python
-import degeneracy_distillery
-from degeneracy_distillery.training_loop_flatten import *
-from degeneracy_distillery.preprocessing_utils import *
-from degeneracy_distillery.sr_utils import *
-```
-
-### Option 2: Direct Import (For Working in Repository)
-
-When working directly in the repository (e.g., from notebooks/):
-
-```python
-import sys
-sys.path.insert(0, '../degeneracy_distillery')  # from notebooks/
-# or sys.path.insert(0, 'degeneracy_distillery') if at repo root
-from training_loop_flatten import *
-from preprocessing_utils import *
-from sr_utils import *
-```
-
-**Both methods work seamlessly!** The code automatically detects which import method to use.
-
 See the `notebooks/` directory for example usage and analysis workflows.
 
 ### Google Colab Installation
@@ -104,7 +80,7 @@ For Google Colab:
 %cd /content/degeneracy_distillery
 !pip install -e .
 
-# 2. Install ESR (REQUIRED!)
+# 2. Install ESR 
 %cd /content
 !git clone https://github.com/DeaglanBartlett/ESR.git
 %cd /content/ESR

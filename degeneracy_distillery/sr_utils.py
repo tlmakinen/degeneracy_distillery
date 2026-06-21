@@ -1328,6 +1328,65 @@ def sr_structure_predicate(
     return predicate
 
 
+def filter_equation_csv(
+    csv_path: str,
+    equation_predicate: Callable[[str], bool],
+    *,
+    model_column: str = "model",
+    delimiter: str = ";",
+    backup_suffix: str = ".unfiltered",
+) -> Dict[str, int | str]:
+    """
+    Rewrite an SR equation CSV after removing equations rejected by a predicate.
+
+    This is useful for making the persisted Pareto front match the structural
+    constraints used later by :func:`analyze_equations`, rather than only
+    skipping rejected equations in memory.
+    """
+    data = pd.read_csv(csv_path, delimiter=delimiter)
+    if model_column not in data.columns:
+        raise ValueError(f"{csv_path} does not contain model column {model_column!r}")
+
+    keep = np.array([bool(equation_predicate(str(eq))) for eq in data[model_column]], dtype=bool)
+    removed = int((~keep).sum())
+    original = int(len(data))
+
+    backup_path = f"{csv_path}{backup_suffix}"
+    if removed and not os.path.exists(backup_path):
+        data.to_csv(backup_path, sep=delimiter, index=False)
+    if removed:
+        data.loc[keep].to_csv(csv_path, sep=delimiter, index=False)
+
+    return {
+        "path": csv_path,
+        "backup_path": backup_path if removed else "",
+        "original": original,
+        "kept": int(keep.sum()),
+        "removed": removed,
+    }
+
+
+def filter_pareto_fronts(
+    parent_dir: str,
+    n_components: int,
+    equation_predicate: Callable[[str], bool],
+    *,
+    backup_suffix: str = ".unfiltered",
+) -> List[Dict[str, int | str]]:
+    """Remove predicate-rejected equations from component ``pareto.csv`` files."""
+    summaries = []
+    for component_idx in range(1, n_components + 1):
+        pareto_path = os.path.join(parent_dir, f"component_{component_idx}", "pareto.csv")
+        summaries.append(
+            filter_equation_csv(
+                pareto_path,
+                equation_predicate,
+                backup_suffix=backup_suffix,
+            )
+        )
+    return summaries
+
+
 @jax.jit
 def norm(A: jnp.ndarray) -> float:
     """Frobenius norm of a matrix."""

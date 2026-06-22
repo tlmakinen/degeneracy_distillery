@@ -1965,6 +1965,12 @@ def fit_and_analyze_sr(
     slice_fisher: bool = False,
     save_split_data: bool = True,
     split_data_npz_name: str = "split_data.npz",
+    flatten_model=None,
+    ensemble_w=None,
+    rotmats=None,
+    ensemble_weights: Optional[np.ndarray] = None,
+    n_sr_samples: int = 2000,
+    key=None,
     **sr_kwargs
 ) -> Tuple[List[str], List[str], Dict[str, List], Dict]:
     """
@@ -2120,73 +2126,120 @@ def fit_and_analyze_sr(
     """
     if components_to_fit is None:
         components_to_fit = list(range(y.shape[1]))
-    
-    # Split data using train_test_split
-    # Note: we need to keep all arrays aligned, so we split them together
-    arrays_to_split = [X, y, y_std, dy_sr, Fs]
-    
-    split_result = train_test_split(
-        *arrays_to_split,
-        test_size=test_size,
-        random_state=random_state,
-        shuffle=shuffle
-    )
-    
-    # Unpack split results
-    X_train, X_val = split_result[0], split_result[1]
-    y_train, y_val = split_result[2], split_result[3]
-    y_std_train, y_std_val = split_result[4], split_result[5]
-    dy_sr_train, dy_sr_val = split_result[6], split_result[7]
-    Fs_train, Fs_val = split_result[8], split_result[9]
-    
-    # Optionally slice Fisher matrices and parameters to match components_to_fit
+
+    # ── Augmentation validation ──────────────────────────────────────────────
+    _aug_args = (flatten_model, ensemble_w, rotmats, ensemble_weights)
+    _aug_provided = [a is not None for a in _aug_args]
+    if any(_aug_provided) and not all(_aug_provided):
+        raise ValueError(
+            "flatten_model, ensemble_w, rotmats, and ensemble_weights must all be "
+            "provided together to enable the uniform-grid augmentation."
+        )
+    use_augmentation = all(_aug_provided)
+
+    if use_augmentation:
+        # ── Build augmented SR grid ──────────────────────────────────────────
+        from degeneracy_distillery.postprocessing_utils import weighted_std as _weighted_std
+        import jax.random as jr
+
+        if key is None:
+            key = jr.PRNGKey(0)
+
+        X_arr = np.asarray(X)
+        X_sr = np.array(jr.uniform(
+            key,
+            minval=jnp.array(X_arr.min(0)),
+            maxval=jnp.array(X_arr.max(0)),
+            shape=(n_sr_samples, X_arr.shape[1]),
+        ))
+
+        ys_sr = jnp.array([
+            jax.vmap(lambda x: flatten_model.apply(w_i, x))(jnp.array(X_sr))
+            for w_i in ensemble_w
+        ])
+
+        ys_sr_rot = np.array([
+            np.einsum("ij,bj->bi", np.asarray(rotmats[i]),
+                      np.array(ys_sr[i]) - np.array(ys_sr[i]).mean(0))
+            for i in range(len(ensemble_w))
+        ])
+
+        ew = np.asarray(ensemble_weights)
+        y_sr = np.average(ys_sr_rot, axis=0, weights=ew)
+        y_std_sr = _weighted_std(ys_sr_rot, ew)
+
+        # Shift minimum to zero (matches notebook convention)
+        ys_sr_rot -= y_sr.min(0)
+        y_sr -= y_sr.min(0)
+
+        # Split augmented set: train → SR fitting, val → held out
+        (X_sr_train, X_sr_val,
+         y_sr_train, y_sr_val,
+         y_std_sr_train, y_std_sr_val) = train_test_split(
+            X_sr, y_sr, y_std_sr,
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=shuffle,
+        )
+        X_fit, y_fit, y_std_fit = X_sr_train, y_sr_train, y_std_sr_train
+
+        # Analysis uses the full original data: Frobenius loss requires matched Fishers
+        X_eval     = np.asarray(X)
+        y_eval     = np.asarray(y)
+        y_std_eval = np.asarray(y_std)
+        dy_sr_eval = np.asarray(dy_sr)
+        Fs_eval    = np.asarray(Fs)
+
+    else:
+        # ── Original train/test split ────────────────────────────────────────
+        split_result = train_test_split(
+            X, y, y_std, dy_sr, Fs,
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=shuffle,
+        )
+        X_fit,     X_eval     = split_result[0], split_result[1]
+        y_fit,     y_eval     = split_result[2], split_result[3]
+        y_std_fit, y_std_eval = split_result[4], split_result[5]
+        dy_sr_eval            = split_result[7]
+        Fs_eval               = split_result[9]
+        X_sr_train = X_sr_val = y_sr_train = y_sr_val = y_std_sr_train = y_std_sr_val = None
+
+    # ── Optional Fisher / parameter-space slicing ────────────────────────────
     if slice_fisher:
-        # Slice parameter space to only include dimensions for components being fitted
-        # Assumes 1-to-1 mapping: component i corresponds to parameter i
-        X_train = X_train[:, components_to_fit]
-        X_val = X_val[:, components_to_fit]
-        
-        # Slice Jacobians: (n_samples, n_components, n_params) -> (n_samples, n_components_fit, n_params_fit)
-        # First slice rows (output dimensions), then columns (parameter dimensions)
-        dy_sr_train = dy_sr_train[:, components_to_fit, :][:, :, components_to_fit]
-        dy_sr_val = dy_sr_val[:, components_to_fit, :][:, :, components_to_fit]
-        
-        # Slice Fisher matrices: (n_samples, n_params, n_params) -> (n_samples, n_params_fit, n_params_fit)
-        # Slice both rows and columns to extract the submatrix
-        Fs_train = Fs_train[:, components_to_fit, :][:, :, components_to_fit]
-        Fs_val = Fs_val[:, components_to_fit, :][:, :, components_to_fit]
-        
-        # Update n_params to reflect sliced dimension
+        X_fit      = X_fit[:, components_to_fit]
+        X_eval     = X_eval[:, components_to_fit]
+        dy_sr_eval = dy_sr_eval[:, components_to_fit, :][:, :, components_to_fit]
+        Fs_eval    = Fs_eval[:, components_to_fit, :][:, :, components_to_fit]
+        if X_sr_train is not None:
+            X_sr_train = X_sr_train[:, components_to_fit]
+            X_sr_val   = X_sr_val[:, components_to_fit]
         n_params = len(components_to_fit)
-    
-    # Separate kwargs for fitting and analysis
+
+    # ── Separate kwargs for fitting vs. analysis ─────────────────────────────
     _analysis_only = frozenset({
-        'equation_set',
-        'max_complexity_thresh',
-        'length_penalty',
-        'equation_predicate',
+        'equation_set', 'max_complexity_thresh', 'length_penalty', 'equation_predicate',
     })
-    fit_kwargs = {
-        k: v for k, v in sr_kwargs.items() if k not in _analysis_only
-    }
+    fit_kwargs = {k: v for k, v in sr_kwargs.items() if k not in _analysis_only}
 
-    # Extract analysis-specific kwargs (still allow verbose via fit_kwargs for the fitter)
-    equation_set = sr_kwargs.get('equation_set', 'pareto')
+    equation_set          = sr_kwargs.get('equation_set', 'pareto')
     max_complexity_thresh = sr_kwargs.get('max_complexity_thresh', 14)
-    length_penalty = float(sr_kwargs.get('length_penalty', 2.0))
-    equation_predicate = sr_kwargs.get('equation_predicate', None)
-    verbose_sr = bool(sr_kwargs.get('verbose', True))
+    length_penalty        = float(sr_kwargs.get('length_penalty', 2.0))
+    equation_predicate    = sr_kwargs.get('equation_predicate', None)
+    verbose_sr            = bool(sr_kwargs.get('verbose', True))
 
-    # Fit SR models on training set
+    # ── Fit SR models ────────────────────────────────────────────────────────
     fit_symbolic_regression(
-        X_train, y_train, y_std_train,
+        X_fit, y_fit, y_std_fit,
         components_to_fit, parent_dir,
-        **fit_kwargs
+        **fit_kwargs,
     )
 
-    # Analyze results on validation set
+    # ── Analyse / select from Pareto front ───────────────────────────────────
+    # Always uses the original (X, y, dy_sr, Fs): Frobenius loss requires
+    # Fisher matrices matched to the evaluation points.
     mdl_coords, frob_coords, analysis = analyze_equations(
-        X_val, y_val, y_std_val, dy_sr_val, Fs_val,
+        X_eval, y_eval, y_std_eval, dy_sr_eval, Fs_eval,
         n_params, components_to_fit, parent_dir,
         max_complexity_thresh=max_complexity_thresh,
         equation_set=equation_set,
@@ -2194,46 +2247,53 @@ def fit_and_analyze_sr(
         length_penalty=length_penalty,
         equation_predicate=equation_predicate,
     )
-    
-    # Package split data for return
+
+    # ── Package split data ───────────────────────────────────────────────────
     split_data = {
-        'X_train': X_train,
-        'X_test': X_val,
-        'y_train': y_train,
-        'y_test': y_val,
-        'y_std_train': y_std_train,
-        'y_std_test': y_std_val,
-        'dy_sr_train': dy_sr_train,
-        'dy_sr_test': dy_sr_val,
-        'Fs_train': Fs_train,
-        'Fs_test': Fs_val,
-        'n_params': n_params,
+        'X_train':      X_fit,
+        'y_train':      y_fit,
+        'y_std_train':  y_std_fit,
+        'X_test':       X_eval,
+        'y_test':       y_eval,
+        'y_std_test':   y_std_eval,
+        'dy_sr_test':   dy_sr_eval,
+        'Fs_test':      Fs_eval,
+        'X_sr_val':     X_sr_val,
+        'y_sr_val':     y_sr_val,
+        'y_std_sr_val': y_std_sr_val,
+        'n_params':     n_params,
         'components_to_fit': components_to_fit,
         'slice_fisher': slice_fisher,
+        'augmented':    use_augmentation,
     }
 
     if save_split_data and split_data_npz_name:
         os.makedirs(parent_dir, exist_ok=True)
         split_npz_path = os.path.join(parent_dir, split_data_npz_name)
         rs_save = np.int64(-1) if random_state is None else np.int64(random_state)
-        np.savez_compressed(
-            split_npz_path,
-            X_train=X_train,
-            X_test=X_val,
-            y_train=y_train,
-            y_test=y_val,
-            y_std_train=y_std_train,
-            y_std_test=y_std_val,
-            dy_sr_train=dy_sr_train,
-            dy_sr_test=dy_sr_val,
-            Fs_train=Fs_train,
-            Fs_test=Fs_val,
+        save_kwargs = dict(
+            X_train=X_fit,
+            X_test=X_eval,
+            y_train=y_fit,
+            y_test=y_eval,
+            y_std_train=y_std_fit,
+            y_std_test=y_std_eval,
+            dy_sr_test=dy_sr_eval,
+            Fs_test=Fs_eval,
             n_params=np.int64(n_params),
             components_to_fit=np.asarray(components_to_fit, dtype=np.int64),
             slice_fisher=np.bool_(slice_fisher),
             test_size=np.float64(test_size),
             shuffle=np.bool_(shuffle),
             random_state=rs_save,
+            augmented=np.bool_(use_augmentation),
         )
+        if X_sr_val is not None:
+            save_kwargs.update(
+                X_sr_val=X_sr_val,
+                y_sr_val=y_sr_val,
+                y_std_sr_val=y_std_sr_val,
+            )
+        np.savez_compressed(split_npz_path, **save_kwargs)
 
     return mdl_coords, frob_coords, analysis, split_data

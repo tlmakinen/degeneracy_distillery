@@ -28,14 +28,14 @@ try:
         batch_flatten_fisher,
         weighted_std,
     )
-    from .sr_utils import promote_jacrev_output, safe_lambdify
+    from .sr_utils import promote_jacrev_output, safe_lambdify, vmapped_jacobian_wrt_X
 except ImportError:
     from preprocessing_utils import (
         flatten_with_numerical_jacobian,
         batch_flatten_fisher,
         weighted_std,
     )
-    from sr_utils import promote_jacrev_output, safe_lambdify
+    from sr_utils import promote_jacrev_output, safe_lambdify, vmapped_jacobian_wrt_X
 
 # Try importing ESR (required for complexity calculations)
 try:
@@ -503,15 +503,22 @@ def check_flattening(coordinates: List[str], X: np.ndarray, Fs: np.ndarray,
             def myeq(*args):
                 return promote_jacrev_output(eq_jax(*p, *args))
 
-            yjac = jax.jacrev(myeq, argnums=list(range(0, X.shape[1])))
-            Jpred = jnp.array(jax.vmap(yjac)(*X.T)).T
-            return Jpred
+            return vmapped_jacobian_wrt_X(myeq, jnp.asarray(X))
         
         jac_rows.append(get_jac_row(pars))
     
-    Jpred = jnp.stack(jac_rows, axis=-1).transpose((0, 2, 1))
-    # print(Jpred.shape)  # Debug
-    
+    # (n_samples, n_coords, n_params); batch axis must align with Fs[:, ...]
+    Jpred = jnp.stack(jac_rows, axis=1)
+    n_x, n_f = int(X.shape[0]), int(Fs.shape[0])
+    if Jpred.shape[0] != n_x or n_x != n_f:
+        raise ValueError(
+            "Jacobian batch axis must match X and Fs sample counts "
+            f"(got Jpred.shape[0]={Jpred.shape[0]}, X.shape[0]={n_x}, "
+            f"Fs.shape[0]={n_f}). This usually means the vmapped Jacobian layout "
+            "is wrong (see sr_utils.vmapped_jacobian_wrt_X and tests/"
+            "test_jacobian_layout.py)."
+        )
+
     # Use canonical flatten_fisher
     flats = batch_flatten_fisher(Jpred, Fs, A if not jnp.allclose(A, jnp.eye(A.shape[0])) else None)
     
@@ -1552,8 +1559,7 @@ def lossfn_jac_jax(A: jnp.ndarray,
             def myeq(*args):
                 return promote_jacrev_output(all_fns[i](*p, *args))
 
-            yjac = jax.jacrev(myeq, argnums=list(range(X.shape[1])))
-            Jpred_i = jnp.array(jax.vmap(yjac)(*X_jnp.T)).T
+            Jpred_i = vmapped_jacobian_wrt_X(myeq, X_jnp)
             dy_l = dy_l + Jpred_i
         
         ypreds_prime = ypreds_prime.at[l].set(y_l)

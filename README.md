@@ -4,10 +4,11 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tlmakinen/degeneracy_distillery/blob/main/tutorial_notebooks/rosenbrock_example.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
 
 ![Algorithm overview](docs/images/alg-cartoon-illustrated.png)
-
+\\
+A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
+\\
 
 ### Distill in three steps from simulations or labelled data
 

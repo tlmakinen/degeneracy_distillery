@@ -6,9 +6,12 @@
 
 
 ![Algorithm overview](docs/images/alg-cartoon-illustrated.png)
-\\
+
+
 A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
-\\
+
+---
+
 
 ### Distill in three steps from simulations or labelled data
 

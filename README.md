@@ -1,7 +1,7 @@
 # Degeneracy Distillery
 
 [![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yourusername/degeneracy_distillery/blob/main/notebooks/example.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tlmakinen/degeneracy_distillery/blob/main/tutorial_notebooks/rosenbrock_example.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
@@ -30,7 +30,15 @@ exprs = postprocess(exprs)                           # prune / rotate for sparsi
 # exprs → interpretable formulas, e.g. η₂ = θ₂ + θ₁², η₁ = β/γ, …
 ```
 
+## Paper
 
+**The Degeneracy Distillery** — [arXiv:XXXX.XXXXX](https://arxiv.org/abs/XXXX.XXXXX)
+
+> We present a method that (1) detects and (2) resolves degenerate parameter combinations
+> (a) automatically and (b) symbolically, from parameter–data pairs alone, through estimation
+> and flattening of the Fisher information matrix. The resulting coordinates flatten the Fisher
+> information globally, and reduce the simulation budget required for downstream neural posterior
+> estimation by up to 10×.
 
 ## Features
 
@@ -66,17 +74,24 @@ pip install -e ESR
 pip install -e ".[jupyter]"
 ```
 
-## Usage
+## Tutorial Notebooks
 
-See the `notebooks/` directory for example usage and analysis workflows.
+See the `tutorial_notebooks/` directory for worked examples:
 
-### Google Colab Installation
+| Notebook | Description |
+|---|---|
+| [`rosenbrock_example.ipynb`](tutorial_notebooks/rosenbrock_example.ipynb) | Synthetic 2D problem — recommended starting point |
+| [`sir_example.ipynb`](tutorial_notebooks/sir_example.ipynb) | SIR epidemiological model |
+| [`imrphenomd_example.ipynb`](tutorial_notebooks/imrphenomd_example.ipynb) | Gravitational waves (IMRPhenomD waveform) |
+| [`gw_example.ipynb`](tutorial_notebooks/gw_example.ipynb) | General GW waveform |
 
-For Google Colab:
+### Google Colab
+
+Click the badge above to open the Rosenbrock tutorial in Colab, or install manually:
 
 ```python
 # 1. Install degeneracy_distillery
-!git clone https://github.com/yourusername/degeneracy_distillery.git
+!git clone https://github.com/tlmakinen/degeneracy_distillery.git
 %cd /content/degeneracy_distillery
 !pip install -e .
 
@@ -97,25 +112,27 @@ from degeneracy_distillery.sr_utils import fit_and_analyze_sr
 print(f"✓ Package version: {degeneracy_distillery.__version__}")
 ```
 
-See `COLAB_SETUP.md` for detailed step-by-step instructions.
-
 ## Project Structure
 
 ```
 degeneracy_distillery/
-├── degeneracy_distillery/  # Main source code package
-│   ├── training_loop_*.py  # Training loops for various architectures
-│   ├── preprocessing_utils.py
-│   ├── postprocessing_utils.py
-│   ├── sr_utils.py         # Symbolic regression utilities
-│   └── ...
-├── notebooks/              # Jupyter notebooks with examples
-├── data/                   # Data files
-├── degen_env_minimal.yml   # Conda environment (recommended)
-└── degen_env.yml           # Full environment export (may have conflicts)
+├── degeneracy_distillery/      # Main source code package
+│   ├── training_loop_*.py      # Training loops (Fisher nets + flattening)
+│   ├── preprocessing_utils.py  # Fisher geometry preprocessing
+│   ├── postprocessing_utils.py # Post-SR analysis and validation
+│   ├── sr_utils.py             # Symbolic regression utilities
+│   └── visuals/                # Snapshot and animation utilities
+├── tutorial_notebooks/         # Polished worked examples (start here)
+│   ├── rosenbrock_example.ipynb
+│   ├── sir_example.ipynb
+│   ├── imrphenomd_example.ipynb
+│   └── gw_example.ipynb
+├── scripts/                    # Batch sweep scripts
+├── tests/                      # Test suite
+├── degen_env_minimal.yml       # Conda environment (recommended)
+└── INSTALL.md                  # Detailed installation guide
 ```
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-

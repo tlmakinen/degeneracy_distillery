@@ -107,3 +107,11 @@ ESR/
 # Exclude specific files that are untracked
 .DS_Store
 
+# Draft/old tutorial notebook variants
+tutorial_notebooks/*_FOOB.ipynb
+tutorial_notebooks/*_OLD.ipynb
+tutorial_notebooks/*_OLD.ipyn
+
+# Experimental notebooks (not part of the release)
+notebooks/
+

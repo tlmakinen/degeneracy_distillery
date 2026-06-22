@@ -3,6 +3,16 @@
 
 set -e  # Exit on error
 
+IS_APPLE_ARM64=0
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+    IS_APPLE_ARM64=1
+fi
+
+PIP_EDITABLE_TARGET="-e ."
+if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+    PIP_EDITABLE_TARGET="-e .[metal]"
+fi
+
 echo "========================================"
 echo "Degeneracy Distillery Installation"
 echo "========================================"
@@ -38,7 +48,12 @@ case $choice in
         
         echo ""
         echo "Creating conda environment from ${env_file}..."
-        conda env create -f ${env_file}
+        if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+            echo "Apple Silicon detected. Forcing osx-arm64 conda packages..."
+            CONDA_SUBDIR=osx-arm64 conda env create -f ${env_file}
+        else
+            conda env create -f ${env_file}
+        fi
         
         echo ""
         echo "Environment created successfully!"
@@ -47,10 +62,19 @@ case $choice in
         # Source conda to make activate available
         eval "$(conda shell.bash hook)"
         conda activate degen
+
+        if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+            py_arch=$(python -c "import platform; print(platform.machine())")
+            if [[ "${py_arch}" != "arm64" ]]; then
+                echo "ERROR: Activated Python is '${py_arch}', expected 'arm64' on Apple Silicon."
+                echo "Please remove/recreate the environment from a native ARM terminal (not Rosetta)."
+                exit 1
+            fi
+        fi
         
         echo ""
-        echo "Installing package in editable mode..."
-        pip install -e .
+        echo "Installing package in editable mode (${PIP_EDITABLE_TARGET})..."
+        pip install ${PIP_EDITABLE_TARGET}
         
         echo ""
         echo "Installing ESR package (required dependency)..."
@@ -88,20 +112,38 @@ case $choice in
             fi
         else
             echo "Creating new environment '${env_name}' with Python 3.12..."
-            conda create -n ${env_name} python=3.12 -y
+            if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+                echo "Apple Silicon detected. Forcing osx-arm64 conda packages..."
+                CONDA_SUBDIR=osx-arm64 conda create -n ${env_name} python=3.12 -y
+            else
+                conda create -n ${env_name} python=3.12 -y
+            fi
         fi
         
         # Source conda and activate
         eval "$(conda shell.bash hook)"
         conda activate ${env_name}
+
+        if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+            py_arch=$(python -c "import platform; print(platform.machine())")
+            if [[ "${py_arch}" != "arm64" ]]; then
+                echo "ERROR: Activated Python is '${py_arch}', expected 'arm64' on Apple Silicon."
+                echo "Please remove/recreate the environment from a native ARM terminal (not Rosetta)."
+                exit 1
+            fi
+        fi
         
         echo ""
         echo "Installing system dependencies with conda..."
-        conda install -c conda-forge eigen cmake -y
+        if [[ ${IS_APPLE_ARM64} -eq 1 ]]; then
+            CONDA_SUBDIR=osx-arm64 conda install -c conda-forge eigen cmake -y
+        else
+            conda install -c conda-forge eigen cmake -y
+        fi
         
         echo ""
-        echo "Installing package with pip..."
-        pip install -e .
+        echo "Installing package with pip (${PIP_EDITABLE_TARGET})..."
+        pip install ${PIP_EDITABLE_TARGET}
         
         echo ""
         echo "Installing ESR package (required dependency)..."

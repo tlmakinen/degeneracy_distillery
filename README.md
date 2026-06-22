@@ -8,7 +8,7 @@
 ![Algorithm overview](docs/images/alg-cartoon-illustrated.png)
 
 
-A package for mapping information geometry and identifying degeneracies from data and parameters or labels.
+A package for mapping information geometry and identifying nonlinear physical coordinates from data and parameters.
 
 ---
 

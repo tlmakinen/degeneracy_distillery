@@ -36,16 +36,6 @@ exprs = postprocess(exprs)                           # prune / rotate for sparsi
 # exprs → interpretable formulas, e.g. η₂ = θ₂ + θ₁², η₁ = β/γ, …
 ```
 
-## Paper
-
-**The Degeneracy Distillery** — [arXiv:2606.23838](https://arxiv.org/abs/XXXX.XXXXX)
-
-> We present a method that (1) detects and (2) resolves degenerate parameter combinations
-> (a) automatically and (b) symbolically, from parameter–data pairs alone, through estimation
-> and flattening of the Fisher information matrix. The resulting coordinates flatten the Fisher
-> information globally, and reduce the simulation budget required for downstream neural posterior
-> estimation by up to 10×.
-
 ## Features
 
 - Neural network flattening and degeneracy analysis

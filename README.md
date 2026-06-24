@@ -10,11 +10,11 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2606.23838">
-    <img src="https://img.shields.io/badge/read_the_paper-b31b1b?style=for-the-badge" alt="read the paper"/>
+    <img src="https://img.shields.io/badge/read_the_paper-f5f5f0?style=for-the-badge&color=333333" alt="read the paper"/>
   </a>
   &nbsp;
   <a href="https://tlmakinen.github.io/blog/2026/degeneracy-distillery/">
-    <img src="https://img.shields.io/badge/read_the_blog_post-0969da?style=for-the-badge" alt="blog post"/>
+    <img src="https://img.shields.io/badge/read_the_blog_post-f5f5f0?style=for-the-badge&color=333333" alt="blog post"/>
   </a>
 </p>
 

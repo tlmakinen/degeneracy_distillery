@@ -1,8 +1,9 @@
 # Degeneracy Distillery
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.23838-b31b1b.svg)](https://arxiv.org/abs/2606.23838)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tlmakinen/degeneracy_distillery/blob/main/tutorial_notebooks/rosenbrock_example.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tlmakinen/degeneracy_distillery/blob/main/tutorial_notebooks/rosenbrock_example.ipynb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Blog post](https://img.shields.io/badge/Blog-post-0969da.svg)](https://tlmakinen.github.io/blog/2026/degeneracy-distillery/)
 
 
 ![Algorithm overview](docs/images/alg-cartoon-illustrated.png)

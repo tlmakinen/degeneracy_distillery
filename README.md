@@ -14,7 +14,7 @@
   </a>
   &nbsp;
   <a href="https://tlmakinen.github.io/blog/2026/degeneracy-distillery/">
-    <img src="https://img.shields.io/badge/read_the_blog_post-f2f2f2?style=for-the-badge&color=333333" alt="blog post"/>
+    <img src="https://img.shields.io/badge/blog_post-f2f2f2?style=for-the-badge&color=333333" alt="blog post"/>
   </a>
 </p>
 

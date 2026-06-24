@@ -38,7 +38,7 @@ exprs = postprocess(exprs)                           # prune / rotate for sparsi
 
 ## Paper
 
-**The Degeneracy Distillery** — [arXiv:XXXX.XXXXX](https://arxiv.org/abs/XXXX.XXXXX)
+**The Degeneracy Distillery** — [arXiv:2606.23838](https://arxiv.org/abs/XXXX.XXXXX)
 
 > We present a method that (1) detects and (2) resolves degenerate parameter combinations
 > (a) automatically and (b) symbolically, from parameter–data pairs alone, through estimation

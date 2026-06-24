@@ -86,9 +86,8 @@ See the `tutorial_notebooks/` directory for worked examples:
 
 | Notebook | Description |
 |---|---|
-| [`rosenbrock_example.ipynb`](tutorial_notebooks/rosenbrock_example.ipynb) | Synthetic 2D problem — recommended starting point |
+| [`rosenbrock_example.ipynb`](tutorial_notebooks/rosenbrock_example.ipynb) | Synthetic 2D problem — [START HERE] |
 | [`sir_example.ipynb`](tutorial_notebooks/sir_example.ipynb) | SIR epidemiological model |
-| [`imrphenomd_example.ipynb`](tutorial_notebooks/imrphenomd_example.ipynb) | Gravitational waves (IMRPhenomD waveform) |
 | [`gw_example.ipynb`](tutorial_notebooks/gw_example.ipynb) | General GW waveform |
 
 ### Google Colab

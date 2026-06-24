@@ -8,6 +8,15 @@
 
 ![Algorithm overview](docs/images/alg-cartoon-illustrated.png)
 
+<p align="center">
+  <a href="https://arxiv.org/abs/2606.23838">
+    <img src="https://img.shields.io/badge/read_the_paper-b31b1b?style=for-the-badge" alt="read the paper"/>
+  </a>
+  &nbsp;
+  <a href="https://tlmakinen.github.io/blog/2026/degeneracy-distillery/">
+    <img src="https://img.shields.io/badge/read_the_blog_post-0969da?style=for-the-badge" alt="blog post"/>
+  </a>
+</p>
 
 A package for mapping information geometry and identifying nonlinear physical coordinates from data and parameters.
 

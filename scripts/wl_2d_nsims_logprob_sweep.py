@@ -13,13 +13,13 @@ Run from the repo root, e.g. in Colab::
     python scripts/wl_2d_nsims_logprob_sweep.py \
         --out-dir wl_2d_nsims_logprob_sweep \
         --noise-scale 0.25 \
-        --compare-adhoc-coords
+        --compare-conventional-coords
 
 It saves:
   * ``metrics.csv`` / ``metrics.npz``: best validation log_prob by nsims, method,
     and ensemble member.
   * ``metrics_aggregate.csv`` / ``.npz``: mean/std summaries.
-  * ``fom_comparison.csv`` / ``.npz``: theta-vs-eta (and adhoc) FoM comparison
+  * ``fom_comparison.csv`` / ``.npz``: theta-vs-eta (and conventional) FoM comparison
     at ``--fom-nsims``.
   * ``training_histories.npz``: full train/validation curves.
   * ``posterior_samples.npz``: seed-matched posterior samples for the example
@@ -30,7 +30,7 @@ It saves:
   * ``manifest.json``: configuration and file descriptions.
 
 The default learned/inverse expressions are the rank-1 distillery output for
-the (Omega_m, sigma_8) Fisher; the default adhoc coordinates are the
+the (Omega_m, sigma_8) Fisher; the default conventional coordinates are the
 conventional ``(Omega_m, S_8 = sigma_8 * sqrt(Omega_m / 0.3))`` mapping.
 Both are configurable via CLI.
 """
@@ -77,7 +77,7 @@ except ImportError as exc:  # pragma: no cover - this is a runtime environment c
 
 THETA_LABELS = (r"$\Omega_m$", r"$\sigma_8$")
 ETA_LABELS = (r"$\eta_0$", r"$\eta_1$")
-ADHOC_LABELS = (r"$\Omega_m$", r"$S_8$")
+CONVENTIONAL_LABELS = (r"$\Omega_m$", r"$S_8$")
 
 # Learned distillery expressions for theta = (Omega_m, sigma_8).
 DEFAULT_THETA_TO_ETA_EXPRS = (
@@ -89,12 +89,12 @@ DEFAULT_ETA_TO_THETA_EXPRS = (
     "0.5*(1.0*X1 + 0.9*(2.0*X2 + 1.0)**0.143792)/(1.0*X2 + 0.5)",
 )
 
-# Conventional / adhoc comparison: (Omega_m, S_8 = sigma_8 * sqrt(Omega_m/0.3)).
-DEFAULT_THETA_TO_ADHOC_EXPRS = (
+# Conventional comparison: (Omega_m, S_8 = sigma_8 * sqrt(Omega_m/0.3)).
+DEFAULT_THETA_TO_CONVENTIONAL_EXPRS = (
     "X1",
     "sqrt(X1 / 0.3) * X2",
 )
-DEFAULT_ADHOC_TO_THETA_EXPRS = (
+DEFAULT_CONVENTIONAL_TO_THETA_EXPRS = (
     "X1",
     "X2 / sqrt(X1 / 0.3)",
 )
@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Sweep weak-lensing NPE validation log_prob versus number of training "
-            "simulations, comparing theta, learned-eta, and adhoc-coordinate baselines."
+            "simulations, comparing theta, learned-eta, and conventional-coordinate baselines."
         )
     )
 
@@ -296,23 +296,23 @@ def parse_args() -> argparse.Namespace:
         help="Two expressions in X1=eta_0, X2=eta_1 mapping eta -> theta.",
     )
     parser.add_argument(
-        "--theta-to-adhoc",
+        "--theta-to-conventional",
         nargs=2,
-        default=DEFAULT_THETA_TO_ADHOC_EXPRS,
-        metavar=("ADHOC0", "ADHOC1"),
-        help="Two expressions in X1=Omega_m, X2=sigma_8 mapping theta -> adhoc coords.",
+        default=DEFAULT_THETA_TO_CONVENTIONAL_EXPRS,
+        metavar=("CONVENTIONAL0", "CONVENTIONAL1"),
+        help="Two expressions in X1=Omega_m, X2=sigma_8 mapping theta -> conventional coords.",
     )
     parser.add_argument(
-        "--adhoc-to-theta",
+        "--conventional-to-theta",
         nargs=2,
-        default=DEFAULT_ADHOC_TO_THETA_EXPRS,
+        default=DEFAULT_CONVENTIONAL_TO_THETA_EXPRS,
         metavar=("THETA0", "THETA1"),
-        help="Two inverse expressions mapping the adhoc coords back to (Omega_m, sigma_8).",
+        help="Two inverse expressions mapping the conventional coords back to (Omega_m, sigma_8).",
     )
     parser.add_argument(
-        "--compare-adhoc-coords",
+        "--compare-conventional-coords",
         action="store_true",
-        help="Also train/evaluate an adhoc-coordinate baseline (default: (Omega_m, S_8)).",
+        help="Also train/evaluate a conventional-coordinate baseline (default: (Omega_m, S_8)).",
     )
     parser.add_argument(
         "--jacobian-correction-samples",
@@ -739,7 +739,7 @@ def build_fom_comparison(
     example_indices = posterior_arrays["example_indices"]
     comparison_methods = [
         method
-        for method in ("eta", "adhoc_coordinates")
+        for method in ("eta", "conventional_coordinates")
         if f"n{nsims}_{method}_theta_samples" in posterior_arrays
     ]
 
@@ -969,18 +969,18 @@ def main() -> None:
         eta_to_theta,
         "theta <-> eta",
     )
-    if args.compare_adhoc_coords:
-        theta_to_adhoc = make_expression_transform(args.theta_to_adhoc)
-        adhoc_to_theta = make_expression_transform(args.adhoc_to_theta)
+    if args.compare_conventional_coords:
+        theta_to_conventional = make_expression_transform(args.theta_to_conventional)
+        conventional_to_theta = make_expression_transform(args.conventional_to_theta)
         check_inverse(
             np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
-            theta_to_adhoc,
-            adhoc_to_theta,
-            "theta <-> adhoc",
+            theta_to_conventional,
+            conventional_to_theta,
+            "theta <-> conventional",
         )
     else:
-        theta_to_adhoc = None
-        adhoc_to_theta = None
+        theta_to_conventional = None
+        conventional_to_theta = None
 
     if args.n_examples > theta_test.shape[0]:
         raise ValueError("--n-examples cannot exceed the number of test observations.")
@@ -1041,8 +1041,8 @@ def main() -> None:
         "nsims": np.asarray(args.nsims, dtype=np.int64),
     }
     methods = ["theta", "eta"]
-    if args.compare_adhoc_coords:
-        methods.append("adhoc_coordinates")
+    if args.compare_conventional_coords:
+        methods.append("conventional_coordinates")
 
     for nsims in args.nsims:
         train_theta = theta_pool[:nsims]
@@ -1068,14 +1068,14 @@ def main() -> None:
                     max_points=args.jacobian_correction_samples,
                     seed=run_seed,
                 )
-            elif method == "adhoc_coordinates":
-                assert theta_to_adhoc is not None and adhoc_to_theta is not None
-                train_params = theta_to_adhoc(train_theta)
+            elif method == "conventional_coordinates":
+                assert theta_to_conventional is not None and conventional_to_theta is not None
+                train_params = theta_to_conventional(train_theta)
                 prior_low = train_params.min(axis=0)
                 prior_high = train_params.max(axis=0)
                 logdet_correction = inverse_logdet_jacobian(
                     train_params,
-                    coords_to_theta_fn=adhoc_to_theta,
+                    coords_to_theta_fn=conventional_to_theta,
                     max_points=args.jacobian_correction_samples,
                     seed=run_seed,
                 )
@@ -1136,8 +1136,8 @@ def main() -> None:
                         theta_samples = raw_samples
                     elif method == "eta":
                         theta_samples = eta_to_theta(raw_samples)
-                    elif method == "adhoc_coordinates":
-                        theta_samples = adhoc_to_theta(raw_samples)
+                    elif method == "conventional_coordinates":
+                        theta_samples = conventional_to_theta(raw_samples)
                     valid_mask = np.isfinite(theta_samples).all(axis=1)
                     theta_samples = theta_samples.copy()
                     theta_samples[~valid_mask] = np.nan
@@ -1173,8 +1173,8 @@ def main() -> None:
                 elif method == "eta":
                     theta_samples = eta_to_theta(raw_samples)
                     valid_mask = in_theta_prior(theta_samples, theta_prior_low, theta_prior_high)
-                elif method == "adhoc_coordinates":
-                    theta_samples = adhoc_to_theta(raw_samples)
+                elif method == "conventional_coordinates":
+                    theta_samples = conventional_to_theta(raw_samples)
                     valid_mask = in_theta_prior(theta_samples, theta_prior_low, theta_prior_high)
                 theta_samples = theta_samples.copy()
                 theta_samples[~valid_mask] = np.nan
@@ -1205,14 +1205,14 @@ def main() -> None:
             "wl": asdict(cfg),
             "theta_labels": THETA_LABELS,
             "eta_labels": ETA_LABELS,
-            "adhoc_labels": ADHOC_LABELS,
+            "conventional_labels": CONVENTIONAL_LABELS,
             "theta_prior_low": theta_prior_low.tolist(),
             "theta_prior_high": theta_prior_high.tolist(),
             "theta_to_eta_expressions": list(args.theta_to_eta),
             "eta_to_theta_expressions": list(args.eta_to_theta),
-            "theta_to_adhoc_expressions": list(args.theta_to_adhoc),
-            "adhoc_to_theta_expressions": list(args.adhoc_to_theta),
-            "compare_adhoc_coords": bool(args.compare_adhoc_coords),
+            "theta_to_conventional_expressions": list(args.theta_to_conventional),
+            "conventional_to_theta_expressions": list(args.conventional_to_theta),
+            "compare_conventional_coords": bool(args.compare_conventional_coords),
             "methods": methods,
             "coverage_nsims_values": coverage_nsims_values if args.run_coverage else [],
             "coverage_all_nsims": bool(args.coverage_all_nsims),
@@ -1233,10 +1233,10 @@ def main() -> None:
             "Training is done in (Omega_m, sigma_8); 'prior_theta' from the data file "
             "is converted from (Omega_m, S_8) to (Omega_m, sigma_8) when "
             "--prior-theta-mode=S8 (default).",
-            "For eta and adhoc runs, best_validation_log_prob_raw is in the alternate "
+            "For eta and conventional runs, best_validation_log_prob_raw is in the alternate "
             "coordinate density; the theta-density variant subtracts the mean "
             "log|det(d theta / d coord)| estimated by finite differences.",
-            "Use --compare-adhoc-coords to add the (Omega_m, S_8) baseline.",
+            "Use --compare-conventional-coords to add the (Omega_m, S_8) baseline.",
             "Noise is re-injected on every load; sweep --noise-scale (and rerun with "
             "different --out-dir values) to study the noisier regime.",
             "FoM is 1/sqrt(det(cov(Omega_m, sigma_8))) for --fom-nsims, default 1000.",

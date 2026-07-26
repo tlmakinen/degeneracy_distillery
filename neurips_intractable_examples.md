@@ -12,6 +12,13 @@ Scripts:
 - [scripts/kolmogorov_notebook_run.py](../scripts/kolmogorov_notebook_run.py)
 - [scripts/kuramoto_notebook_run.py](../scripts/kuramoto_notebook_run.py)
 
+A fourth problem — 2D Rayleigh-Bénard convection, a stress-free DNS that adds a
+three-parameter case with a weak (nearly degenerate) aspect-ratio direction — is
+documented separately in [neurips_rayleigh_benard.md](neurips_rayleigh_benard.md)
+([scripts/rayleigh_benard_notebook_run.py](../scripts/rayleigh_benard_notebook_run.py)).
+It is validated against the exact linear onset and smoke-tested end to end; the
+full runs are not yet done.
+
 ## Why these three
 
 Two reviewers asserted that the approach requires a tractable likelihood. Each

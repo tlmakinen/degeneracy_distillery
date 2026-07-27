@@ -128,6 +128,12 @@ class RunConfig:
     # Set (e.g. rebuttal=500) to additionally subsample the train split down
     # to a fixed number of paired molecule observations.
     n_train_molecules: int | None = None
+    # Coordinate alignment. QM7b has historically used kabsch/sign_only with
+    # separate_nonlinearity=False, unlike every other experiment script, which
+    # uses the load_and_process_data_v2 default of procrustes. Exposed here so
+    # the two can be compared without editing the call site.
+    align_mode: str = "kabsch"
+    separate_nonlinearity: bool = False
 
 
 CONFIGS = {
@@ -201,6 +207,15 @@ CONFIGS["rebuttal"] = dataclasses_replace(
 # a separate named config rather than mutating "rebuttal" itself, since "rebuttal" has
 # already-reported results.
 CONFIGS["rebuttal_longsr"] = dataclasses_replace(CONFIGS["rebuttal"], sr_time_limit=1800)
+
+# Procrustes-alignment arm. Everything else is frozen to "rebuttal"; only the
+# alignment changes, so this is a clean A/B against a "rebuttal"-config control
+# run from the same fishnet artifacts. Alignment sits downstream of fishnet and
+# flattener training, so this arm can reuse trained fishnets via
+# --skip-fishnets and does not need a GPU.
+CONFIGS["rebuttal_procrustes"] = dataclasses_replace(
+    CONFIGS["rebuttal"], align_mode="procrustes", separate_nonlinearity=True
+)
 
 
 # ---------------------------------------------------------------------------
@@ -576,8 +591,8 @@ def align_and_sample_sr_grid(
         seed=seeds["align"],
         process_ensemble=True,
         n_d=1.0,
-        align_mode="kabsch",
-        separate_nonlinearity=False,
+        align_mode=config.align_mode,
+        separate_nonlinearity=config.separate_nonlinearity,
         canonicalize="sign_only",
         use_prior_normalization=True,
         restore_reference_mean=False,
@@ -1123,6 +1138,11 @@ def main() -> None:
             "frob_raw": flatness["raw_theta"],
             "frob_neural": flatness["nn"],
             "frob_symbolic": flatness["pruned"],
+            # Surfaced here (not just in prune_info inside sr_expressions.pkl) so a
+            # rejected rotation is visible in aggregated results. rel_delta is
+            # signed: negative means the rotation improved flatness.
+            "rotation_accepted": bool(prune_info["rotation_accepted"]),
+            "rotation_rel_delta": float(prune_info["rel_delta"]),
             "median_condition_raw": flatness["median_condition_raw"],
             "median_condition_symbolic": flatness["median_condition_symbolic"],
         },

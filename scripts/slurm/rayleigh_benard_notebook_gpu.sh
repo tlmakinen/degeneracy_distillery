@@ -45,6 +45,13 @@ PYTHON_MODULE="${PYTHON_MODULE:-intelpython/3-2025.1.0}"
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.8}"
 MODULE_PURGE="${MODULE_PURGE:-1}"
 MODE="${MODE:-full}"
+# Default scratch root. Experiment outputs must NOT land under $HOME: that
+# filesystem is quota-capped (17.5G) and a single rebuttal campaign exceeds it.
+# Hardcoded rather than relying on the caller exporting SCRATCH, because sbatch
+# propagates the *submitting* environment and a non-interactive shell (e.g. an
+# automated submission) does not source ~/.bashrc -- which silently routed output
+# back into the repo. Override by exporting SCRATCH or OUT_BASE.
+SCRATCH="${SCRATCH:-/data103/makinen/degeneracy_experiments}"
 OUT_BASE="${OUT_BASE:-${SCRATCH:-$REPO_DIR/results}/rebuttal_discovery/rayleigh_benard}"
 MIN_NUSSELT_CORR="${MIN_NUSSELT_CORR:-0.9}"
 MIN_NUSSELT_COSINE="${MIN_NUSSELT_COSINE:-0.9}"

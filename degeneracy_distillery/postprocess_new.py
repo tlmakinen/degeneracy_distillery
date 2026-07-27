@@ -659,7 +659,10 @@ def snap_shared_coefficients(
             score = _flat_score(candidate, X, Fs, n_params, check_flattening_fn, A)
         except Exception:
             continue
-        rel_delta = abs(score - ref) / max(ref, 1e-30)
+        # _flat_score is ||flat - I||_F, so lower is better. The comparison must
+        # be signed: an improvement of any size is always acceptable, and only
+        # degradation is bounded by flat_tol.
+        rel_delta = (score - ref) / max(ref, 1e-30)
         accept = rel_delta < flat_tol
         action = dict(
             atom=str(atom),
@@ -880,7 +883,9 @@ def snap_inner_factors(
             tried.add(key)
             continue
 
-        rel_delta = abs(score - ref) / max(ref, 1e-30)
+        # Signed, not absolute: lower _flat_score is better, so an improvement
+        # of any size is acceptable and only degradation is bounded.
+        rel_delta = (score - ref) / max(ref, 1e-30)
         accept = rel_delta < flat_tol
         log.append(dict(
             row=i, node=str(node), snapped_to=mean,
@@ -1081,11 +1086,15 @@ def regroup_like_terms(
 
     post = _flat_score(rotated, X, Fs, n_params,
                        check_flattening_fn, A_new_for_check)
-    rel_delta = abs(post - ref) / max(ref, 1e-30)
+    # Signed, not absolute. _flat_score is ||flat - I||_F, so a negative
+    # rel_delta is a better rotation and must never be rejected; flat_tol
+    # bounds only how much degradation is tolerated in exchange for the
+    # interpretability gain from regrouping.
+    rel_delta = (post - ref) / max(ref, 1e-30)
     if verbose:
         print(
             f"post-rotation flatness: {post:.6f} "
-            f"(rel Δ = {rel_delta:.2%}, tol = {flat_tol:.2%})"
+            f"(rel Δ = {rel_delta:+.2%}, tol = {flat_tol:.2%})"
         )
 
     info: Dict[str, Any] = dict(
@@ -1098,7 +1107,7 @@ def regroup_like_terms(
 
     if rel_delta > flat_tol:
         if verbose:
-            print("rotation rejected (flatness degraded too much); "
+            print(f"rotation rejected (flatness degraded by {rel_delta:.2%}); "
                   "falling back to input expressions.")
         info["rotation_accepted"] = False
         current = list(expressions)

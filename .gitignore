@@ -43,7 +43,7 @@ ipython_config.py
 .python-version
 
 # MD files
-notes/
+# notes/
 
 
 # Environments

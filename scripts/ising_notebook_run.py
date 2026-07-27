@@ -34,7 +34,10 @@ import json
 import os
 import pickle
 import shutil
+import signal
+import subprocess
 import time
+import traceback
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -44,6 +47,16 @@ matplotlib.use("Agg")
 
 import flax.linen as nn
 import jax
+
+# JAX on GPU defaults to reduced-precision (TF32-like) matmuls; on CPU it uses
+# full float32. That precision gap is a known source of GPU-only NaN losses in
+# nets that feed into a Fisher-information log-determinant (small negative
+# eigenvalues from precision loss blow up under log). Force full float32
+# matmul precision unconditionally so GPU runs match the (working) CPU
+# numerics, rather than depending on a Slurm launcher remembering to set
+# JAX_DEFAULT_MATMUL_PRECISION.
+jax.config.update("jax_default_matmul_precision", "float32")
+
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
@@ -55,12 +68,15 @@ from degeneracy_distillery.align_coords import load_and_process_data_v2
 from degeneracy_distillery.postprocess_new import analyze_atom_sharing, regroup_like_terms
 from degeneracy_distillery.postprocessing_utils import (
     check_flattening,
+    diagnose_coordinate_rank_deficiency,
     flatten_with_numerical_jacobian,
     print_discovered_expressions,
     weighted_std,
 )
 from degeneracy_distillery.sr_utils import (
     analyze_equations,
+    check_symbolic_invertibility,
+    compute_DL,
     expressions_to_physical,
     filter_pareto_fronts,
     fit_symbolic_regression,
@@ -170,6 +186,60 @@ CONFIGS = {
         sr_max_depth=16,
     ),
 }
+
+# NeurIPS rebuttal configuration. Unlike Rosenbrock/GW/etc., Ising's own "full"
+# mode already sits at the rebuttal-campaign target of 500 training simulations
+# and 2000 augmented coordinate evaluations (see CONFIGS["full"] above:
+# nsims=500, sr_grid_size=2000) -- those numbers were sized directly against the
+# lattice/Metropolis cost tradeoff documented in neurips_intractable_examples.md,
+# not left at a smaller notebook-era default the way Rosenbrock's was. So
+# "rebuttal" here is "full" by another name; the explicit replace (a no-op on
+# the two fields the sibling scripts vary) is kept anyway so the CLI/launcher
+# convention (`--mode rebuttal`) matches the other five scripts and so a future
+# change to CONFIGS["full"] doesn't silently drift the rebuttal campaign's
+# simulation budget out from under it.
+CONFIGS["rebuttal"] = replace(CONFIGS["full"], nsims=500, sr_grid_size=2000)
+
+# Shared with the mdl_total recomputation in main() so the raw (non-normalized)
+# description length reported in run_record.json is computed under the same
+# length_penalty the analyze_equations call below uses to select the winning
+# expressions.
+SR_LENGTH_PENALTY = 2.0
+INVERTIBILITY_TIMEOUT_SECONDS = 30
+
+
+class _TimeoutError(Exception):
+    pass
+
+
+class time_limit:
+    """SIGALRM-based hard timeout. sympy.solve can pathologically hang on messy
+    float-coefficient rational expressions; this diagnostic is supplementary, so
+    it must never be allowed to stall an entire (cluster) run."""
+
+    def __init__(self, seconds: int):
+        self.seconds = seconds
+
+    def _raise(self, signum, frame):
+        raise _TimeoutError(f"timed out after {self.seconds}s")
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self._raise)
+        signal.alarm(self.seconds)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        signal.alarm(0)
+
+
+def git_commit_hash() -> str | None:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return None
 
 
 def log(message: str) -> None:
@@ -353,6 +423,33 @@ def plot_input_summary(theta, data, config: RunConfig, outdir: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def _safe_std(a: jnp.ndarray, axis) -> jnp.ndarray:
+    """`sqrt(var + eps)` -- a drop-in for `.std()` with a finite gradient at zero.
+
+    THIS IS LOAD-BEARING, do not "simplify" it back to `a.std(axis=axis)`.
+    `std` is `sqrt(var)`, and `d/dz sqrt(z)` is infinite at `z = 0`, so a channel
+    with exactly zero variance produces a finite forward pass but NaN gradients,
+    which poisons every parameter in the ensemble on the first backward pass.
+
+    Ising hits this constantly rather than rarely. The conv stack uses CIRCULAR
+    padding, so a spatially *constant* input maps to a spatially *constant*
+    feature map at every position -- exact zero variance in all channels at once.
+    A fully magnetised lattice (all spins +1) is exactly such an input, and the
+    prior is deliberately set up to produce them: J/T spans [0.125, 0.556],
+    straddling the critical coupling 0.4407, and above it the magnetisation pins
+    at 1 (the module docstring for the prior says as much). Reproduced directly:
+    a saturated configuration gives `grad_finite=False` with `.std()` and
+    `grad_finite=True` with this function.
+
+    This was the cause of the GPU fishnet-training NaN (loss=nan by epoch ~24 on
+    every ensemble member, `Ensemble weights: [0. 0. 0. 0.]`). It is not really a
+    "GPU bug" -- CPU is vulnerable to the same thing and merely got luckier on
+    which configurations it drew; float32 also underflows near-zero variance to
+    exactly zero, so even an almost-constant channel triggers it.
+    """
+    return jnp.sqrt(jnp.var(a, axis=axis) + 1e-6)
+
+
 class SnapshotEncoder(nn.Module):
     """Permutation-invariant encoder for a set of lattice configurations.
 
@@ -376,11 +473,11 @@ class SnapshotEncoder(nn.Module):
         for width in self.channels:
             h = nn.gelu(nn.Conv(width, (3, 3), padding="CIRCULAR")(h))
         per_snapshot_mean = h.mean(axis=(1, 2))
-        per_snapshot_std = h.std(axis=(1, 2))
+        per_snapshot_std = _safe_std(h, (1, 2))
         pooled = jnp.concatenate(
             [
                 per_snapshot_mean.mean(axis=0),
-                per_snapshot_mean.std(axis=0),
+                _safe_std(per_snapshot_mean, 0),
                 per_snapshot_std.mean(axis=0),
             ]
         )
@@ -498,7 +595,7 @@ def fit_flattener(config: RunConfig, fish_dir: Path, seeds, outdir: Path):
             l1_alpha=0.0,
             do_plot=False,
             return_model=True,
-            save_flatten_model_pickle=False,
+            save_flatten_model_pickle=True,
             update_pbar_every=25,
         )
     finally:
@@ -603,7 +700,7 @@ def run_symbolic_regression(config: RunConfig, aligned: dict, seeds, outdir: Pat
         n_params=aligned["n_params"],
         equation_set="pareto",
         max_complexity_thresh=18,
-        length_penalty=2.0,
+        length_penalty=SR_LENGTH_PENALTY,
         equation_predicate=predicate,
     )
     return sr_dir, mdl_coords, frob_coords, analysis
@@ -668,13 +765,16 @@ def validate_flatness(aligned: dict, mdl_coords, pruned_exprs) -> dict[str, floa
     def fro_score(q):
         return np.linalg.norm(np.asarray(q) - identity, axis=(-2, -1))
 
-    return {
+    scores = {
         "raw_theta": float(np.median(fro_score(aligned["Fs"]))),
         "adhoc_reduced": float(np.median(fro_score(adhoc_flats))),
         "mdl": float(np.median(fro_score(mdl_flats))),
         "pruned": float(np.median(fro_score(pruned_flats))),
         "nn": float(np.median(fro_score(nn_flats))),
     }
+    scores["median_condition_raw"] = float(np.median(np.linalg.cond(np.asarray(aligned["Fs"]))))
+    scores["median_condition_symbolic"] = float(np.median(np.linalg.cond(np.asarray(pruned_flats))))
+    return scores
 
 
 def parse_args() -> argparse.Namespace:
@@ -723,98 +823,173 @@ def main() -> None:
     log(f"running mode={args.mode}; outdir={outdir}")
     log(f"master_seed={args.master_seed}; derived seeds={json.dumps(seeds)}")
     log(f"config={json.dumps(asdict(config), sort_keys=True)}")
+
+    run_id = f"ising_seed{args.master_seed}"
+    counts = {
+        "n_train_simulations": config.nsims,
+        "n_eval_simulations": config.nsims,
+        "n_augmented_coordinate_evaluations": config.sr_grid_size,
+        "n_pca_simulations": 0,
+        "n_downstream_npe_simulations": 0,
+        "lattice_sites": config.lattice**2,
+        "snapshots_per_simulation": config.n_snapshots,
+    }
+    config_manifest = {
+        "run_id": run_id,
+        "problem": "ising",
+        "master_seed": args.master_seed,
+        "mode": args.mode,
+        "config": asdict(config),
+        "stage_seeds": seeds,
+        "thresholds": {
+            "min_identifiable_corr": args.min_identifiable_corr,
+        },
+        "git_commit": git_commit_hash(),
+    }
+    with open(outdir / "config_manifest.json", "w") as handle:
+        json.dump(config_manifest, handle, indent=2, sort_keys=True)
+
     require_gpu_if_requested(args.require_gpu)
 
     timings: dict[str, float] = {}
     t_start = time.time()
 
-    t0 = time.time()
-    data = simulator_data(config, seeds["simulator"], outdir)
-    timings["simulation"] = time.time() - t0
+    def write_failure(stage: str, exc: Exception) -> None:
+        timings["total"] = time.time() - t_start
+        record = {
+            "run_id": run_id,
+            "problem": "ising",
+            "master_seed": args.master_seed,
+            "status": "failed",
+            "failure_stage": stage,
+            "failure_reason": f"{type(exc).__name__}: {exc}",
+            "failure_traceback": traceback.format_exc(),
+            "counts": counts,
+            "runtime_seconds": timings,
+        }
+        with open(outdir / "run_record.json", "w") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+        log(f"FAILED at stage={stage}: {exc}\n{traceback.format_exc()}")
 
-    t0 = time.time()
-    fish_dir, scaler = train_fishnet_ensemble(config, data, seeds, outdir)
-    timings["fishnets"] = time.time() - t0
+    try:
+        t0 = time.time()
+        data = simulator_data(config, seeds["simulator"], outdir)
+        timings["simulation"] = time.time() - t0
 
-    t0 = time.time()
-    _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, seeds, outdir)
-    timings["flatten"] = time.time() - t0
+        t0 = time.time()
+        fish_dir, scaler = train_fishnet_ensemble(config, data, seeds, outdir)
+        timings["fishnets"] = time.time() - t0
+    except Exception as exc:
+        write_failure("fishnets", exc)
+        raise
 
-    t0 = time.time()
-    aligned = align_and_augment(config, seeds, outdir, ensemble_w, flatten_model)
-    timings["alignment_and_augmentation"] = time.time() - t0
+    try:
+        t0 = time.time()
+        _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, seeds, outdir)
+        timings["flatten"] = time.time() - t0
+    except Exception as exc:
+        write_failure("flatten", exc)
+        raise
 
-    t0 = time.time()
-    sr_dir, mdl_coords, frob_coords, analysis = run_symbolic_regression(
-        config, aligned, seeds, outdir
-    )
-    timings["symbolic_regression"] = time.time() - t0
+    try:
+        t0 = time.time()
+        aligned = align_and_augment(config, seeds, outdir, ensemble_w, flatten_model)
+        timings["alignment_and_augmentation"] = time.time() - t0
+    except Exception as exc:
+        write_failure("alignment", exc)
+        raise
 
-    log("MDL coordinates")
-    print_discovered_expressions([sympy.simplify(e).evalf(2) for e in mdl_coords])
+    try:
+        t0 = time.time()
+        sr_dir, mdl_coords, frob_coords, analysis = run_symbolic_regression(
+            config, aligned, seeds, outdir
+        )
 
-    log("postprocessing expressions")
-    analyze_atom_sharing(mdl_coords)
-    pruned_exprs, rotation, prune_info = regroup_like_terms(
-        mdl_coords,
-        X=aligned["X"],
-        Fs=aligned["Fs"],
-        n_params=aligned["n_params"],
-        method="atoms",
-        do_snap=True,
-        snap_rel_tol=0.2,
-        snap_flat_tol=0.2,
-        decimal=2,
-        threshold=0.5,
-    )
-    print_discovered_expressions(
-        pruned_exprs, name_map={"X1": "J", "X2": "T", "X3": "h"}
-    )
+        log("MDL coordinates")
+        print_discovered_expressions([sympy.simplify(e).evalf(2) for e in mdl_coords])
 
-    physical_exprs = expressions_to_physical(
-        pruned_exprs, scaler, sr_offset=0.0, theta_names=THETA_NAMES, decimal=3
-    )
-    log("physical expressions")
-    for k, expr in enumerate(physical_exprs):
-        print(f"  eta_{k} = {expr}", flush=True)
+        log("postprocessing expressions")
+        analyze_atom_sharing(mdl_coords)
+        pruned_exprs, rotation, prune_info = regroup_like_terms(
+            mdl_coords,
+            X=aligned["X"],
+            Fs=aligned["Fs"],
+            n_params=aligned["n_params"],
+            method="atoms",
+            do_snap=True,
+            snap_rel_tol=0.2,
+            snap_flat_tol=0.2,
+            decimal=2,
+            threshold=0.5,
+        )
+        print_discovered_expressions(
+            pruned_exprs, name_map={"X1": "J", "X2": "T", "X3": "h"}
+        )
 
-    correlations = physics_correlations(physical_exprs)
-    log("physical expression correlations")
-    print(json.dumps(correlations, indent=2, sort_keys=True), flush=True)
+        physical_exprs = expressions_to_physical(
+            pruned_exprs, scaler, sr_offset=0.0, theta_names=THETA_NAMES, decimal=3
+        )
+        log("physical expressions")
+        for k, expr in enumerate(physical_exprs):
+            print(f"  eta_{k} = {expr}", flush=True)
 
-    flatness = validate_flatness(aligned, mdl_coords, pruned_exprs)
-    log("flatness scores")
-    print(json.dumps(flatness, indent=2, sort_keys=True), flush=True)
+        correlations = physics_correlations(physical_exprs)
+        log("physical expression correlations")
+        print(json.dumps(correlations, indent=2, sort_keys=True), flush=True)
 
-    timings["total"] = time.time() - t_start
-    success = correlations["best_identifiable_abs_corr"] >= args.min_identifiable_corr
+        flatness = validate_flatness(aligned, mdl_coords, pruned_exprs)
+        log("flatness scores")
+        print(json.dumps(flatness, indent=2, sort_keys=True), flush=True)
 
-    summary = {
-        "run_id": f"ising_seed{args.master_seed}",
-        "problem": "ising",
-        "master_seed": args.master_seed,
-        "mode": args.mode,
-        "status": "success" if success else "criterion_not_met",
-        "seeds": seeds,
-        "counts": {
-            "n_train_simulations": config.nsims,
-            "n_eval_simulations": config.nsims,
-            "n_augmented_coordinate_evaluations": config.sr_grid_size,
-            "lattice_sites": config.lattice**2,
-            "snapshots_per_simulation": config.n_snapshots,
-        },
-        "discovery": {
-            "expressions_physical": [str(e) for e in physical_exprs],
-            "success": bool(success),
-            "best_coupling_abs_corr": correlations["best_coupling_abs_corr"],
-            "best_field_abs_corr": correlations["best_field_abs_corr"],
-            "best_identifiable_abs_corr": correlations["best_identifiable_abs_corr"],
-        },
-        "heldout_geometry": flatness,
-        "runtime_seconds": timings,
-    }
-    with open(outdir / "run_summary.json", "w") as handle:
-        json.dump(summary, handle, indent=2, sort_keys=True)
+        try:
+            with time_limit(INVERTIBILITY_TIMEOUT_SECONDS):
+                invertibility = check_symbolic_invertibility(pruned_exprs, verbose=False)
+        except _TimeoutError:
+            log(
+                f"check_symbolic_invertibility did not finish within "
+                f"{INVERTIBILITY_TIMEOUT_SECONDS}s; sympy.solve can hang on messy "
+                "float-coefficient systems. Recording as unknown rather than blocking."
+            )
+            invertibility = {"is_symbolically_invertible": None, "timed_out": True}
+        except Exception as exc:
+            # sympy.solve can also raise outright (e.g. NotImplementedError) on some
+            # discovered expressions, not just hang -- this is a supplementary
+            # diagnostic and must never fail the whole run over it.
+            log(
+                f"check_symbolic_invertibility raised {type(exc).__name__}: {exc}; "
+                "recording as unknown rather than failing the run."
+            )
+            invertibility = {"is_symbolically_invertible": None, "error": str(exc)}
+        rank_info = diagnose_coordinate_rank_deficiency(
+            pruned_exprs,
+            X=aligned["X"],
+            Fs=aligned["Fs"],
+            n_params=aligned["n_params"],
+        )
+        timings["symbolic_regression"] = time.time() - t0
+    except Exception as exc:
+        write_failure("symbolic_regression", exc)
+        raise
+
+    # analysis["DL"] is per-component *normalized* (min-subtracted, so the winning
+    # entry is always 0) -- not useful as a total. Recompute the raw DL/complexity
+    # of the actual winning (mdl_coords) expressions directly via compute_DL.
+    mdl_total = 0.0
+    complexity_total = 0.0
+    for i, eq in enumerate(mdl_coords):
+        c_i, _, _, dl_i, _ = compute_DL(
+            eq,
+            i,
+            aligned["X"],
+            aligned["y"],
+            aligned["y_std"],
+            aligned["dy_sr"],
+            aligned["Fs"],
+            aligned["n_params"],
+            length_penalty=SR_LENGTH_PENALTY,
+        )
+        mdl_total += float(dl_i)
+        complexity_total += float(c_i)
 
     with open(sr_dir / "sr_expressions.pkl", "wb") as handle:
         pickle.dump(
@@ -828,6 +1003,8 @@ def main() -> None:
                 "analysis": analysis,
                 "rotation": rotation,
                 "prune_info": prune_info,
+                "invertibility": invertibility,
+                "rank_info": rank_info,
                 "scaler_scale": scaler.scale_,
                 "scaler_min": scaler.min_,
                 "scaler_data_min": scaler.data_min_,
@@ -839,6 +1016,48 @@ def main() -> None:
     shutil.copy2(outdir / "ising_flatten.npz", sr_dir / "ising_flatten.npz")
     shutil.make_archive(str(outdir / "sr_results_ising"), "zip", root_dir=sr_dir)
     log(f"saved artifacts under {sr_dir}")
+
+    timings["total"] = time.time() - t_start
+    success = correlations["best_identifiable_abs_corr"] >= args.min_identifiable_corr
+
+    run_record = {
+        "run_id": run_id,
+        "problem": "ising",
+        "master_seed": args.master_seed,
+        "status": "success",
+        "seeds": seeds,
+        "counts": counts,
+        "discovery": {
+            "expressions_physical": [str(e) for e in physical_exprs],
+            "expressions_canonical": [str(e) for e in mdl_coords],
+            "success": bool(success),
+            "physics_alignment": correlations["best_identifiable_abs_corr"],
+            "best_coupling_abs_corr": correlations["best_coupling_abs_corr"],
+            "best_field_abs_corr": correlations["best_field_abs_corr"],
+            "mdl_total": mdl_total,
+            "complexity_total": complexity_total,
+            "symbolically_invertible": invertibility["is_symbolically_invertible"],
+            "rank_deficient": bool(rank_info["rank_deficient"]),
+        },
+        "heldout_geometry": {
+            "frob_raw": flatness["raw_theta"],
+            "frob_neural": flatness["nn"],
+            "frob_symbolic": flatness["pruned"],
+            "frob_adhoc": flatness["adhoc_reduced"],
+            "median_condition_raw": flatness["median_condition_raw"],
+            "median_condition_symbolic": flatness["median_condition_symbolic"],
+        },
+        "inference": {
+            "crps_theta": None,
+            "crps_eta": None,
+            "coverage_error_theta": None,
+            "coverage_error_eta": None,
+        },
+        "runtime_seconds": timings,
+    }
+    with open(outdir / "run_record.json", "w") as handle:
+        json.dump(run_record, handle, indent=2, sort_keys=True)
+    log(f"wrote run record to {outdir / 'run_record.json'}")
 
     if not success:
         raise SystemExit(

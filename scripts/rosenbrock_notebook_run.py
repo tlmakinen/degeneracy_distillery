@@ -13,8 +13,12 @@ import json
 import os
 import pickle
 import shutil
+import signal
+import subprocess
 import time
+import traceback
 from dataclasses import asdict, dataclass
+from dataclasses import replace as dataclasses_replace
 from pathlib import Path
 
 import matplotlib
@@ -32,6 +36,7 @@ from degeneracy_distillery.align_coords import load_and_process_data_v2
 from degeneracy_distillery.postprocess_new import analyze_atom_sharing, regroup_like_terms
 from degeneracy_distillery.postprocessing_utils import (
     check_flattening,
+    diagnose_coordinate_rank_deficiency,
     flatten_with_numerical_jacobian,
     print_discovered_expressions,
     weighted_std,
@@ -39,6 +44,8 @@ from degeneracy_distillery.postprocessing_utils import (
 from degeneracy_distillery.preprocessing_utils import get_eigenvalues
 from degeneracy_distillery.sr_utils import (
     analyze_equations,
+    check_symbolic_invertibility,
+    compute_DL,
     expressions_to_physical,
     filter_pareto_fronts,
     fit_symbolic_regression,
@@ -123,6 +130,11 @@ CONFIGS = {
     ),
 }
 
+# NeurIPS rebuttal configuration: same frozen architecture/optimizer/SR settings as
+# "full" (no per-seed retuning), only n_train and n_aug bumped per the rebuttal
+# protocol (500 training simulations, 2000 augmented coordinate evaluations).
+CONFIGS["rebuttal"] = dataclasses_replace(CONFIGS["full"], nsims=500, sr_grid_size=2000)
+
 
 def log(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
@@ -137,6 +149,50 @@ def require_gpu_if_requested(require_gpu: bool) -> None:
         raise SystemExit(
             "JAX did not initialize a GPU backend. This job should run on a GPU node."
         )
+
+
+# Additive-stride master-seed derivation, matching the convention already used in
+# scripts/rosen_nsims_logprob_sweep.py (run_seed = args.seed + nsims*10 + offset).
+# The stride is large enough that master seeds 0-9 never collide across stages.
+STAGE_SEED_STRIDE = 10_000
+INVERTIBILITY_TIMEOUT_SECONDS = 30
+STAGE_OFFSETS = {
+    "data": 0,
+    "fish_model": 1,
+    "fish_train": 2,
+    "flatten": 3,
+    "align": 4,
+    "sr_grid": 5,
+    "sr_fit": 6,
+    "validation": 7,
+}
+
+
+def derive_stage_seeds(master_seed: int) -> dict[str, int]:
+    return {name: master_seed + offset * STAGE_SEED_STRIDE for name, offset in STAGE_OFFSETS.items()}
+
+
+class _TimeoutError(Exception):
+    pass
+
+
+class time_limit:
+    """SIGALRM-based hard timeout. sympy.solve can pathologically hang on messy
+    float-coefficient rational expressions; this diagnostic is supplementary, so
+    it must never be allowed to stall an entire (cluster) run."""
+
+    def __init__(self, seconds: int):
+        self.seconds = seconds
+
+    def _raise(self, signum, frame):
+        raise _TimeoutError(f"timed out after {self.seconds}s")
+
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self._raise)
+        signal.alarm(self.seconds)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        signal.alarm(0)
 
 
 def simulator_data(config: RunConfig, seed: int) -> dict[str, np.ndarray]:
@@ -161,7 +217,9 @@ def simulator_data(config: RunConfig, seed: int) -> dict[str, np.ndarray]:
     }
 
 
-def train_fishnet_ensemble(config: RunConfig, data: dict[str, np.ndarray], outdir: Path) -> Path:
+def train_fishnet_ensemble(
+    config: RunConfig, data: dict[str, np.ndarray], outdir: Path, seeds: dict[str, int]
+) -> Path:
     scaler = fit_theta_scaler(data["theta_train"], feature_range=(-3.0, 3.0))
     theta_train_s = scaler.transform(data["theta_train"]).astype(np.float32)
     theta_test_s = scaler.transform(data["theta_test"]).astype(np.float32)
@@ -183,15 +241,15 @@ def train_fishnet_ensemble(config: RunConfig, data: dict[str, np.ndarray], outdi
         patience=config.fish_patience,
         train_batch_size=25,
         lr=5e-5,
-        seed_model=201,
-        seed_train=999,
+        seed_model=seeds["fish_model"],
+        seed_train=seeds["fish_train"],
         outdir=str(fish_dir),
         update_pbar_every=25,
     )
     return fish_dir, scaler
 
 
-def fit_flattener(config: RunConfig, fish_dir: Path, outdir: Path):
+def fit_flattener(config: RunConfig, fish_dir: Path, outdir: Path, seeds: dict[str, int]):
     with np.load(fish_dir / "fishnets_outputs.npz") as fish:
         thetas = jnp.array(fish["theta"])
         ensemble_weights = np.asarray(fish["ensemble_weights"])
@@ -230,7 +288,7 @@ def fit_flattener(config: RunConfig, fish_dir: Path, outdir: Path):
             norm_method="median_det",
             flattener_activation="softplus",
             noise=1e-4,
-            seed=0,
+            seed=seeds["flatten"],
             output_prefix="rosen_flatten",
             use_whitening=True,
             nn_inv=False,
@@ -238,7 +296,7 @@ def fit_flattener(config: RunConfig, fish_dir: Path, outdir: Path):
             l1_alpha=0.0,
             do_plot=False,
             return_model=True,
-            save_flatten_model_pickle=False,
+            save_flatten_model_pickle=True,
             update_pbar_every=25,
         )
     finally:
@@ -247,13 +305,15 @@ def fit_flattener(config: RunConfig, fish_dir: Path, outdir: Path):
     return w, ensemble_w, outputs_flatten, flatten_model
 
 
-def align_and_sample_sr_grid(config: RunConfig, outdir: Path, ensemble_w, flatten_model):
+def align_and_sample_sr_grid(
+    config: RunConfig, outdir: Path, ensemble_w, flatten_model, seeds: dict[str, int]
+):
     log("aligning coordinates")
     aligned = load_and_process_data_v2(
         datapath=str(outdir) + os.sep,
         filename="rosen_flatten.npz",
         num_samps=config.align_subsample,
-        seed=44,
+        seed=seeds["align"],
         process_ensemble=True,
         n_d=1.0,
         align_mode="procrustes",
@@ -272,7 +332,7 @@ def align_and_sample_sr_grid(config: RunConfig, outdir: Path, ensemble_w, flatte
     n_params = x.shape[1]
     log(f"aligned X {x.shape}; y {y.shape}")
 
-    key = jr.PRNGKey(7)
+    key = jr.PRNGKey(seeds["sr_grid"])
     x_sr = jr.uniform(key, minval=x.min(0), maxval=x.max(0), shape=(config.sr_grid_size, n_params))
     ys_sr = jnp.array([jax.vmap(lambda xx: flatten_model.apply(w_i, xx))(x_sr) for w_i in ensemble_w])
     ys_sr_rot = np.array(
@@ -301,7 +361,13 @@ def align_and_sample_sr_grid(config: RunConfig, outdir: Path, ensemble_w, flatte
     }
 
 
-def run_symbolic_regression(config: RunConfig, aligned: dict, outdir: Path):
+# Shared with the mdl_total recomputation in main() so the raw (non-normalized)
+# description length reported in run_record.json is computed under the same
+# length_penalty analyze_equations used to select the winning expressions.
+SR_LENGTH_PENALTY = 3.0
+
+
+def run_symbolic_regression(config: RunConfig, aligned: dict, outdir: Path, seeds: dict[str, int]):
     sr_dir = outdir / "sr_results_rosen"
     sr_dir.mkdir(exist_ok=True)
     log(f"running symbolic regression into {sr_dir}")
@@ -310,7 +376,7 @@ def run_symbolic_regression(config: RunConfig, aligned: dict, outdir: Path):
         aligned["y_sr"],
         aligned["y_std_sr"],
         parent_dir=str(sr_dir) + os.sep,
-        random_state=32134,
+        random_state=seeds["sr_fit"],
         time_limit=config.sr_time_limit,
         max_length=config.sr_max_length,
         max_depth=config.sr_max_depth,
@@ -340,16 +406,16 @@ def run_symbolic_regression(config: RunConfig, aligned: dict, outdir: Path):
         n_params=aligned["n_params"],
         equation_set="pareto",
         max_complexity_thresh=15,
-        length_penalty=3.0,
+        length_penalty=SR_LENGTH_PENALTY,
         equation_predicate=equation_predicate,
         verbose=True,
     )
     return sr_dir, mdl_coords, frob_coords, analysis
 
 
-def expression_correlations(physical_exprs) -> dict[str, object]:
+def expression_correlations(physical_exprs, seed: int) -> dict[str, object]:
     theta1, theta2 = sympy.symbols("theta1 theta2")
-    rng = np.random.default_rng(123)
+    rng = np.random.default_rng(seed)
     samples = rng.uniform(-3.0, 3.0, size=(4000, 2))
     targets = {
         "theta2_plus_theta1_sq": samples[:, 1] + samples[:, 0] ** 2,
@@ -398,6 +464,8 @@ def validate_flatness(aligned: dict, mdl_coords, pruned_exprs) -> dict[str, floa
     scores["nn_median_abs_log_eigenvalue"] = float(
         np.median(np.abs(np.log(np.clip(evalues_nn, 1e-12, None))))
     )
+    scores["median_condition_raw"] = float(np.median(np.linalg.cond(np.asarray(aligned["Fs"]))))
+    scores["median_condition_symbolic"] = float(np.median(np.linalg.cond(np.asarray(pruned_flats))))
     return scores
 
 
@@ -413,7 +481,25 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Fail if no physical expression correlates this strongly with theta2 +/- theta1^2.",
     )
+    parser.add_argument(
+        "--min-theta1-corr",
+        type=float,
+        default=0.5,
+        help="Fail if no physical expression correlates this strongly with the complementary "
+        "linear direction theta1 (recovery requires both directions, per the discovery criteria).",
+    )
     return parser.parse_args()
+
+
+def git_commit_hash() -> str | None:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return None
 
 
 def main() -> None:
@@ -424,51 +510,177 @@ def main() -> None:
     log(f"running mode={args.mode}; outdir={outdir}")
     log(f"config={json.dumps(asdict(config), sort_keys=True)}")
 
+    seeds = derive_stage_seeds(args.seed)
+    log(f"stage seeds={json.dumps(seeds, sort_keys=True)}")
+
+    run_id = f"rosenbrock_seed{args.seed}"
+    counts = {
+        "n_train_simulations": config.nsims,
+        "n_eval_simulations": config.nsims,
+        "n_pca_simulations": 0,
+        "n_augmented_coordinate_evaluations": config.sr_grid_size,
+        "n_downstream_npe_simulations": 0,
+    }
+    config_manifest = {
+        "run_id": run_id,
+        "problem": "rosenbrock",
+        "master_seed": args.seed,
+        "mode": args.mode,
+        "config": asdict(config),
+        "stage_seeds": seeds,
+        "thresholds": {
+            "min_rosen_corr": args.min_rosen_corr,
+            "min_theta1_corr": args.min_theta1_corr,
+        },
+        "git_commit": git_commit_hash(),
+    }
+    with open(outdir / "config_manifest.json", "w") as handle:
+        json.dump(config_manifest, handle, indent=2, sort_keys=True)
+
     require_gpu_if_requested(args.require_gpu)
 
-    data = simulator_data(config, args.seed)
-    fish_dir, scaler = train_fishnet_ensemble(config, data, outdir)
-    _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, outdir)
-    aligned = align_and_sample_sr_grid(config, outdir, ensemble_w, flatten_model)
-    sr_dir, mdl_coords, frob_coords, analysis = run_symbolic_regression(config, aligned, outdir)
+    runtime_seconds: dict[str, float | None] = {}
+    total_start = time.time()
 
-    log("MDL coordinates")
-    print_discovered_expressions([sympy.simplify(e).evalf(2) for e in mdl_coords])
+    def write_failure(stage: str, exc: Exception) -> None:
+        runtime_seconds["total"] = time.time() - total_start
+        record = {
+            "run_id": run_id,
+            "problem": "rosenbrock",
+            "master_seed": args.seed,
+            "status": "failed",
+            "failure_stage": stage,
+            "failure_reason": f"{type(exc).__name__}: {exc}",
+            "failure_traceback": traceback.format_exc(),
+            "counts": counts,
+            "runtime_seconds": runtime_seconds,
+        }
+        with open(outdir / "run_record.json", "w") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+        log(f"FAILED at stage={stage}: {exc}\n{traceback.format_exc()}")
 
-    log("postprocessing expressions")
-    analyze_atom_sharing(mdl_coords)
-    pruned_exprs, rotation, prune_info = regroup_like_terms(
-        mdl_coords,
-        X=aligned["X"],
-        Fs=aligned["Fs"],
-        n_params=aligned["n_params"],
-        method="atoms",
-        do_snap=True,
-        snap_rel_tol=0.5,
-        snap_flat_tol=0.5,
-        decimal=2,
-        threshold=2.0,
-    )
-    print_discovered_expressions([sympy.simplify(e).evalf(2) for e in pruned_exprs])
+    try:
+        stage_start = time.time()
+        data = simulator_data(config, seeds["data"])
+        fish_dir, scaler = train_fishnet_ensemble(config, data, outdir, seeds)
+        runtime_seconds["fishnets"] = time.time() - stage_start
+    except Exception as exc:
+        write_failure("fishnets", exc)
+        raise
 
-    physical_exprs = expressions_to_physical(
-        pruned_exprs,
-        scaler,
-        sr_offset=0.0,
-        theta_names=("theta1", "theta2"),
-        decimal=3,
-    )
-    log("physical expressions")
-    for k, expr in enumerate(physical_exprs):
-        print(f"  eta_{k} = {expr}", flush=True)
+    try:
+        stage_start = time.time()
+        _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, outdir, seeds)
+        runtime_seconds["flatten"] = time.time() - stage_start
+    except Exception as exc:
+        write_failure("flatten", exc)
+        raise
 
-    correlations = expression_correlations(physical_exprs)
-    log("physical expression correlations")
-    print(json.dumps(correlations, indent=2, sort_keys=True), flush=True)
+    try:
+        # This stage both aligns coordinates and draws+evaluates the augmented SR
+        # grid (fresh theta samples pushed through every ensemble flattening
+        # member), per the doc's "flatten -> augment -> SR" ordering. The result's
+        # X_sr/y_sr/y_std_sr (not the small aligned set) are what SR fits below.
+        stage_start = time.time()
+        aligned = align_and_sample_sr_grid(config, outdir, ensemble_w, flatten_model, seeds)
+        runtime_seconds["alignment"] = time.time() - stage_start
+    except Exception as exc:
+        write_failure("alignment", exc)
+        raise
 
-    flatness = validate_flatness(aligned, mdl_coords, pruned_exprs)
-    log("flatness scores")
-    print(json.dumps(flatness, indent=2, sort_keys=True), flush=True)
+    try:
+        stage_start = time.time()
+        sr_dir, mdl_coords, frob_coords, analysis = run_symbolic_regression(
+            config, aligned, outdir, seeds
+        )
+
+        log("MDL coordinates")
+        print_discovered_expressions([sympy.simplify(e).evalf(2) for e in mdl_coords])
+
+        log("postprocessing expressions")
+        analyze_atom_sharing(mdl_coords)
+        pruned_exprs, rotation, prune_info = regroup_like_terms(
+            mdl_coords,
+            X=aligned["X"],
+            Fs=aligned["Fs"],
+            n_params=aligned["n_params"],
+            method="atoms",
+            do_snap=True,
+            snap_rel_tol=0.5,
+            snap_flat_tol=0.5,
+            decimal=2,
+            threshold=2.0,
+        )
+        print_discovered_expressions([sympy.simplify(e).evalf(2) for e in pruned_exprs])
+
+        physical_exprs = expressions_to_physical(
+            pruned_exprs,
+            scaler,
+            sr_offset=0.0,
+            theta_names=("theta1", "theta2"),
+            decimal=3,
+        )
+        log("physical expressions")
+        for k, expr in enumerate(physical_exprs):
+            print(f"  eta_{k} = {expr}", flush=True)
+
+        correlations = expression_correlations(physical_exprs, seeds["validation"])
+        log("physical expression correlations")
+        print(json.dumps(correlations, indent=2, sort_keys=True), flush=True)
+
+        flatness = validate_flatness(aligned, mdl_coords, pruned_exprs)
+        log("flatness scores")
+        print(json.dumps(flatness, indent=2, sort_keys=True), flush=True)
+
+        try:
+            with time_limit(INVERTIBILITY_TIMEOUT_SECONDS):
+                invertibility = check_symbolic_invertibility(pruned_exprs, verbose=False)
+        except _TimeoutError:
+            log(
+                f"check_symbolic_invertibility did not finish within "
+                f"{INVERTIBILITY_TIMEOUT_SECONDS}s; sympy.solve can hang on messy "
+                "float-coefficient systems. Recording as unknown rather than blocking."
+            )
+            invertibility = {"is_symbolically_invertible": None, "timed_out": True}
+        except Exception as exc:
+            # sympy.solve can also raise outright (e.g. NotImplementedError) on some
+            # discovered expressions, not just hang -- this is a supplementary
+            # diagnostic and must never fail the whole run over it.
+            log(
+                f"check_symbolic_invertibility raised {type(exc).__name__}: {exc}; "
+                "recording as unknown rather than failing the run."
+            )
+            invertibility = {"is_symbolically_invertible": None, "error": str(exc)}
+        rank_info = diagnose_coordinate_rank_deficiency(
+            pruned_exprs,
+            X=aligned["X"],
+            Fs=aligned["Fs"],
+            n_params=aligned["n_params"],
+        )
+        runtime_seconds["symbolic_regression"] = time.time() - stage_start
+    except Exception as exc:
+        write_failure("symbolic_regression", exc)
+        raise
+
+    # analysis["DL"] is per-component *normalized* (min-subtracted, so the winning
+    # entry is always 0) -- not useful as a total. Recompute the raw DL/complexity
+    # of the actual winning (mdl_coords) expressions directly via compute_DL.
+    mdl_total = 0.0
+    complexity_total = 0.0
+    for i, eq in enumerate(mdl_coords):
+        c_i, _, _, dl_i, _ = compute_DL(
+            eq,
+            i,
+            aligned["X"],
+            aligned["y"],
+            aligned["y_std"],
+            aligned["dy_sr"],
+            aligned["Fs"],
+            aligned["n_params"],
+            length_penalty=SR_LENGTH_PENALTY,
+        )
+        mdl_total += float(dl_i)
+        complexity_total += float(c_i)
 
     sr_dir.mkdir(exist_ok=True)
     with open(sr_dir / "sr_expressions.pkl", "wb") as handle:
@@ -483,6 +695,8 @@ def main() -> None:
                 "analysis": analysis,
                 "rotation": rotation,
                 "prune_info": prune_info,
+                "invertibility": invertibility,
+                "rank_info": rank_info,
                 "scaler_scale": scaler.scale_,
                 "scaler_min": scaler.min_,
                 "scaler_data_min": scaler.data_min_,
@@ -495,10 +709,55 @@ def main() -> None:
     shutil.make_archive(str(outdir / "sr_results_rosen"), "zip", root_dir=sr_dir)
     log(f"saved artifacts under {sr_dir}")
 
-    if correlations["best_rosen_abs_corr"] < args.min_rosen_corr:
+    runtime_seconds["npe"] = None
+    runtime_seconds["total"] = time.time() - total_start
+
+    success = (
+        correlations["best_rosen_abs_corr"] >= args.min_rosen_corr
+        and correlations["best_theta1_abs_corr"] >= args.min_theta1_corr
+    )
+
+    run_record = {
+        "run_id": run_id,
+        "problem": "rosenbrock",
+        "master_seed": args.seed,
+        "status": "success",
+        "counts": counts,
+        "discovery": {
+            "expressions_physical": [str(e) for e in physical_exprs],
+            "expressions_canonical": [str(e) for e in mdl_coords],
+            "success": success,
+            "physics_alignment": correlations["best_rosen_abs_corr"],
+            "complementary_linear_alignment": correlations["best_theta1_abs_corr"],
+            "mdl_total": mdl_total,
+            "complexity_total": complexity_total,
+            "symbolically_invertible": invertibility["is_symbolically_invertible"],
+            "rank_deficient": bool(rank_info["rank_deficient"]),
+        },
+        "heldout_geometry": {
+            "frob_raw": flatness["raw_theta"],
+            "frob_neural": flatness["nn"],
+            "frob_symbolic": flatness["pruned"],
+            "median_condition_raw": flatness["median_condition_raw"],
+            "median_condition_symbolic": flatness["median_condition_symbolic"],
+        },
+        "inference": {
+            "crps_theta": None,
+            "crps_eta": None,
+            "coverage_error_theta": None,
+            "coverage_error_eta": None,
+        },
+        "runtime_seconds": runtime_seconds,
+    }
+    with open(outdir / "run_record.json", "w") as handle:
+        json.dump(run_record, handle, indent=2, sort_keys=True)
+    log(f"wrote run record to {outdir / 'run_record.json'}")
+
+    if not success:
         raise SystemExit(
-            "No physical expression correlated strongly enough with theta2 +/- theta1^2: "
-            f"{correlations['best_rosen_abs_corr']:.3f} < {args.min_rosen_corr:.3f}"
+            "Recovery criteria not met: "
+            f"rosen_corr={correlations['best_rosen_abs_corr']:.3f} (min {args.min_rosen_corr:.3f}), "
+            f"theta1_corr={correlations['best_theta1_abs_corr']:.3f} (min {args.min_theta1_corr:.3f})"
         )
 
     log("Rosenbrock notebook batch run complete")

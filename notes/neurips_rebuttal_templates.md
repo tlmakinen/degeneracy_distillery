@@ -59,7 +59,7 @@ We thank Reviewer FoSE for a thorough and technical review, and for noting the w
 
 [REFRAME]
 
-**W1 / Q3 - Non-uniqueness of isotropising coordinates.** We thank the reviewer for engaging with the non-uniqueness discussion in Appendix B, and we agree it belongs in the main text rather than an appendix; the revision will state it there. The reviewer's two-unit-Gaussian example is exactly the degenerate case Appendix B analyses: isotropy alone defines an equivalence class, since the loss is invariant under a constant offset and a global orthogonal transformation, so isotropy by itself cannot single out interpretable axes. Our claim is that the pipeline resolves this in two further stages, and both are load-bearing rather than cosmetic. (i) A canonicalisation fixes the frame: Jacobian Procrustes alignment, a nonlinearity-separating rotation that orders axes by nonlinearity energy, and a sign and permutation fix from the mean prior-normalised Fisher eigenstructure (Appendix B). (ii) An Occam selection: MDL-based symbolic regression returns the simplest closed-form representative of the class. We will restate the objective as "isotropy plus minimum description length" and present that pair as the discovery principle. Empirically the combination is reproducible: across 10 fully independent end-to-end trials per problem the expected coordinate is recovered in [X]/10 (Rosenbrock), [X]/10 (SIR), and [X]/10 (IMRPhenomD) runs, evaluated numerically up to permutation, sign, and scaling rather than by string matching. The full table is in our reply to Reviewer t9KB.
+**W1 / Q3 - Non-uniqueness of isotropising coordinates.** We thank the reviewer for engaging with the non-uniqueness discussion in Appendix B, and we agree it belongs in the main text rather than an appendix; the revision will state it there. The reviewer's two-unit-Gaussian example is exactly the degenerate case Appendix B analyses: isotropy alone defines an equivalence class, since the loss is invariant under a constant offset and a global orthogonal transformation, so isotropy by itself cannot single out interpretable axes. Our claim is that the pipeline resolves this in two further stages, and both are load-bearing rather than cosmetic. (i) A canonicalisation fixes the frame: Jacobian Procrustes alignment, a nonlinearity-separating rotation that orders axes by nonlinearity energy, and a sign and permutation fix from the mean prior-normalised Fisher eigenstructure (Appendix B). (ii) An Occam selection: MDL-based symbolic regression returns the simplest closed-form representative of the class. We will restate the objective as "isotropy plus minimum description length" and present that pair as the discovery principle. Empirically the combination is reproducible: across 10 fully independent end-to-end trials per problem the expected coordinate is recovered in 10/10 (Rosenbrock), 10/10 (SIR), and 7/10 (IMRPhenomD) runs, evaluated numerically up to permutation, sign, and scaling rather than by string matching. The full table is in our reply to Reviewer t9KB.
 
 **W2 / Q1 - What the 10x compares against.** The reviewer is right that the main text did not explicitly qualify the figure, and we will state it in the revision. The 10x is a **maximum validation log-probability** comparison on Rosenbrock, in matched theta-density units, so that both arms are densities over the same theta (the eta arm carries the log|det| correction). The baseline is NPE trained on the same simulations in the original parameters, with identical architecture, ensemble size, seeds, and held-out observations; only the coordinates the density is fitted in differ.
 
@@ -74,7 +74,7 @@ Best validation log-probability, theta-density units, mean +- sd over 2 ensemble
 
 Read as a horizontal shift, eta at 100 simulations matches theta at approximately 1,360 (13.6x) and eta at 1,000 matches theta at approximately 9,260 (9.3x). Because a log-probability factor speaks to density fitting rather than to posterior quality, we now also report CRPS, and we will label every factor with its metric. Scored with CRPS against 1,000 held-out observations at a matched budget of 1,000 simulations, the same run gives 0.997 (theta) against 0.830 (eta) summed over parameters, a factor of 1.20, with better calibration in eta (PIT maximum deviation 0.038 and 0.070 against 0.064 and 0.114). On SIR the corresponding CRPS factor is approximately 1.9 (details in our reply to Reviewer rUsi). The revision will therefore quote approximately 2x for posterior quality and 9-14x for validation log-probability, each with its metric, budget, and baseline named.
 
-**W3 / Q1 - Computational cost and scaling.** [SCALING] End-to-end wall time for [PROBLEM] is [T_FISH] (Fisher ensemble) + [T_FLAT] (coordinates) + [T_SR] (symbolic regression) = [T_TOTAL] on [HARDWARE]. We accept that "real-world" overstated the demonstrated scope and will restrict the claim to the parameter dimensionalities we actually show.
+**W3 / Q1 - Computational cost and scaling.** [SCALING] End-to-end discovery wall time is 9.3-21.0 min per trial on a single V100 across the four problems; for Rosenbrock, the most expensive, 262 s (Fisher ensemble) + 365 s (coordinates) + 654 s (symbolic regression) = 21.0 min. We accept that "real-world" overstated the demonstrated scope and will restrict the claim to the parameter dimensionalities we actually show.
 
 **W4 - Imprecise claims.** We accept all three.
 - "requiring no data" becomes "requiring no observed data realisation; the metric is estimated from simulations", in both the abstract and line 91.
@@ -153,14 +153,14 @@ We thank Reviewer t9KB for recognising the novelty of combining simulation-based
 
     Problem        | Train sims | Recovered | Alignment (med, IQR) | Complexity
     ---------------|------------|-----------|----------------------|-----------
-    Rosenbrock     | 500        | [X]/10    | [VAL] ([LO],[HI])    | [VAL]
-    SIR            | 500        | [X]/10    | [VAL] ([LO],[HI])    | [VAL]
-    GW TaylorF2    | 500        | [X]/10    | [VAL] ([LO],[HI])    | [VAL]
-    GW IMRPhenomD  | 500        | [X]/10    | [VAL] ([LO],[HI])    | [VAL]
+    Rosenbrock     | 500        | 10/10     | 0.929 (0.814,0.960)  | 28
+    SIR            | 500        | 10/10     | 0.674 (0.636,0.741)  | 17
+    GW TaylorF2    | 500        | 10/10     | 0.972 (0.966,0.979)  | 24
+    GW IMRPhenomD  | 500        | 7/10      | 0.997 (0.988,0.999)  | 25
 
-Failures stay in the denominator and we identify the stage that failed in each. Symbolic-regression augmentation used [N_AUG] evaluations of the learned coordinate map per run; these are network evaluations of a simulator-independent map, not simulator calls, and are reported separately from the [N_EVAL] held-out simulations used for evaluation. [IF RUN: we repeated the SR stage with [ALTERNATIVE ALGORITHM] and obtained [RESULT].]
+Alignment is |Pearson r| on held-out points against the expected coordinate (the valley coordinate; R_0 = beta/gamma; chirp mass M_c; total mass M). All three IMRPhenomD non-recoveries are threshold misses on the second conjunct of its criterion, not crashes: the pipeline ran cleanly on all 10 trials and the median total-mass alignment is 0.997, while the complementary asymmetric mass combination is the harder and more variable direction. Failures stay in the denominator and we identify the stage that failed in each. Symbolic-regression augmentation used 2,000 evaluations of the learned coordinate map per run (7,509-7,632 for SIR, which augments after a validity cut); these are network evaluations of a simulator-independent map, not simulator calls, and are reported separately from the 500 held-out simulations used for evaluation. [IF RUN: we repeated the SR stage with [ALTERNATIVE ALGORITHM] and obtained [RESULT].]
 
-**Q3 - Total computational overhead.** Agreed, and doing the accounting end-to-end changes our claim. For SIR, discovery costs 500 training simulations of the two-parameter (beta, gamma) system, plus [T_FISH] / [T_FLAT] / [T_SR] on [HARDWARE]. Those simulations hold I_0 fixed, so they cannot double as NPE training data for the three-parameter inference problem: a single downstream analysis in eta costs 500 + 500 = 1,000 simulations to match a CRPS(R_0) that the theta baseline reaches with approximately 970. For one analysis the coordinates are therefore a wash, and we will say so. Their value is amortisation, since the map is learned once: for k analyses eta costs 500 + 500k against the baseline's 970k, which is net-positive from the second analysis (1,500 against 1,940) and approaches 1.9x. Separately, discovery cost itself fell from 5,000 to approximately 500 simulator calls per experiment (Rosenbrock, GW, SIR) by augmenting only the symbolic-regression stage with inexpensive evaluations of the learned map.
+**Q3 - Total computational overhead.** Agreed, and doing the accounting end-to-end changes our claim. For SIR, discovery costs 500 training simulations of the two-parameter (beta, gamma) system, plus 221 s (Fisher ensemble) / 174 s (coordinates) / 130 s (symbolic regression), 9.3 min end to end on one V100. Those simulations hold I_0 fixed, so they cannot double as NPE training data for the three-parameter inference problem: a single downstream analysis in eta costs 500 + 500 = 1,000 simulations to match a CRPS(R_0) that the theta baseline reaches with approximately 970. For one analysis the coordinates are therefore a wash, and we will say so. Their value is amortisation, since the map is learned once: for k analyses eta costs 500 + 500k against the baseline's 970k, which is net-positive from the second analysis (1,500 against 1,940) and approaches 1.9x. Separately, discovery cost itself fell from 5,000 to approximately 500 simulator calls per experiment (Rosenbrock, GW, SIR) by augmenting only the symbolic-regression stage with inexpensive evaluations of the learned map.
 
 **Weakness - baselines.** We agree a comparison on the parameter-estimation component alone is appropriate. [STATE WHAT YOU CAN RUN, e.g. FMPE/CMPE at matched budget on PROBLEM giving RESULT; or state honestly what is out of scope for the rebuttal window and will appear in the revision.]
 
@@ -427,8 +427,19 @@ If the response claims discovery now costs approximately 500 simulations, but th
 
 ## Open items
 
-- 10-trial recovery table: results pending, placeholders under t9KB Q2 and referenced from FoSE W1.
-- Wall-clock timings for the cost paragraphs: `[T_FISH]`, `[T_FLAT]`, `[T_SR]`, `[T_TOTAL]`, `[HARDWARE]`.
+- ~~10-trial recovery table~~ DONE (27 Jul 2026): filled under t9KB Q2 and FoSE W1.
+  10/10 Rosenbrock, 10/10 SIR, 10/10 TaylorF2, 7/10 IMRPhenomD.
+- ~~Wall-clock timings for the cost paragraphs~~ DONE (27 Jul 2026): filled under
+  t9KB Q3 and FoSE W3, medians over the 10 rebuttal seeds, single V100.
+  Fisher / coordinates / SR / total, in seconds unless noted:
+  Rosenbrock 262 / 365 / 654 / 21.0 min; SIR 221 / 174 / 130 / 9.3 min;
+  TaylorF2 276 / 227 / 263 / 12.9 min; IMRPhenomD 478 / 221 / 264 / 15.5 min.
+  Simulation time is not separately recorded by these scripts (it is folded into
+  the Fisher stage and is small), and these exclude queue wait.
+- Flatness numbers anywhere in this file must be post-fix, i.e. regenerated after
+  commit 4514c64, which corrected three flatness acceptance tests that were
+  discarding coordinate *improvements*. See `notes/postprocessing_flatness_bug_fix.md`
+  and `notes/fisher_variance_over_prior.md`.
 - QfCk Q1 per-experiment Gaussianity statement, and Q3 prior/noise ablation.
 - FoSE W4 beta/gamma correlation and gradient cosine similarity numbers.
 - t9KB baselines: decide whether FMPE/CMPE at matched budget is feasible in the window.

@@ -98,4 +98,5 @@ python scripts/qm7b_notebook_run.py \
   --min-gap-corr "$MIN_GAP_CORR" \
   --geometric-improvement-margin "$GEOMETRIC_IMPROVEMENT_MARGIN" \
   --skip-fishnets \
+  --skip-flatten \
   --from-dir "$FROM_DIR"

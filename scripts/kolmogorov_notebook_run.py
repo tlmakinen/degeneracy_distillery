@@ -525,6 +525,45 @@ def _matrix_exp_sym(matrix):
     return (evecs * jnp.exp(evals)[..., None, :]) @ jnp.swapaxes(evecs, -1, -2)
 
 
+def reuse_fishnet_ensemble(data, from_dir: Path, outdir: Path):
+    """Point at a prior run's trained fishnets instead of retraining them.
+
+    The theta scaler is refit from the freshly simulated data rather than being
+    loaded, because it is a pure function of theta_train and the simulator is
+    deterministic given the master seed. That is checked rather than assumed:
+    the scaled theta implied by the reused artifacts must match the fresh one,
+    otherwise the reused Fishers belong to a different dataset and every
+    downstream number would be silently wrong.
+    """
+    scaler = fit_theta_scaler(data["theta_train"], feature_range=(1.0, 2.0))
+    # train_fishnets saves the TEST split as "theta" (training_loop_fishnets.py:365),
+    # because its outputs (Fs, mle, x) are all evaluated on held-out points. Compare
+    # against that, not theta_train.
+    theta_ref = scaler.transform(data["theta_test"]).astype(np.float32)
+
+    fish_dir = from_dir / "fishnets-kolmogorov"
+    npz = fish_dir / "fishnets_outputs.npz"
+    if not npz.exists():
+        raise FileNotFoundError(f"no fishnet artifacts at {npz}")
+
+    with np.load(npz) as fish:
+        theta_saved = np.asarray(fish["theta"])
+    if theta_saved.shape != theta_ref.shape:
+        raise RuntimeError(
+            f"reused fishnets have theta {theta_saved.shape} but this run "
+            f"simulated {theta_ref.shape}; --from-dir is not a matching run"
+        )
+    err = np.abs(theta_saved - theta_ref).max()
+    if err > 1e-4:
+        raise RuntimeError(
+            f"reused fishnets were trained on different data (max |dtheta| = "
+            f"{err:.3e}); refusing to continue. Check that --from-dir has the "
+            f"same --master-seed and --mode as this run."
+        )
+    log(f"reusing fishnets from {fish_dir} (theta match, max |dtheta| = {err:.2e})")
+    return fish_dir, scaler
+
+
 def fit_flattener(config: RunConfig, fish_dir: Path, seeds, outdir: Path):
     with np.load(fish_dir / "fishnets_outputs.npz") as fish:
         thetas = jnp.array(fish["theta"])
@@ -826,6 +865,27 @@ def parse_args() -> argparse.Namespace:
         default=0.4,
         help="Fail unless the fitted log-nu / log-f0 exponent is within this of -2.",
     )
+    parser.add_argument(
+        "--from-dir", type=Path, default=None,
+        help="Path to a prior run directory. Required when --skip-fishnets is set.",
+    )
+    parser.add_argument(
+        "--skip-fishnets", action="store_true", default=False,
+        help="Reuse the trained fishnet ensemble from --from-dir instead of "
+             "retraining it. The simulator is still re-run (the theta scaler is "
+             "derived from it), and the reused artifacts are checked against the "
+             "fresh simulation before use. Intended for flattener/SR sweeps, "
+             "where holding the Fisher stage fixed is what makes the arms "
+             "comparable.",
+    )
+    parser.add_argument(
+        "--flatten-hidden-size", type=int, default=None,
+        help="Override RunConfig.flatten_hidden_size (recorded in config_manifest.json).",
+    )
+    parser.add_argument(
+        "--flatten-layers", type=int, default=None,
+        help="Override RunConfig.flatten_layers (recorded in config_manifest.json).",
+    )
     return parser.parse_args()
 
 
@@ -836,6 +896,12 @@ def main() -> None:
         config = replace(config, sr_time_limit=args.sr_time_limit)
     if args.grid is not None:
         config = replace(config, grid=args.grid)
+    # Applied to the config object, not passed separately, so config_manifest.json
+    # records the architecture the run actually used.
+    if args.flatten_hidden_size is not None:
+        config = replace(config, flatten_hidden_size=args.flatten_hidden_size)
+    if args.flatten_layers is not None:
+        config = replace(config, flatten_layers=args.flatten_layers)
     outdir = args.out_dir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     seeds = derive_seeds(args.master_seed)
@@ -905,7 +971,14 @@ def main() -> None:
 
     try:
         t0 = time.time()
-        fish_dir, scaler = train_fishnet_ensemble(config, data, seeds, outdir)
+        if args.skip_fishnets:
+            if args.from_dir is None:
+                raise ValueError("--from-dir is required when --skip-fishnets is set")
+            fish_dir, scaler = reuse_fishnet_ensemble(
+                data, args.from_dir.resolve(), outdir
+            )
+        else:
+            fish_dir, scaler = train_fishnet_ensemble(config, data, seeds, outdir)
         runtime_seconds["fishnets"] = time.time() - t0
     except Exception as exc:
         write_failure("fishnets", exc)
@@ -1078,6 +1151,11 @@ def main() -> None:
             "frob_raw": flatness["raw_theta"],
             "frob_neural": flatness["nn"],
             "frob_symbolic": flatness["pruned"],
+            # Surfaced here (not just in prune_info inside sr_expressions.pkl) so a
+            # rejected rotation is visible in aggregated results. rel_delta is
+            # signed: negative means the rotation improved flatness.
+            "rotation_accepted": bool(prune_info["rotation_accepted"]),
+            "rotation_rel_delta": float(prune_info["rel_delta"]),
             "frob_adhoc": flatness["adhoc_dimensional_analysis"],
             "median_condition_raw": flatness["median_condition_raw"],
             "median_condition_symbolic": flatness["median_condition_symbolic"],

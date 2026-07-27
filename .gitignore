@@ -85,6 +85,13 @@ data/
 # animations/
 sr_results/
 results/
+# Experiment outputs and job logs. These are written per-seed by the SLURM
+# wrappers and reach multiple GB; the campaigns write to $SCRATCH
+# (/data103/makinen/degeneracy_experiments) rather than into the repo.
+follow_up_results/
+data_scratch/
+logs/
+scratch_notebooks/
 example_*/
 ex_*/
 *.pdf

@@ -1010,7 +1010,14 @@ def main() -> None:
             "dns_nusselt_scaling": exponents["dns_nusselt_scaling"],
             "best_nusselt_rapr_cosine": cosine,
         },
-        "heldout_geometry": flatness,
+        "heldout_geometry": {
+            **flatness,
+            # Surfaced here (not just in prune_info inside sr_expressions.pkl) so a
+            # rejected rotation is visible in aggregated results. rel_delta is
+            # signed: negative means the rotation improved flatness.
+            "rotation_accepted": bool(prune_info["rotation_accepted"]),
+            "rotation_rel_delta": float(prune_info["rel_delta"]),
+        },
         "runtime_seconds": timings,
     }
     with open(outdir / "run_summary.json", "w") as handle:

@@ -128,6 +128,12 @@ class RunConfig:
     # Set (e.g. rebuttal=500) to additionally subsample the train split down
     # to a fixed number of paired molecule observations.
     n_train_molecules: int | None = None
+    # Coordinate alignment. QM7b has historically used kabsch/sign_only with
+    # separate_nonlinearity=False, unlike every other experiment script, which
+    # uses the load_and_process_data_v2 default of procrustes. Exposed here so
+    # the two can be compared without editing the call site.
+    align_mode: str = "kabsch"
+    separate_nonlinearity: bool = False
 
 
 CONFIGS = {
@@ -201,6 +207,15 @@ CONFIGS["rebuttal"] = dataclasses_replace(
 # a separate named config rather than mutating "rebuttal" itself, since "rebuttal" has
 # already-reported results.
 CONFIGS["rebuttal_longsr"] = dataclasses_replace(CONFIGS["rebuttal"], sr_time_limit=1800)
+
+# Procrustes-alignment arm. Everything else is frozen to "rebuttal"; only the
+# alignment changes, so this is a clean A/B against a "rebuttal"-config control
+# run from the same fishnet artifacts. Alignment sits downstream of fishnet and
+# flattener training, so this arm can reuse trained fishnets via
+# --skip-fishnets and does not need a GPU.
+CONFIGS["rebuttal_procrustes"] = dataclasses_replace(
+    CONFIGS["rebuttal"], align_mode="procrustes", separate_nonlinearity=True
+)
 
 
 # ---------------------------------------------------------------------------
@@ -576,8 +591,8 @@ def align_and_sample_sr_grid(
         seed=seeds["align"],
         process_ensemble=True,
         n_d=1.0,
-        align_mode="kabsch",
-        separate_nonlinearity=False,
+        align_mode=config.align_mode,
+        separate_nonlinearity=config.separate_nonlinearity,
         canonicalize="sign_only",
         use_prior_normalization=True,
         restore_reference_mean=False,
@@ -800,6 +815,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to a prior run directory. Required when --skip-fishnets is set.",
     )
     parser.add_argument(
+        "--skip-flatten", action="store_true", default=False,
+        help="Reuse the flattener from --from-dir instead of refitting it. "
+             "Required for CPU runs: refitting diverges to non-finite "
+             "eta_ensemble on CPU for this problem.",
+    )
+    parser.add_argument(
         "--skip-fishnets", action="store_true", default=False,
         help="Skip fishnet training and re-run flattening+SR from saved fishnets_outputs.npz in --from-dir.",
     )
@@ -956,7 +977,36 @@ def main() -> None:
 
     try:
         stage_start = time.time()
-        _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, outdir, seeds)
+        if args.skip_flatten:
+            # Reuse a previously fitted flattener instead of refitting it. Needed
+            # for the alignment A/B: refitting on CPU reproducibly diverges for
+            # QM7b (every eta_ensemble entry comes back non-finite, which then
+            # fails in load_and_process_data), while the saved GPU-fitted
+            # flattener is finite everywhere. Reusing it also makes the
+            # comparison exact -- identical fishnets AND identical flattener, so
+            # align_mode is the only thing that differs between arms.
+            if args.from_dir is None:
+                raise ValueError("--from-dir is required when --skip-flatten is set")
+            src = args.from_dir.resolve()
+            log(f"skipping flattener fit; loading artifacts from {src}")
+            for fname in ("qm7b_flattening.npz", "qm7b_flattening_flatten_model.pkl"):
+                if not (src / fname).exists():
+                    raise FileNotFoundError(f"{fname} not found in {src}")
+                shutil.copy2(src / fname, outdir / fname)
+            with open(outdir / "qm7b_flattening_flatten_model.pkl", "rb") as handle:
+                saved_flat = pickle.load(handle)
+            ensemble_w = saved_flat["ensemble_ws"]
+            flatten_model = saved_flat["flatten_model"]
+            eta_ens = np.load(outdir / "qm7b_flattening.npz")["eta_ensemble"]
+            finite_frac = float(np.isfinite(eta_ens).mean())
+            log(f"reused flattener: eta_ensemble finite fraction {finite_frac:.3f}")
+            if finite_frac < 1.0:
+                raise ValueError(
+                    f"reused flattener has non-finite eta_ensemble "
+                    f"(finite fraction {finite_frac:.3f}); refusing to continue"
+                )
+        else:
+            _, ensemble_w, _, flatten_model = fit_flattener(config, fish_dir, outdir, seeds)
         runtime_seconds["flatten"] = time.time() - stage_start
     except Exception as exc:
         write_failure("flatten", exc)
@@ -1123,6 +1173,11 @@ def main() -> None:
             "frob_raw": flatness["raw_theta"],
             "frob_neural": flatness["nn"],
             "frob_symbolic": flatness["pruned"],
+            # Surfaced here (not just in prune_info inside sr_expressions.pkl) so a
+            # rejected rotation is visible in aggregated results. rel_delta is
+            # signed: negative means the rotation improved flatness.
+            "rotation_accepted": bool(prune_info["rotation_accepted"]),
+            "rotation_rel_delta": float(prune_info["rel_delta"]),
             "median_condition_raw": flatness["median_condition_raw"],
             "median_condition_symbolic": flatness["median_condition_symbolic"],
         },

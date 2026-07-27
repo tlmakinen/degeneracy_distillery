@@ -122,3 +122,5 @@ tutorial_notebooks/*_OLD.ipyn
 # Experimental notebooks (not part of the release)
 notebooks/
 
+# TensorBoard / sbi outputs
+*.tfevents*

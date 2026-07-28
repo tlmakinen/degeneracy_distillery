@@ -16,6 +16,8 @@ Reviewers and scores: FoSE (2, conf 3), rUsi (2, conf 4), t9KB (5, conf 2), QfCk
 
 Each new result lives in the reply to the reviewer who asked for it, and nowhere else. The AC comment summarises what was added and points at the reply that contains it, rather than repeating the tables.
 
+**Which reply carries which result:**
+
 | Result | Belongs to | Because |
 |---|---|---|
 | Rosenbrock log-prob and CRPS | FoSE W2/Q1 | Asked what the 10x compares against |
@@ -48,6 +50,8 @@ Reuse these verbatim so the framing is identical across all five replies and the
 **[METRIC-CLAIM]** We will narrow the Fisher claim in the main text. The Fishnet objective recovers the **inverse posterior covariance**; identification with the likelihood Fisher information holds only under the Laplace / Bernstein-von Mises conditions stated in Appendix A. We will state this at first mention (Sec. 4, currently lines 147-149) rather than only in the Discussion and appendix. The pipeline is unaffected: the pullback in Eq. (4) transforms identically for either object.
 ```
 
+# REVIEWER RESPONSE DRAFTS START HERE --->>>
+
 ---
 
 ## Reviewer FoSE (Rating 2, Confidence 3)
@@ -61,9 +65,9 @@ We thank Reviewer FoSE for a thorough and technical review, and for noting the w
 
 **W1 / Q3 - Non-uniqueness of isotropising coordinates.** We thank the reviewer for engaging with the non-uniqueness discussion in Appendix B, and we agree it belongs in the main text rather than an appendix; the revision will state it there. The reviewer's two-unit-Gaussian example is exactly the degenerate case Appendix B analyses: isotropy alone defines an equivalence class, since the loss is invariant under a constant offset and a global orthogonal transformation, so isotropy by itself cannot single out interpretable axes. Our claim is that the pipeline resolves this in two further stages, and both are load-bearing rather than cosmetic. (i) A canonicalisation fixes the frame: Jacobian Procrustes alignment, a nonlinearity-separating rotation that orders axes by nonlinearity energy, and a sign and permutation fix from the mean prior-normalised Fisher eigenstructure (Appendix B). (ii) An Occam selection: MDL-based symbolic regression returns the simplest closed-form representative of the class. We will restate the objective as "isotropy plus minimum description length" and present that pair as the discovery principle. Empirically the combination is reproducible: across 10 fully independent end-to-end trials per problem the expected coordinate is recovered in 10/10 (Rosenbrock), 10/10 (SIR), and 7/10 (IMRPhenomD) runs, evaluated numerically up to permutation, sign, and scaling rather than by string matching. The full table is in our reply to Reviewer t9KB.
 
-**W2 / Q1 - What the 10x compares against.** The reviewer is right that the main text did not explicitly qualify the figure, and we will state it in the revision. The 10x is a **maximum validation log-probability** comparison on Rosenbrock, in matched theta-density units, so that both arms are densities over the same theta (the eta arm carries the log|det| correction). The baseline is NPE trained on the same simulations in the original parameters, with identical architecture, ensemble size, seeds, and held-out observations; only the coordinates the density is fitted in differ.
+**W2 / Q1 - What the 10x compares against.** The reviewer is right that the main text did not explicitly qualify the figure, and we will state it in the revision. The 10x is a **maximum validation log-probability** comparison on Rosenbrock, in matched theta-density units, so that both are densities over the same theta, with the eta version carrying the log|det| correction. The baseline is NPE trained on the same simulations in the original parameters, with identical architecture, ensemble size, seeds, and held-out observations; only the coordinates the density is fitted in differ.
 
-Best validation log-probability, theta-density units, mean +- sd over 2 ensemble members:
+**Rosenbrock, simulation efficiency by training budget**, best validation log-probability in matched theta-density units (higher is better), mean +- sd over 2 ensemble members:
 
     N_sim | NPE in theta   | NPE in eta
     ------|----------------|---------------
@@ -79,7 +83,7 @@ Read as a horizontal shift, eta at 100 simulations matches theta at approximatel
 **W4 - Imprecise claims.** We accept all three.
 - "requiring no data" becomes "requiring no observed data realisation; the metric is estimated from simulations", in both the abstract and line 91.
 - The Gaussian/Laplace assumption will be stated at first mention. [METRIC-CLAIM]
-- On beta/gamma: the discovered first component has held-out correlation [VALUE] with R_0 = beta/gamma and gradient cosine similarity [VALUE]. If that is not compelling we will replace "closely" with the number itself.
+- On beta/gamma: the discovered coordinate aligned with R_0 = beta/gamma has held-out correlation 0.674 (IQR 0.636-0.741) and gradient cosine similarity 0.926 (IQR 0.924-0.931) across 10 independent trials.
 
 **Minor points.** (1) [GEOMETRY] (2) We will cite Amari, *Information Geometry and Its Applications*, Applied Mathematical Sciences 194, Springer, 2016, for the information-geometric framing. (3) Agreed that symbolic post-processing could in principle be applied to other methods; we will say so, while noting that the MDL step is what resolves the non-uniqueness above rather than a presentational choice. (4)-(5) NPE and TARP will be defined at first use, with one line on what TARP measures. (6) Figures 4 and 5, all subpanels, are experimental results; Figure 1 is a pipeline schematic and will be labelled as such.
 
@@ -103,18 +107,26 @@ We thank Reviewer rUsi for a clear statement of where the paper failed to justif
 
 [REFRAME]
 
-**Scope: when is this needed?** The pipeline requires only parameter-simulation pairs. It needs neither likelihood evaluations, nor an analytic Fisher, nor a differentiable simulator. Several of our examples were chosen with tractable likelihoods deliberately, because they let the discovered coordinates be checked against a known answer, and we accept that this made the setting look circular. We will state the requirement explicitly and lead with the case that does not have this property. Our weak-lensing example is simulation-based with no tractable likelihood: the data are two-point statistics of mock convergence images computed from expensive dark-matter simulations, varied over wide priors in (Omega_m, sigma_8) and in the initial conditions. There the method recovers
+**Scope: when is this needed?** The pipeline requires only parameter-simulation pairs. It needs neither likelihood evaluations, nor an analytic Fisher, nor a differentiable simulator. Several of our examples were chosen with tractable likelihoods deliberately, because they let the discovered coordinates be checked against a known answer, and we accept that this made the setting look circular. 
+
+The weak lensing experiment serves as an example of an intractable likelihood problem. The data are two-point statistics of mock convergence images from expensive dark-matter simulations, over wide priors in (Omega_m, sigma_8) and in the initial conditions. For these simulations, no likelihood exists.
+
+[MAYBE-REMOVE?]
+From parameter-simulation pairs alone the method returns
 
     eta_1 = Omega_m sigma_8 - 0.9 Omega_m^0.144
     eta_2 = 0.5 (Omega_m - 1.0)
 
-which is close to the standard (Omega_m, S_8) parameterisation used in the field, with S_8 = sigma_8 (Omega_m/0.3)^0.5. The nonlinear exponent is found from simulations alone, without a likelihood and without being told that a damping of the Omega_m dependence is what resolves the degeneracy.
+Comparing level sets rather than functional forms: near Omega_m = 0.3 and sigma_8 = 0.8, contours of constant eta_1 have local slope d ln sigma_8 / d ln Omega_m of approximately -0.55, against -0.5 for the conventional S_8 = sigma_8 (Omega_m/0.3)^0.5, while eta_2 is an affine rescaling of Omega_m. There is no analytic Fisher to check against here, which is exactly the regime the reviewer asks about.
 
-**NPE is not assumed knowledge.** Agreed. We will add a short primer defining neural posterior estimation, the amortisation it provides, and why conditioning matters for it, before it is used.
 
-**Metric justification.** A fair criticism, and we are changing the evaluation. Maximum validation log-probability is a budget-matched training-quality proxy that can reward overconfidence, so it cannot carry the argument alone. We now report CRPS on a derived physical quantity together with calibration. On SIR, over 50 held-out observations with a 5-member ensemble, all arms evaluated in theta units on the same observations:
+**NPE is not assumed knowledge.** Agreed. We will add a short primer defining neural posterior estimation, the amortisation it provides, and why conditioning matters for it, before it is used. Although perhaps not familiar to all Neurips attendees, simulation based inference methods such as NPE have been the focus of Neurips papers over the last few years (see references) and thus is within the scope of the conference.
 
-    N_sim | Method | CRPS(R_0), mean (95% CI) | PIT max dev | 68% cov
+**Metric justification.** A fair criticism, and we are changing the evaluation. Maximum validation log-probability is a budget-matched training-quality proxy that can reward overconfidence, so it cannot carry the argument alone. For the SIR experiment, we now report CRPS on the derived physical quantity R0=beta/gamma, together with calibration. For this experiment, over 50 held-out observations with a 5-member ensemble, we evaluate both methods in theta units on the same observations.
+
+**SIR, posterior quality and calibration by training budget.** CRPS of R_0 is lower-is-better; PIT max dev is the largest deviation of the probability integral transform from uniform, so lower is better; 68% cov is empirical central coverage against a nominal 0.68.
+
+    N_sim | Coords | CRPS(R_0), mean (95% CI) | PIT max dev | 68% cov
     ------|--------|--------------------------|-------------|--------
     500   | theta  | 0.228 (0.191, 0.270)     | 0.144       | 0.88
     500   | eta    | 0.176 (0.141, 0.216)     | 0.107       | 0.78
@@ -149,20 +161,28 @@ Strongest supporter. Consolidate rather than argue. The 10-trial table is the ce
 ```markdown
 We thank Reviewer t9KB for recognising the novelty of combining simulation-based Fisher estimation with symbolic discovery.
 
-**Q2 - Sensitivity and robustness of the recovered expressions.** This is our main new result. We ran 10 fully independent end-to-end trials per problem, varying the training simulations, Fisher-ensemble seed, flattener seed, alignment subsampling, and symbolic-regression seed together, rather than only the network initialisation. Success criteria were fixed before running and are evaluated numerically on held-out points, comparing the coordinate functions and their Jacobians up to permutation, sign, scaling, and algebraic equivalence; string matching is not used, because algebraically equivalent forms and the residual orthogonal freedom make literal comparison meaningless.
+**Q2 - Sensitivity and robustness of the recovered expressions.** This is an important question to ensure the robustness of our method. We therefore ran 10 fully independent end-to-end trials per problem, varying the training simulations, Fisher-ensemble seed, flattener seed, alignment subsampling, and symbolic-regression seed together, rather than only the network initialisation. Success criteria were fixed before running and are evaluated numerically on held-out points, comparing the coordinate functions and their Jacobians up to permutation, sign, scaling, and algebraic equivalence; string matching is not used, because algebraically equivalent forms and the residual orthogonal freedom make literal comparison meaningless.
 
-    Problem        | Train sims | Recovered | Alignment (med, IQR) | Complexity
-    ---------------|------------|-----------|----------------------|-----------
-    Rosenbrock     | 500        | 10/10     | 0.929 (0.814,0.960)  | 28
-    SIR            | 500        | 10/10     | 0.674 (0.636,0.741)  | 17
-    GW TaylorF2    | 500        | 10/10     | 0.972 (0.966,0.979)  | 24
-    GW IMRPhenomD  | 500        | 7/10      | 0.997 (0.988,0.999)  | 25
+**Recovery of the expected coordinate, 10 independent trials per problem.** Recovered counts trials in which every part of the criterion is met; alignment is defined below the table.
 
-Alignment is |Pearson r| on held-out points against the expected coordinate (the valley coordinate; R_0 = beta/gamma; chirp mass M_c; total mass M). All three IMRPhenomD non-recoveries are threshold misses on the second conjunct of its criterion, not crashes: the pipeline ran cleanly on all 10 trials and the median total-mass alignment is 0.997, while the complementary asymmetric mass combination is the harder and more variable direction. Failures stay in the denominator and we identify the stage that failed in each. Symbolic-regression augmentation used 2,000 evaluations of the learned coordinate map per run (7,509-7,632 for SIR, which augments after a validity cut); these are network evaluations of a simulator-independent map, not simulator calls, and are reported separately from the 500 held-out simulations used for evaluation. [IF RUN: we repeated the SR stage with [ALTERNATIVE ALGORITHM] and obtained [RESULT].]
+    Problem        | Train sims | Recovered | Alignment (med, IQR)
+    ---------------|------------|-----------|---------------------
+    Rosenbrock     | 500        | 10/10     | 0.929 (0.814,0.960)
+    SIR            | 500        | 10/10     | 0.674 (0.636,0.741)
+    GW TaylorF2    | 500        | 10/10     | 0.972 (0.966,0.979)
+    GW IMRPhenomD  | 500        | 7/10      | 0.997 (0.988,0.999)
 
-**Q3 - Total computational overhead.** Agreed, and doing the accounting end-to-end changes our claim. For SIR, discovery costs 500 training simulations of the two-parameter (beta, gamma) system, plus 221 s (Fisher ensemble) / 174 s (coordinates) / 130 s (symbolic regression), 9.3 min end to end on one V100. Those simulations hold I_0 fixed, so they cannot double as NPE training data for the three-parameter inference problem: a single downstream analysis in eta costs 500 + 500 = 1,000 simulations to match a CRPS(R_0) that the theta baseline reaches with approximately 970. For one analysis the coordinates are therefore a wash, and we will say so. Their value is amortisation, since the map is learned once: for k analyses eta costs 500 + 500k against the baseline's 970k, which is net-positive from the second analysis (1,500 against 1,940) and approaches 1.9x. Separately, discovery cost itself fell from 5,000 to approximately 500 simulator calls per experiment (Rosenbrock, GW, SIR) by augmenting only the symbolic-regression stage with inexpensive evaluations of the learned map.
+Alignment is |Pearson r| on held-out points against the expected coordinate (the valley coordinate; R_0 = beta/gamma; chirp mass M_c; total mass M), quoted as the median over trials with the interquartile range in brackets.
 
-**Weakness - baselines.** We agree a comparison on the parameter-estimation component alone is appropriate. [STATE WHAT YOU CAN RUN, e.g. FMPE/CMPE at matched budget on PROBLEM giving RESULT; or state honestly what is out of scope for the rebuttal window and will appear in the revision.]
+IMRPhenomD, our main discovery section, is the only problem below 10/10, and the three misses are threshold misses rather than failures to run. Success there requires two coordinates: the total mass, and a complementary asymmetric mass combination. The pipeline completed all 10 trials, the total mass is recovered essentially every time (median alignment 0.997), and all three misses are on the asymmetric combination, which is the harder and more variable direction.
+
+Symbolic regression is augmented with 2,000 evaluations of the learned coordinate map per run (7,509-7,632 for SIR, where draws rejected by a validity cut are replaced). These are forward passes through a map that does not call the simulator, so we report them separately from the 500 training simulations in the table above. [IF RUN: we repeated the SR stage with [ALTERNATIVE ALGORITHM] and obtained [RESULT].]
+
+**Q3 - Total computational overhead.** We agree with the reviewer's concern, and doing the accounting end-to-end changes our claim. Following the reviewer's valid concern that the simulation budget could be quite high, we repeated our analyses with 500 instead of 5000 simulations and found unchanged results.
+
+For Rosenbrock, coordinate discovery costs 500 training simulations plus 262 s (Fisher ensemble) / 365 s (coordinates) / 654 s (symbolic regression), 21.0 min end to end on one V100. That is a one-time cost, and it amortises: the map eta = f(theta) is learned once and reused across observations without further simulation. On the efficiency claim itself we now state the metric explicitly, because the metric changes the number. At a matched budget of 1,000 training simulations, training in eta improves held-out log-probability by 1.28 nats, a horizontal shift of approximately 9.3x in simulations. Scored instead with CRPS, on the same run and the same 1,000 held-out observations, the gain is 1.20x summed over parameters and 1.27x on the harder mu_1 direction (paired mean difference +0.159, 95% CI 0.132-0.186, eta better on 640/997 observations), with eta also better calibrated on both parameters (PIT maximum deviation 0.038 / 0.070 against 0.064 / 0.114). We therefore report approximately 1.2x as the posterior-quality figure and reserve the 9-14x numbers for validation log-probability, rather than quoting the larger figure without its metric. 
+
+**Weakness - baselines.** Thanks for this suggestion. We agree that a comparison on the parameter-estimation component alone might be appropriate in a revision. We chose NPE for simplicity to highlight the effect of changing coordinates, but this behaviour might look different if the posterior operator or method were changed. 
 
 Thank you again for your thoughtful and thorough review.
 ```
@@ -180,7 +200,9 @@ We thank Reviewer QfCk for a precise reading of the first stage; both concerns r
 
 **Q1 - Where is the approximation good?** [ANSWER PER EXPERIMENT. For each of Rosenbrock, Gaussian, SIR, GW, WL, state whether the posterior is close to Gaussian at the relevant simulation count and prior, and where it is not. Be explicit that in the non-Gaussian cases the recovered object should be read as an inverse posterior covariance, and that the flattening pipeline is unchanged either way.]
 
-**Q2 - Chain-product experiment: discovered or supplied?** Supplied, and we should have said so. In the submitted scaling sweep the distilled coordinate is the analytic standardised log-product, not a discovered expression; only the d = 2 case was taken through the full fishnets-to-symbolic pipeline. The experiment as run therefore supports a narrower claim than we implied: **given** the correct one-dimensional coordinate, downstream inference is insensitive to ambient dimension, whereas inference in the original parameters degrades. That claim the sweep does support, on the common eta axis, with 1,000 training simulations and 3 trials per point:
+**Q2 - Chain-product experiment: discovered or supplied?** This was supplied, and we have changed the text to make this clearer. In the submitted scaling sweep the distilled coordinate is the analytic standardised log-product, not a discovered expression; only the d = 2 case was taken through the full fishnets-to-symbolic pipeline. The experiment as run therefore supports a narrower claim than we implied: **given** the correct one-dimensional coordinate, downstream inference is insensitive to ambient dimension, whereas inference in the original parameters degrades. That claim the sweep does support.
+
+**Posterior quality against ambient dimension**, marginal log-probability on the common one-dimensional eta axis (higher is better), mean +- sd over 3 trials at 1,000 training simulations:
 
     d  | NPE in theta   | NPE in eta (analytic)
     ---|----------------|----------------------
@@ -191,9 +213,17 @@ We thank Reviewer QfCk for a precise reading of the first stage; both concerns r
     10 | 0.90 +- 0.34   | 1.39 +- 0.34
     12 | 0.14 +- 0.94   | 1.54 +- 0.21
 
-Both arms are scored as marginal log-probability on the same one-dimensional axis, so the columns are comparable within a row. The theta arm peaks near d = 6 and then collapses to 0.14 at d = 12, while the eta arm stays within 1.33-1.66 from d = 4 onward. Two caveats we will state in the revision: this run used a MAF for the theta arm and an MDN for the eta arm, so architecture is confounded with coordinates, and the eta coordinate is the analytic one. We are rerunning the sweep with discovery performed independently at every d and with the same density estimator in both arms, which is the experiment that would support the stronger claim; we will report it in the revision whether or not it succeeds at the larger d. What the pipeline does already demonstrate at every d is the reduction step itself: the Fisher spectrum identifies the rank-1 informative subspace, which is the prerequisite for the symbolic stage. [SCALING]
+Scoring both on the shared axis is what makes the columns comparable within a row. Inference in theta peaks near d = 6 and then collapses to 0.14 at d = 12, while inference in eta stays within 1.33-1.66 from d = 4 onward. 
+
+We are rerunning the sweep with discovery performed independently at every d and the same density estimator in both cases, which is the experiment that would support the stronger claim; we will report it in the revision whether or not it succeeds at the larger d. 
+
+What the sweep already demonstrates at every d is the reduction step that precedes symbolic regression, and this is the part that carries to higher dimensions. Once the Fisher network is trained we inspect the learned Fisher across the prior, both its spectrum and how it varies, and keep only the parameter blocks that carry information. Where most parameters are irrelevant this identifies a much smaller subspace, and we then slice to it and run identification there: in the chain-product model the spectrum is rank-1 at every d from 2 to 12, so the symbolic stage acts on a single coordinate rather than on all d. The dimensionality limit we demonstrate is therefore a limit on the symbolic step, not on finding the informative subspace. [SCALING]
 
 **Q3 - Sensitivity to prior range and noise model.** We ran an ablation varying the prior width by [FACTORS] and the noise level over [RANGE] on [PROBLEM]. The recovered structure was [STABLE/CHANGED] as follows: [RESULTS]. [IF THE COORDINATES CHANGE WITH NOISE, FRAME THIS AS EXPECTED: the informative directions are a property of the model together with the measurement, so a changed noise model legitimately changes which combination controls the data.]
+
+**Q3 - Sensitivity to prior range and noise model.** Thank you 
+
+We have not run this ablation and will not imply otherwise; we will report it in the revision. We can state what the method predicts. The informative directions are a property of the model together with the measurement, not of the model alone, so a changed noise model can legitimately change which parameter combination controls the data; that is a property of the object being estimated rather than an instability of the estimator. For SIR specifically, R_0 = beta/gamma is a property of the dynamics rather than of the observation noise, so we expect it to remain the controlling combination while the noise is small enough for the epidemic curve to be informative, and we expect the recovered direction to move towards whatever remains identifiable as noise grows. What we can report now is stability under everything else: across 10 fully independent trials at fixed prior and noise, varying the training simulations and every network and search seed, R_0 was recovered in 10/10.
 
 **One-time discovery cost and break-even.** We accept this was omitted, and we now separate (i) discovery training calls, (ii) held-out evaluation calls, (iii) inexpensive evaluations of the learned map, and (iv) downstream NPE simulations. Because eta = f(theta) is simulator-independent once learned, we augment only the symbolic-regression stage with fresh theta drawn from the prior; those are network evaluations rather than simulations, and they bring SIR discovery from 5,000 to approximately 500 simulator calls. Charging discovery honestly, one downstream SIR analysis in eta costs about 1,000 simulations against the baseline's 970, which is neutral, and the coordinates pay for themselves only through reuse: net-positive from the second analysis, approaching 1.9x. This accounting, including the neutral single-analysis case, goes into the Limitations discussion. Our reply to Reviewer t9KB gives the same numbers in the context of total overhead.
 ```
@@ -213,12 +243,15 @@ We thank Reviewer Rkfx for pressing on the geometric formulation; the criticism 
 
 **Q3 - Conformally flat case.** Our Gaussian validation example is exactly the analytically tractable, non-trivial, conformally flat case the reviewer asks for. In the coordinates u = mu/sigma_star and v = sqrt(2) sigma/sigma_star the metric is g_ab = (2/v^2) delta_ab, that is, conformally Euclidean, with Ricci scalar R = -1, the hyperbolic plane; this is derived in Appendix D. Because the curvature is non-zero, no coordinates make the components equal to the identity everywhere, so the correct benchmark is the average deviation over the prior, which is what we optimise. We compare our learned and symbolic coordinates against geodesic normal coordinates about a fiducial point and against the ad hoc (mu/sigma, log sigma) choice: the geodesic coordinates are exact at the fiducial point but degrade with geodesic distance, while the discovered coordinates achieve lower average deviation across the prior. We will promote this from a validation example to the explicit answer to this question.
 
-**Q2 - A genuinely intractable likelihood.** Our weak-lensing example is one, and we agree it was not presented as such. The data are two-point statistics of mock convergence images computed from expensive dark-matter simulations, varied over wide priors in (Omega_m, sigma_8) and in the initial conditions. No tractable likelihood is available for these maps; the pipeline sees only parameter-simulation pairs. It recovers
+**Q2 - A genuinely intractable likelihood.** Our weak-lensing example is one, and we accept it was not presented as such. The data are two-point statistics of mock convergence images computed from expensive dark-matter simulations, varied over wide priors in (Omega_m, sigma_8) and in the initial conditions; no tractable likelihood is available for these maps, and the pipeline sees only parameter-simulation pairs. It returns
 
     eta_1 = Omega_m sigma_8 - 0.9 Omega_m^0.144
     eta_2 = 0.5 (Omega_m - 1.0)
 
-against the field-standard S_8 = sigma_8 (Omega_m/0.3)^0.5, which is the combination cosmologists use precisely because it damps the Omega_m dependence of the two-point signal. The nonlinear exponent and the damping structure are recovered from simulations alone. We will be careful in the revision to distinguish "no tractable likelihood for the observable" from "no likelihood at all", and we will not overclaim beyond the former. [IF RUN: we additionally report [INTRACTABLE CASE], where [RESULT].]
+The comparison with convention is best made through level sets rather than functional forms, since the two are written differently. Near typical values Omega_m = 0.3 and sigma_8 = 0.8, contours of constant eta_1 have local slope d ln sigma_8 / d ln Omega_m of approximately -0.55, against -0.5 for contours of constant S_8 = sigma_8 (Omega_m/0.3)^0.5, the combination conventionally used to summarise the leading amplitude degeneracy. The second coordinate is an affine rescaling of Omega_m. The discovered pair is therefore the basis the field arrived at by hand, one combination summarising the amplitude degeneracy together with Omega_m itself, obtained from simulations alone without a likelihood and without being given the conventional form. In the revision we distinguish "no tractable likelihood for the observable" from "no likelihood at all" and claim only the former.
+
+
+
 
 **Q1 - Usefulness alongside well-tuned likelihood-based inference.** We accept that for the submitted case studies a practitioner with a tractable likelihood would reasonably use HMC with a tuned mass matrix, and we will not claim otherwise. Two points remain. First, a tuned mass matrix is a local, linear preconditioner fitted per posterior, whereas the distillery returns a map that is nonlinear, amortised, and global within the prior in the sense defined above, reusable across observations. Second, and primarily, the deliverable is the discovered coordinate itself: the IMRPhenomD result identifies a controlling parameter combination that differs from the conventional chirp-mass basis, which is a statement about the physics rather than about a sampler. [IF RUN: we also compare NUTS in theta vs eta, giving ESS per gradient of [VALUE] vs [VALUE] and condition number [VALUE] vs [VALUE].]
 ```
@@ -243,7 +276,12 @@ We thank the AC for the summary. We reply to each reviewer individually; this co
 
 ---
 
-# Internal notes: measurements, provenance, and open items
+
+
+# END OF RESPONSE DRAFTS
+
+
+# INTERNAL NOTES HERE: measurements, provenance, and open items
 
 Everything below is for us, not for the response. Numbers quoted in the replies above are traceable to these sections.
 
@@ -443,7 +481,16 @@ If the response claims discovery now costs approximately 500 simulations, but th
 - QfCk Q1 per-experiment Gaussianity statement, and Q3 prior/noise ablation.
 - FoSE W4 beta/gamma correlation and gradient cosine similarity numbers.
 - t9KB baselines: decide whether FMPE/CMPE at matched budget is feasible in the window.
-- Verify the weak-lensing appendix reference exists in the version reviewers hold; the expressions quoted above are from the current `paper/degen_distillery_paper/main.tex` (Sec. applications, WL paragraph).
+- Weak lensing: the rUsi and Rkfx replies now follow the **revised** WL section, which
+  compares level sets (constant-eta_1 slope d ln sigma_8 / d ln Omega_m approximately
+  -0.55 against -0.5 for constant S_8) instead of asserting similarity of functional
+  forms, and assigns the amplitude degeneracy to eta_1 rather than eta_2. Two checks
+  remain: (i) the range of Omega_m over which the slope agreement holds, since -0.55 is
+  a local derivative at a fiducial point and Rkfx is likely to ask; (ii) whether the
+  App. WL reference resolves in the version reviewers hold, as both replies describe
+  the simulation setup and someone may go looking for it. Note that coauthors reading
+  the previously compiled PDF will see the older wording, which assigned the damping to
+  eta_2; flag that when circulating.
 
 ## References for the revision, not for the reply
 

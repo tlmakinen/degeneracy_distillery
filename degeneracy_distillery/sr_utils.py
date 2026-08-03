@@ -1479,15 +1479,19 @@ def compute_DL(eq: str, component_idx: int, X: np.ndarray, y: np.ndarray,
         jacobian = dy_sr.copy()
         jacobian[:, component_idx, :] = np.array(jac_row)
 
-        # Flatten Fisher matrices
+        # Flatten Fisher matrices into η-space.  For J shape (m, d) the
+        # pullback invJ.T @ F @ invJ is (m, m), so compare to I_m — not I_d.
+        # (The old eye(n_params) only worked when m == d.)
         def flatten_fisher(J, F):
             invJ = jnp.linalg.pinv(J)
             return invJ.T @ F @ invJ
 
         flats = jax.vmap(flatten_fisher)(jacobian, Fs)
         nn_flats = jax.vmap(flatten_fisher)(dy_sr, Fs)
-        
-        fn = lambda q: norm((q - jnp.eye(n_params))) + norm((jnp.linalg.pinv(q) - jnp.eye(n_params)))
+
+        n_out = int(dy_sr.shape[1])
+        eye_out = jnp.eye(n_out)
+        fn = lambda q: norm((q - eye_out)) + norm((jnp.linalg.pinv(q) - eye_out))
 
         return np.mean(jax.vmap(fn)(flats) - jax.vmap(fn)(nn_flats))
     

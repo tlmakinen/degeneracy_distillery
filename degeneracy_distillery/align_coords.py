@@ -317,29 +317,49 @@ def fisher_order_canonicalize(
     R = np.asarray(R, dtype=np.float64)
     dy = np.asarray(dy, dtype=np.float64)
     D_out = R.shape[0]
+    D_in = dy.shape[-1]
 
     # Row direction in θ-space: where does the rotated Jacobian point on average?
     J_rot_mean = np.einsum("ij,bjk->ik", R, dy) / max(dy.shape[0], 1)  # (D_out, D_in)
 
     # Fisher eigenbasis (ascending) — reference axis directions in θ-space
     _, eigvecs = mean_fisher_eigen(Fs, prior_scales=prior_scales, ascending=True)
+    # eigvecs: (D_in, D_in).  When D_out != D_in the η-frame is rectangular;
+    # match against the D_out flattest Fisher directions (same convention as
+    # the square case, which uses all of them).
+    n_match = min(D_out, D_in)
+    evecs_match = eigvecs[:, :n_match]  # (D_in, n_match)
 
     if mode == "permute_and_sign":
-        # Greedy match each Fisher eigenvector to the best-aligned rotated axis
+        # Greedy match each selected Fisher eigenvector to the best-aligned
+        # rotated axis.  corr is (D_out, n_match), not necessarily square.
         taken = np.zeros(D_out, dtype=bool)
-        perm = np.empty(D_out, dtype=int)
-        corr = np.abs(J_rot_mean @ eigvecs)  # (D_out, D_out)
-        for k in range(D_out):
+        perm = np.empty(n_match, dtype=int)
+        corr = np.abs(J_rot_mean @ evecs_match)  # (D_out, n_match)
+        for k in range(n_match):
             scores = corr[:, k].copy()
             scores[taken] = -np.inf
             row = int(np.argmax(scores))
             perm[k] = row
             taken[row] = True
-        R = R[perm]
-        J_rot_mean = J_rot_mean[perm]
+        # Keep any unmatched η-axes (D_out > D_in) at the end, stable order.
+        leftovers = [i for i in range(D_out) if not taken[i]]
+        full_perm = np.concatenate([perm, np.asarray(leftovers, dtype=int)])
+        R = R[full_perm]
+        J_rot_mean = J_rot_mean[full_perm]
 
-    # Sign fix: make <J_rot_mean[i], eigvecs[:, i]> non-negative
-    inner = np.einsum("ij,ji->i", J_rot_mean, eigvecs)
+    # Sign fix against the matched Fisher directions.
+    # Always use the rectangular-safe path: J_rot_mean is (D_out, D_in) while
+    # eigvecs is (D_in, D_in), so the old square einsum "ij,ji->i" breaks when
+    # D_out != D_in.  After permute_and_sign, row i is paired with
+    # evecs_match[:, i] for i < n_match; leftover rows (D_out > D_in) use the
+    # best-aligned matched evec.
+    corr_signed = J_rot_mean @ evecs_match  # (D_out, n_match)
+    if mode == "permute_and_sign" and D_out == n_match:
+        inner = corr_signed[np.arange(D_out), np.arange(D_out)]
+    else:
+        best = np.argmax(np.abs(corr_signed), axis=1)
+        inner = corr_signed[np.arange(D_out), best]
     signs = np.where(inner >= 0, 1.0, -1.0)
     R = signs[:, None] * R
 

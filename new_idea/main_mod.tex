@@ -1,0 +1,594 @@
+\documentclass[11pt, letterpaper]{article}
+
+% --- Packages ---
+\usepackage[margin=1in]{geometry} % Sets margins to 1 inch
+\usepackage{fancyhdr}             % For custom headers and footers
+\usepackage{amsmath, amssymb}     % For math equations and symbols
+\usepackage{amsthm}               % For theorems and definitions (before newtx: \openbox clash)
+\usepackage{newtxtext,newtxmath}
+\usepackage{bm}
+\usepackage{hyperref}             % For clickable links (TOC, URLs)
+\usepackage[capitalise]{cleveref} % must follow hyperref
+\usepackage{lastpage}             % To reference the total page count
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}   % from the algorithmicx package
+
+% --- Header and Footer Setup ---
+\pagestyle{fancy}
+\fancyhf{} % Clear default header and footer
+
+% EDIT HERE: Your details
+\newcommand{\MyName}{T. Lucas Makinen}
+\newcommand{\MyInstitution}{University of Cambridge}
+\newcommand{\MyCourse}{Active dim degeneracy detection (mod: no-screen protocol)}
+\newcommand{\MyDate}{\today}
+
+% Header configuration
+\lhead{\small \MyName \\ \MyInstitution} % Left Header: Name & Inst
+\rhead{\small \MyCourse \\ \MyDate}      % Right Header: Course & Date
+
+% Footer configuration
+\cfoot{\thepage \ of \pageref{LastPage}} % Center Footer: Page X of Y
+
+% Ensure header separation from text
+\setlength{\headheight}{24pt}
+
+% --- Custom Environments (Optional) ---
+\newtheorem{theorem}{Theorem}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{example}{Example}
+\newcommand{\matrixss}[1]{\ensuremath{\bm{\mathsf{#1}}}}
+
+% --- Document Start ---
+\begin{document}
+
+% Title Block
+\begin{center}
+    {\Large \textbf{\MyCourse}} \\ [0.5em]
+    % {\large \MyName \ | \ \MyInstitution} \\ [0.2em]
+    {\small \MyDate}
+\end{center}
+\hrule
+\vspace{1em}
+
+% Table of Contents (Optional - comment out if not needed)
+% \tableofcontents
+\vspace{1em}
+% \hrule
+% \vspace{2em}
+
+% --- Main Content Starts Here ---
+\section*{Main Idea}
+
+\section*{Amortised posterior in learned coordinates}
+
+\paragraph{Setup.}
+Parameters $\theta\in\Theta\subseteq\mathbb{R}^d$ with prior $\pi$, simulator
+$x\sim p(\cdot\mid\theta)$. Fix an \emph{active} index set
+$A\subset\{1,\dots,d\}$ with $|A|=m$ and complement $B$, and write
+$\theta=(\theta_A,\theta_B)$. Learn two maps,
+\[
+  \eta_\phi:\mathbb{R}^d\to\mathbb{R}^m
+  \quad\text{(coordinates, data--independent)},
+  \qquad
+  \hat\eta_\psi:\mathcal{X}\to\mathbb{R}^m
+  \quad\text{(estimator)} .
+\]
+
+\paragraph{Model.}
+Let $T(\theta)=\bigl(\eta_\phi(\theta),\,\theta_B\bigr)$ and
+$J_A(\theta)=\partial\eta_\phi/\partial\theta_A\in\mathbb{R}^{m\times m}$.
+Assume $T$ is a diffeomorphism on $\operatorname{supp}\pi$, which by
+block-triangularity holds iff $\det J_A\neq0$. Define
+\begin{equation}
+  q_{\phi\psi}(\theta\mid x)
+  \;=\;
+  \mathcal{N}\bigl(\eta_\phi(\theta);\,\hat\eta_\psi(x),\,I_m\bigr)\;
+  \pi_B(\theta_B)\;
+  \bigl|\det J_A(\theta)\bigr| ,
+  \label{eq:model}
+\end{equation}
+Here $\pi_B$ is the marginal prior of $\theta_B$. Substitute
+$u=\eta_\phi(\theta_A;\theta_B)$ at fixed $\theta_B$ to get
+$\int q\,d\theta_A=1$. Therefore $q$ integrates to one, and
+$q(\theta_B\mid x)=\pi_B(\theta_B)$. The model states that $x$ is marginally
+uninformative about $\theta_B$. It \emph{holds those components at the prior}.
+For $m=d$ the set $B$ is empty, and \eqref{eq:model} is the usual change of
+variables.
+
+\paragraph{Objective.}
+\begin{equation}
+  \mathcal{L}(\phi,\psi)
+  = -\,\mathbb{E}_{\theta\sim\pi,\;x\sim p(\cdot|\theta)}\bigl[\log q_{\phi\psi}(\theta\mid x)\bigr]
+  = \mathbb{E}\Bigl[\tfrac12\bigl\|\eta_\phi(\theta)-\hat\eta_\psi(x)\bigr\|^2
+    - \log\bigl|\det J_A(\theta)\bigr|\Bigr]
+    + \tfrac{m}{2}\log 2\pi + H(\pi_B),
+  \label{eq:loss}
+\end{equation}
+The term $H(\pi_B)$ is a constant. The objective inverts no matrix and needs no
+Fisher matrix.
+
+\paragraph{Proposition 1 (what the objective optimises).}
+$\mathcal{L}=\mathbb{E}_x\bigl[\mathrm{KL}\bigl(p(\theta\mid x)\,\|\,q(\theta\mid x)\bigr)\bigr]+H(\theta\mid x)$,
+so $\mathcal{L}\ge H(\theta\mid x)=H(\theta)-I(\theta;x)$, with equality if and
+only if $q=p(\theta\mid x)$. The objective rules out the collapse
+$\eta_\phi\equiv\mathrm{const}$, which sends $-\log|\det J_A|\to+\infty$.
+
+\paragraph{Proposition 2 (relation to the Fisher target).}
+Take $m=d$ and let $\theta^\star$ satisfy $\eta_\phi(\theta^\star)=\hat\eta_\psi(x)$.
+Then $-\log q=\tfrac12(\theta-\theta^\star)^\top J^\top J(\theta-\theta^\star)+O(\|\cdot\|^3)$,
+so $q$ has precision $J^\top J$. Matching the posterior precision $F$ gives
+\begin{equation}
+  J^\top J = F
+  \quad\Longleftrightarrow\quad
+  Q \;:=\; J^{-\top} F\, J^{-1} = I ,
+\end{equation}
+the two-stage flattening condition. The stationary points coincide. The route
+to them does not need $J^{-1}$, $F^{-1}$, or $\operatorname{rank}F=d$.
+
+\paragraph{Proposition 3 (uninformative directions, and the plateau).}
+Suppose an active coordinate $\eta_i$ gets no information from $x$. The optimal
+$\hat\eta_i$ is then constant. Minimise
+$\mathbb{E}_{r}\bigl[\tfrac12(v(r)-c)^2-\log|v'(r)|\bigr]$ over scalar maps $v$.
+The minimiser is the transport $v=\Phi^{-1}\!\bigl(F_r(r)\bigr)$. There the
+induced density equals $p_r$, and the contribution to $\mathcal{L}$ is $H(p_r)$.
+This equals exactly what the matching pass-through term contributes. An
+uninformative active coordinate therefore changes $\mathcal{L}^\star$ by zero.
+
+\paragraph{Corollary (intrinsic dimension).}
+Let $r$ be the least $m$ such that $p(x\mid\theta)=p\bigl(x\mid s(\theta)\bigr)$
+for some $s:\mathbb{R}^d\to\mathbb{R}^m$, and let
+$\mathcal{L}^\star(m)=\min_{|A|=m}\min_{\phi,\psi}\mathcal{L}$. Then
+$\mathcal{L}^\star$ is non-increasing. If the posterior is Gaussian in the
+optimal coordinates, then
+\begin{equation}
+  \mathcal{L}^\star(m) > \mathcal{L}^\star(r) = H(\theta\mid x)
+  \;\;\text{for } m<r,
+  \qquad
+  \mathcal{L}^\star(m) = \mathcal{L}^\star(r) \;\;\text{for } m\ge r .
+\end{equation}
+The plateau onset estimates $r$ from a likelihood rather than an eigengap.
+
+\paragraph{Information spectrum.}
+At the optimum the posterior covariance in $\eta$ is $I_m$. The prior covariance
+eigenbasis is therefore canonical, and needs no Procrustes or varimax step:
+\begin{equation}
+  \lambda_i \;=\; \operatorname{Var}_\pi(\eta_i)
+  \;=\; \frac{\operatorname{Var}_{\text{prior}}}{\operatorname{Var}_{\text{post}}},
+  \qquad
+  \tfrac12\log\lambda_i \;=\; \text{information gain of axis } i \text{ (nats)} .
+\end{equation}
+Uninformative axes give $\lambda_i=1$ by Proposition 3.
+
+\paragraph{Worked example.}
+$\mu(\theta)=(\theta_1,\;\theta_2-\theta_1^2,\;\theta_3,\;\theta_4)$,
+$n$ i.i.d.\ replicates with $\varepsilon\sim\mathcal{N}(0,\operatorname{diag}(s_1^2,\dots,s_4^2))$,
+$\pi=\mathcal{U}[-a,a]^4$, $w=2a$, and $s_3=s_4=S\to\infty$. The exact solution is
+\[
+  \eta_1=\frac{\sqrt n}{s_1}\theta_1,\qquad
+  \eta_2=\frac{\sqrt n}{s_2}\bigl(\theta_2-\theta_1^2\bigr),\qquad
+  \det J_A=\frac{n}{s_1s_2},\qquad
+  \lambda=\Bigl(\tfrac{n a^2}{3s_1^2},\;\tfrac{n}{s_2^2}\bigl(\tfrac{a^2}{3}+\tfrac{4a^4}{45}\bigr),\;1,\;1\Bigr).
+\]
+With $A=\{1,2\}$,
+\begin{equation}
+  \mathcal{L}^\star(2)=1-\log\frac{n}{s_1s_2}+\log 2\pi+2\log w,
+  \qquad
+  \mathcal{L}^\star(1)=\mathcal{L}^\star(2)+\log w-\tfrac12+\log\frac{\sqrt n}{s_2}-\tfrac12\log 2\pi .
+\end{equation}
+Set $n=50$, $s=(1,2,\infty,\infty)$ and $a=3$. Then
+$\lambda=(150,\,127.5,\,1,\,1)$, and
+$\mathcal{L}^\star=(4.838,\,3.203,\,3.203,\,3.203)$ nats per sample for
+$m=1,2,3,4$. The gain from $m=1$ to $m=2$ is $1.636$, and every later gain is
+zero, so $r=2$.
+
+\paragraph{Remark (sub-rank models are conditional).}
+The value $\mathcal{L}^\star(1)=4.838$ above is the optimum \emph{restricted} to
+maps $\eta_\phi=\eta_\phi(\theta_A)$. Equation \eqref{eq:model} lets $\eta_\phi$
+read all of $\theta$. Its first factor is then $q(\theta_A\mid\theta_B,x)$, not
+$q(\theta_A\mid x)$. For $m<r$ the model can therefore exploit dependence
+between $\theta_A$ and $\theta_B$ under the likelihood. Take the worked example
+with $A=\{1\}$. Conditioning on $\theta_2$ makes $\bar x_2$ informative about
+$\theta_1^2$, which raises the Fisher information for $\theta_1$ from $n/s_1^2$
+to $n/s_1^2+4n\theta_1^2/s_2^2$. Hence
+\begin{equation}
+  \mathcal{L}^\star(1)\;\ge\;4.838-\tfrac12\,\mathbb{E}_\pi
+  \log\!\Bigl(1+\tfrac{4s_1^2}{s_2^2}\theta_1^2\Bigr)
+  \;=\;4.838-0.568\;=\;4.271 .
+\end{equation}
+
+Only part of this bound is reachable. The estimator $\hat\eta_\psi$ enters as a
+single location shift. It therefore cannot reproduce how the true conditional
+depends on both of its arguments. The $d=20$ experiment below reaches $0.332$
+of the $0.568$ bound. Two consequences follow. First, the plateau \emph{location} does not
+move, because Proposition 3 concerns $m\ge r$, and
+$\mathcal{L}^\star(m)>\mathcal{L}^\star(r)$ still holds strictly for $m<r$.
+Second, the measured gain $\mathcal{L}^\star(m)-\mathcal{L}^\star(m+1)$
+\emph{underestimates} the information in the promoted axis. Read a gain as
+per-axis information only when $\eta_\phi$ reads $\theta_A$ alone.
+
+\section*{Estimation}
+
+\paragraph{Hard-cut model versus rectangular map.}
+Equation \eqref{eq:model} needs a tractable complement prior $\pi_B$.
+A box prior forces $A$ to be a coordinate subset.
+A free subspace complement has an Irwin--Hall marginal with no closed form.
+The hard-cut model screens first, then fits $\eta_\phi(\theta_A)$.
+Its volume term is $\log|\det J_A|$.
+Absolute NLL then matches the box floor
+$(d-m)\log w+\tfrac m2\log 2\pi$.
+
+The experiments below use a rectangular map instead.
+Let $\eta_\phi:\mathbb{R}^d\to\mathbb{R}^m$ read all of $\theta$.
+The Jacobian $J=\partial\eta_\phi/\partial\theta$ lies in
+$\mathbb{R}^{m\times d}$.
+Train the geometry objective
+\begin{equation}
+  \mathcal{L}_{\mathrm{geom}}(\phi,\psi)
+  = \mathbb{E}\Bigl[\tfrac12\bigl\|\eta_\phi(\theta)-\hat\eta_\psi(x)\bigr\|^2
+    - \tfrac12\log\det\bigl(JJ^\top\bigr)\Bigr]
+    + \tfrac{m}{2}\log 2\pi .
+  \label{eq:geom}
+\end{equation}
+This map has no hard cut and no $(d-m)\log w$ term.
+Do not compare its absolute NLL to the box floor.
+Compare maps by spectrum, $R^2$, column norms, and paired NLL.
+
+A soft group $\ell_1$ on the input columns of $\eta_\phi$ can shrink unused
+coordinates. It does not define a complement prior.
+The factor $\tfrac12\log\det(JJ^\top)$ is the log Gram volume of the image of
+$J$. It replaces $\log|\det J_A|$ when $J$ is rectangular.
+On the informative subspace with $m=\operatorname{rank}F$, the stationary
+flattening condition is still $Q=J^{-\top}FJ^{-1}=I$.
+Spare axes settle near the prior-transport null of Proposition~3.
+
+\paragraph{Optional hard screen.}
+Use this step only for the hard-cut model.
+A search over coordinate subsets costs $\binom dm$ fits.
+Screen once instead.
+Fit one regression $g_\chi:\mathbb{R}^d\to\mathbb{R}^{\dim t}$.
+Put a group penalty on the columns of its first weight matrix
+$W^{(1)}\in\mathbb{R}^{d\times h}$,
+\begin{equation}
+  \min_\chi\;\mathbb{E}\bigl\|t(x)-g_\chi(\theta)\bigr\|^2
+  \;+\;\lambda\sum_{j=1}^{d}\bigl\|W^{(1)}_{j,:}\bigr\|_2 ,
+  \label{eq:screen}
+\end{equation}
+Rank the coordinates by $\|W^{(1)}_{j,:}\|_2$.
+Set $A_m=\{\text{top }m\}$.
+
+The rectangular map skips this step.
+
+\paragraph{Soft screen after the fit.}
+After a rectangular fit, rank ambient coordinates by RMS Jacobian column norms
+\begin{equation}
+  c_j \;=\; \Bigl(\mathbb{E}\bigl\|J_{:,j}\bigr\|^2\Bigr)^{1/2},\qquad
+  j=1,\dots,d .
+  \label{eq:softscreen}
+\end{equation}
+This ranking is a diagnostic. It is not a hard cut.
+On the $d=20$ Rosenbrock problem the top two columns recover the true pair.
+On the gravitational-wave example the mass sector ranks above the weakly
+informed extrinsics. Bootstrap the same ranking to get a recovery frequency.
+
+\paragraph{Calibration.}
+The residual claim is
+$z:=\eta_\phi(\theta)-\hat\eta_\psi(x)\sim\mathcal{N}(0,I_m)$.
+Check the moments of $z$.
+Check coverage at $|z|<1,1.96,2.58$.
+Check uniformity of $\Phi(z_i)$.
+A standard deviation above one means the posterior is too narrow.
+
+Report residuals in the canonical eigenbasis of the prior covariance of
+$\eta$. Spare axes and kept axes then share one plot.
+For the hard-cut model, also check that $\theta_B$ follows $\pi_B$.
+Check that $\theta_B$ does not depend on $x$.
+Use the complement PIT and leakage $R^2$.
+
+The rectangular map has no set $B$.
+Compare column norms instead.
+The largest nuisance column must lie well below the smallest kept column.
+
+\paragraph{Uncertainty.}
+At the optimum the posterior covariance in $\eta$ is $I_m$.
+Ensemble spread then has the units of the statistical error.
+Train $K$ members on resampled pairs $(\theta,x)$.
+Use the out-of-bag pairs of each member for early stopping.
+Align every member to a common $O(m)$ frame.
+Report the per-point spread $\sigma_{\mathrm{epi},i}$.
+
+When the ensemble is fit at $\hat r$, this spread is the $y_{\mathrm{std}}$ for
+symbolic regression. A probe-$m$ ensemble is wider.
+Quote it only as an upper bound on map spread, not as $y_{\mathrm{std}}$.
+Check the spread with the leave-one-out statistic
+\[
+  z_k=\bigl(\eta_k-\bar\eta_{-k}\bigr)\big/\bigl(s_{-k}\sqrt{K/(K-1)}\bigr) .
+\]
+For exchangeable Gaussian members this statistic follows $t_{K-2}$.
+The reference standard deviation is $\sqrt{(K-2)/(K-4)}$, not $1$.
+
+In each replicate, recompute \eqref{eq:softscreen}.
+If the hard-cut model is in use, also recompute \eqref{eq:screen}.
+Report the frequency of the top-$r$ column set.
+Report the vote distribution on $\hat r$.
+
+\paragraph{Scoring symbolic candidates.}
+To score a candidate map $g:\mathbb{R}^d\to\mathbb{R}^{m}$, freeze
+$\eta_\phi(\theta)=s\odot\bigl(\Lambda\,g(\theta)\bigr)$.
+Keep $\Lambda\in\mathbb{R}^{m\times m}$ and the diagonal $s$ learnable.
+The score then judges $g$ up to the $O(m)$ gauge and the scale.
+Refit $\psi$. Evaluate the training objective on held-out pairs.
+
+For the hard-cut model the two-part description length is
+\begin{equation}
+  \mathrm{DL}(g) \;=\; \mathrm{DL}_{\mathrm{model}}(g)
+  \;+\;\sum_{i=1}^{N}\bigl(-\log q(\theta^{(i)}\mid x^{(i)};g)\bigr),
+  \label{eq:mdl}
+\end{equation}
+in nats. For \eqref{eq:geom}, replace $-\log q$ by the geometry NLL.
+Do not compare absolute levels across the two objectives.
+
+Within one objective, paired per-sample differences separate candidates.
+Their standard error is much smaller than that of either term alone.
+Use complexity only when per-sample fit gaps fall below
+$\mathrm{DL}_{\mathrm{model}}/N$. Always quote $N$ with a description length.
+
+\paragraph{An over-specified $m$ is safe.}
+A sweep from $m=1$ is not needed.
+Proposition~3 fixes an uninformative active coordinate.
+That coordinate settles at the transport of its own prior marginal.
+Thus $\lambda_i=1$ at the optimum, up to transport error.
+The spectrum has a known null value.
+One probe fit at a large $m$ gives $r$.
+
+Table~\ref{tab:overspec} tests the hard-cut claim at $m=2,3,5,8$ against a
+true rank of $2$. Two eigenvalues stay far above $1$ in every case.
+The others land within $0.06$ of $1$.
+The top two canonical axes recover the true coordinates to $R^2=0.999$.
+The reverse regression returns the same figure.
+The learned plane and the true pair are mutually invertible.
+
+The discarded axes hold almost nothing about the truth, at $R^2\le0.03$.
+Against the spurious screened coordinates they reach $R^2$ between $0.96$ and
+$0.99$. The model spends a spare dimension on the transport of a nuisance
+parameter. That is the optimum, not a failure.
+
+\paragraph{The price of a spare dimension.}
+Under the hard-cut box floor each spare dimension costs about $0.085$ nats.
+The reason is specific to the box.
+The best uninformative coordinate is
+$\eta=\Phi^{-1}\bigl((\theta+a)/w\bigr)$.
+This function grows without bound at the faces of the box.
+A finite network with a linear skip cannot fit those tails.
+
+Under \eqref{eq:geom} the spare cost is smaller.
+It is not an oracle constant.
+Read $\hat r$ from the spectrum.
+Use the drop
+$\hat{\mathcal{L}}_{\mathrm{probe}}-\hat{\mathcal{L}}(\hat r)$ only as a
+check. Under $\pi=\mathcal{N}(0,I_d)$ the prior transport is the identity.
+A spare axis then costs almost nothing.
+
+\paragraph{Protocol when $r$ is unknown.}
+Use the rectangular map with no hard screen.
+\begin{enumerate}\itemsep0pt
+  \item Fit one probe map at a large $m_{\mathrm{probe}}$ with all $d$ inputs
+        and objective \eqref{eq:geom}.
+        Keep $m_{\mathrm{probe}}\le d$ so that $JJ^\top$ can have full rank.
+  \item Form the spectrum $\lambda_i=\operatorname{Var}_\pi(\eta_i)$ in the
+        prior eigenbasis.
+        Set $\lambda_{\mathrm{null}}$ to the median of the lower half of the
+        spectrum.
+        Set
+        $\hat r=\#\{i:\tfrac12\log(\lambda_i/\lambda_{\mathrm{null}})>\tau\}$
+        with floor $\tau\approx 0.1$~nats.
+  \item Refit at $\hat r$.
+        Check $z$ calibration in the canonical basis.
+  \item Soft-screen with \eqref{eq:softscreen}.
+        Report the top columns.
+        Report the ratio of the largest nuisance column to the smallest kept
+        column.
+  \item Bootstrap $K$ members at $m_{\mathrm{probe}}$.
+        If the goal is $y_{\mathrm{std}}$ for symbolic regression, bootstrap at
+        $\hat r$ instead.
+        Read the vote on $\hat r$, error bars on $\lambda_i$, and
+        column-recovery frequency.
+  \item Score frozen symbolic candidates by paired geometry NLL.
+        For discovery, align the ensemble with Jacobian Procrustes in a
+        nonlinearity-first gauge.
+        Keep the most nonlinear $\eta$ axes.
+        Run symbolic regression of those axes on all scaled $\theta$.
+\end{enumerate}
+Two fits and one bootstrap replace any sweep over $m$.
+Every step reuses the same simulated pairs.
+Geometry terms involve $\theta$ alone.
+Fresh prior draws evaluate them at no simulation cost.
+Draw those samples from $\pi$.
+
+\paragraph{Hard-cut variant.}
+If you need a normalised box posterior, insert screen \eqref{eq:screen}
+before step~1.
+Restrict $\eta_\phi$ to $A=\{\text{top }m\}$.
+Replace \eqref{eq:geom} by \eqref{eq:loss}.
+Then use complement PIT and leakage $R^2$.
+Absolute NLL then matches the box floor.
+
+\paragraph{The null band on $\lambda$.}
+Sampling alone lifts the largest spurious eigenvalue to
+$(1+\sqrt{m'/N})^2$, for $m'$ spare dimensions and $N$ test points.
+This gives $1.035$ at $m'=6$ and $N=20{,}000$.
+Transport error usually sets the band, not sampling noise.
+Take $\lambda_{\mathrm{null}}$ from the median of the spare block.
+Take the band from the bootstrap spread of the near-null eigenvalues.
+Report how $\hat r$ changes with the floor $\tau$.
+
+\paragraph{Graded spectra.}
+Report the information profile
+$\tfrac12\log(\lambda_i/\lambda_{\mathrm{null}})$ in nats.
+Do not report a single rank as the only summary.
+An extreme gap makes $\hat r$ sharp.
+A graded spectrum such as $500,200,50,12,3,1.4,1.1,1.02$ does not.
+
+The question is then how much information to discard.
+A reader can check that choice.
+A threshold on an eigengap gives no such handle.
+Two close eigenvalues also leave their own plane unidentified.
+Run the symbolic regression on such a pair together.
+
+\paragraph{Irrelevant parameters against irrelevant directions.}
+The hard-cut model needs a coordinate subset $B$ that the data leaves at the
+prior. It can express an irrelevant parameter.
+It cannot express an irrelevant direction.
+Suppose the data constrains every parameter, but only $m$ of their
+combinations carry information. No subset $B$ then exists.
+
+The rectangular objective \eqref{eq:geom} covers both cases.
+Pure nuisance coordinates get near-zero column norms.
+Informative combinations of all $d$ coordinates still give $\lambda_i\gg 1$.
+The gravitational-wave example with
+$\theta=(m_1,m_2,\phi_c,t_c,d_L)$ is of this mixed type.
+Every coordinate enters the waveform.
+The mass sector still dominates the spectrum and the soft ranking.
+
+\section*{Numerical demonstration}
+
+Take $d=20$ with
+$\mu(\theta)=\bigl(\theta_{i_0},\,\theta_{i_1}-\theta_{i_0}^2\bigr)$ for one
+hidden pair $(i_0,i_1)$. Use $n=8$ replicates, $s=(0.25,0.5)$,
+$\pi=\mathcal{U}[-3,3]^{20}$, and $32{,}000$ training and $20{,}000$ test pairs.
+Then $18$ of the $20$ parameters are pure nuisance, and the two that matter are
+degenerate.
+
+\paragraph{Rectangular oneshot.}
+Fit \eqref{eq:geom} at $m_{\mathrm{probe}}=6$ with all $20$ inputs and no hard
+screen. The spectrum gives $\hat r=2$ at floor $\tau=0.1$~nats.
+A refit at $\hat r=2$ recovers the true coordinates from the top canonical
+axes.
+
+Soft screen \eqref{eq:softscreen} ranks
+$(\theta_{i_0},\theta_{i_1})$ as the top two columns.
+Bootstrap members at the probe dimension agree on $\hat r$ and on the top-two
+column set. Do not compare absolute geometry NLL to the box floor.
+Score candidates by paired geometry NLL only.
+
+\paragraph{Hard-cut reference.}
+The tables below keep the screened hard-cut run for comparison.
+There screen \eqref{eq:screen} gives group norms $0.344$ and $0.067$ for
+$\theta_{i_0}$ and $\theta_{i_1}$, against $\le0.004$ for the other $18$.
+Absolute NLL then sits on the box scale.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccl}
+\toprule
+$m$ & $\hat{\mathcal{L}}(m)$ & restricted $\mathcal{L}^\star(m)$ & \\
+\midrule
+1 & 32.704 & 33.036 & below the restricted value (see Remark) \\
+2 & 30.944 & 30.931 & $\hat r=2$; correct coordinate set \\
+3 & 31.035 & 30.931 & plateau \\
+\bottomrule
+\end{tabular}
+\caption{Hard-cut rank sweep, nats per sample on held-out pairs.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccll}
+\toprule
+$m$ & $\hat{\mathcal{L}}$ & excess & spectrum $\lambda_i$ & $R^2$ for the true pair \\
+\midrule
+2 & 30.944 & $+0.014$ & $507,\, 265$ & $0.9998,\, 0.9997$ \\
+3 & 31.035 & $+0.104$ & $593,\, 199,\, 1.02$ & $0.9997,\, 0.9994$ \\
+5 & 31.174 & $+0.244$ & $682,\, 149,\, 1.05,\, 1.02,\, 1.00$ & $0.9998,\, 0.9992$ \\
+8 & 31.461 & $+0.531$ & $571,\, 194$, then six in $[0.98,1.06]$ & $0.9998,\, 0.9991$ \\
+\bottomrule
+\end{tabular}
+\caption{Hard-cut over-specified $m$ against a true rank of $2$. The excess
+column is the gap to the floor $\mathcal{L}^\star(2)=30.931$.
+It grows by about $0.085$ nats per spare dimension.
+The last column regresses each true coordinate on a cubic in the top two
+canonical axes.}
+\label{tab:overspec}
+\end{table}
+
+Check hard-cut calibration at $\hat r=2$.
+The residual $z$ has means $-0.019$ and $-0.007$.
+Its standard deviations are $1.040$ and $1.017$.
+Coverage at $|z|<1.96$ is $0.941$ and $0.946$, against a nominal $0.950$.
+The model is overconfident by $2$ to $4$ percent.
+The complement PIT has standard deviation $0.2890$ against the uniform value
+$0.2887$.
+
+Complement leakage is $\overline{R^2}=0.00020$ against the null value
+$4/20{,}000=0.00020$.
+As far as the test can resolve, the data says nothing about the other $18$
+directions. All $8$ bootstrap replicates re-screen to the true pair.
+The leave-one-out $z$ reaches $0.918$ and $0.971$ of the $t_6$ reference.
+The ensemble spread is honest to a few percent.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccrr}
+\toprule
+candidate & $m$ & $\mathrm{DL}_{\mathrm{model}}$ & $\hat{\mathcal{L}}$ & vs.\ neural \\
+\midrule
+$\theta_{i_0},\;\theta_{i_1}-\theta_{i_0}^2$      & 2 & 9  & 30.891 & $-0.053\pm0.003$ \\
+$\theta_{i_0},\;\theta_{i_1}-\theta_{i_0}^{1.9}$  & 2 & 14 & 30.905 & $-0.040\pm0.003$ \\
+$\theta_{i_0},\;\theta_{i_1}$                     & 2 & 4  & 31.516 & $+0.572\pm0.007$ \\
+$\theta_{i_0},\;\theta_{i_1}-\theta_{i_0}^2-0.3\theta_j$ & 2 & 15 & 32.041 & $+1.097\pm0.006$ \\
+$\theta_{i_0}$                                    & 1 & 2  & 33.012 & $+2.067\pm0.006$ \\
+\midrule
+neural $\eta_\phi$ (reference)                    & 2 & --- & 30.944 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Candidate scoring, nats per sample, $N=20{,}000$ held-out pairs.
+Order follows \eqref{eq:mdl}.}
+\end{table}
+
+Three points carry the argument.
+First, the true expression beats the learned map by $0.053\pm0.003$ nats, or
+$19$ standard errors.
+The symbolic answer is a better model of the posterior than the network that
+proposed it. That claim is stronger than a flatness residual.
+It also validates the network.
+
+Second, the exponents $2.0$ and $1.9$ differ by only $0.013\pm0.001$ nats per
+sample. The direct paired test resolves this gap at $9$ standard errors.
+The same test against the network alone does not resolve it.
+Pairwise tests separate near-ties.
+
+Third, the spurious nuisance term costs more ($1.097$) than a drop of the
+quadratic ($0.572$). An irrelevant coordinate injects prior variance that the
+data cannot predict. The penalty is
+$\tfrac12\log\bigl(1+0.3^2\operatorname{Var}_\pi(\theta_j)n/s_2^2\bigr)=1.13$,
+which matches the measurement.
+The objective rejects spurious variables with no sparsity prior at the scoring
+stage. It rejects them more sharply under a broad prior than a narrow one.
+
+One number needs comment: $30.891<30.931$.
+The closed-form $\mathcal{L}^\star$ uses the differential entropy of an
+untruncated Gaussian for the active block.
+The estimator $\hat\eta_\psi$ instead learns the posterior-mean shrinkage near
+the faces of the box. Under a box prior, expect a few hundredths of a nat below
+the stated floor. Under a Gaussian prior any such dip indicates overfitting.
+
+\paragraph{Gravitational-wave sketch.}
+The same rectangular protocol applies to TaylorF2 with
+$\theta=(m_1,m_2,\phi_c,t_c,d_L)$.
+Extrinsics enter the waveform, so they are not pure prior-transport dummies.
+They usually sit nearer the spectrum null than the mass sector.
+
+Probe at $m_{\mathrm{probe}}\le 5$.
+Read $\hat r$ from the spectrum.
+Soft-rank by column norms.
+Align an ensemble and keep the most nonlinear $\eta$ axes.
+Run symbolic regression of those axes on all scaled $\theta$.
+
+
+\bibliographystyle{mnras}
+\bibliography{main}
+
+\end{document}

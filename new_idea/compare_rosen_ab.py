@@ -1,18 +1,13 @@
 #!/usr/bin/env python
-"""Test A: one-step joint map vs three-step Fishnets-then-flatten.
+"""One-step vs three-step on Rosenbrock variants.
 
-Rosenbrock in d = 2, 3, 4. The first two coordinates generate the banana.
-Any leftover coordinates are unused (held at the prior by a correct method).
+banana{2,3,4}   classic banana in (theta_0, theta_1); leftover coords unused
+uncoupled4      two independent bananas (Wikipedia even-N form)
+coupled{3,4}    chain: observe every theta and every link theta_{i+1}-theta_i^2
+scalar{3,4}     observe only the coupled Rosenbrock potential (rank 1)
 
-    mu(x) = (theta_0, theta_1 - theta_0^2)
-
-Same (theta, x) pairs go to both methods. No symbolic regression. The score
-is cubic R^2 of the true coordinates against the learned eta axes, plus
-whether the method reports rank 2.
-
-    python new_idea/compare_rosen_ab.py --quick
-    python new_idea/compare_rosen_ab.py --dims 2 3 4
-    python new_idea/compare_rosen_ab.py --full --dims 2 3 4
+    python new_idea/compare_rosen_ab.py --problems uncoupled4 coupled3 coupled4
+    python new_idea/compare_rosen_ab.py --problems scalar3 scalar4
 """
 from __future__ import annotations
 
@@ -20,8 +15,9 @@ import argparse
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -31,21 +27,86 @@ import numpy as np
 A_BOX = 3.0
 WIDTH = 2.0 * A_BOX
 LOGW = float(np.log(WIDTH))
-SD = (0.25, 0.5)
 N_REP = 8
-TRUE_RANK = 2
-I0, I1 = 0, 1
 
 
-def true_coords(th: np.ndarray) -> np.ndarray:
-    return np.column_stack([th[:, I0], th[:, I1] - th[:, I0] ** 2])
+@dataclass(frozen=True)
+class Problem:
+    name: str
+    d: int
+    rank: int
+    hard_cut: bool
+    mu_fn: Callable[[np.ndarray], np.ndarray]
+    coord_fn: Callable[[np.ndarray], np.ndarray]
+    noise: tuple
+
+    def simulate(self, n: int, rng: np.random.Generator):
+        th = rng.uniform(-A_BOX, A_BOX, size=(n, self.d))
+        mu = self.mu_fn(th)
+        sd = np.asarray(self.noise, dtype=float)
+        x = mu[:, None, :] + rng.normal(size=(n, N_REP, mu.shape[1])) * sd
+        return th, x
 
 
-def simulate(n: int, d: int, rng: np.random.Generator):
-    th = rng.uniform(-A_BOX, A_BOX, size=(n, d))
-    mu = np.stack([th[:, I0], th[:, I1] - th[:, I0] ** 2], axis=1)
-    x = mu[:, None, :] + rng.normal(size=(n, N_REP, 2)) * np.asarray(SD)
-    return th, x
+def _banana_mu(th: np.ndarray) -> np.ndarray:
+    return np.column_stack([th[:, 0], th[:, 1] - th[:, 0] ** 2])
+
+
+def _uncoupled4_mu(th: np.ndarray) -> np.ndarray:
+    return np.column_stack([
+        th[:, 0], th[:, 1] - th[:, 0] ** 2,
+        th[:, 2], th[:, 3] - th[:, 2] ** 2,
+    ])
+
+
+def _chain_mu(th: np.ndarray) -> np.ndarray:
+    links = [th[:, i + 1] - th[:, i] ** 2 for i in range(th.shape[1] - 1)]
+    return np.column_stack([th] + links)
+
+
+def _scalar_mu(th: np.ndarray) -> np.ndarray:
+    # Wikipedia coupled potential with b=1 (not 100) so values stay O(10) on [-3,3].
+    acc = np.zeros(th.shape[0])
+    for i in range(th.shape[1] - 1):
+        acc = acc + (th[:, i + 1] - th[:, i] ** 2) ** 2 + (1.0 - th[:, i]) ** 2
+    return acc[:, None]
+
+
+def make_banana(d: int) -> Problem:
+    return Problem(
+        name=f"banana{d}", d=d, rank=2, hard_cut=True,
+        mu_fn=_banana_mu, coord_fn=_banana_mu, noise=(0.25, 0.5),
+    )
+
+
+def make_coupled(n: int) -> Problem:
+    noise = tuple([0.25] * n + [0.5] * (n - 1))
+    return Problem(
+        name=f"coupled{n}", d=n, rank=n, hard_cut=True,
+        mu_fn=_chain_mu, coord_fn=_chain_mu, noise=noise,
+    )
+
+
+PROBLEMS = {
+    "banana2": make_banana(2),
+    "banana3": make_banana(3),
+    "banana4": make_banana(4),
+    "uncoupled4": Problem(
+        name="uncoupled4", d=4, rank=4, hard_cut=True,
+        mu_fn=_uncoupled4_mu, coord_fn=_uncoupled4_mu,
+        noise=(0.25, 0.5, 0.25, 0.5),
+    ),
+    "coupled3": make_coupled(3),
+    "coupled4": make_coupled(4),
+    "scalar3": Problem(
+        name="scalar3", d=3, rank=1, hard_cut=False,
+        mu_fn=_scalar_mu, coord_fn=_scalar_mu, noise=(0.5,),
+    ),
+    "scalar4": Problem(
+        name="scalar4", d=4, rank=1, hard_cut=False,
+        mu_fn=_scalar_mu, coord_fn=_scalar_mu, noise=(0.5,),
+    ),
+}
 
 
 def poly_r2(y: np.ndarray, feats: np.ndarray, deg: int = 3) -> float:
@@ -78,10 +139,11 @@ def spectrum(eta: np.ndarray):
 def recovery(c_true: np.ndarray, eta: np.ndarray, r_keep: int) -> dict:
     e, lam = spectrum(eta)
     r_keep = max(1, min(r_keep, e.shape[1]))
+    n_c = c_true.shape[1]
     return {
         "lambda": [float(v) for v in lam],
-        "r2_true_from_topr": [poly_r2(c_true[:, k], e[:, :r_keep]) for k in (0, 1)],
-        "r2_true_from_all": [poly_r2(c_true[:, k], e) for k in (0, 1)],
+        "r2_true_from_topr": [poly_r2(c_true[:, k], e[:, :r_keep]) for k in range(n_c)],
+        "r2_true_from_all": [poly_r2(c_true[:, k], e) for k in range(n_c)],
         "r2_axis_from_true": [poly_r2(e[:, k], c_true) for k in range(r_keep)],
     }
 
@@ -89,7 +151,7 @@ def recovery(c_true: np.ndarray, eta: np.ndarray, r_keep: int) -> dict:
 # ---------------------------------------------------------------------------
 # One-step (hard-cut rectangular protocol, no bootstrap / MDL)
 # ---------------------------------------------------------------------------
-def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
+def run_oneshot(th, x, th_te, x_te, cfg, problem: Problem) -> dict:
     import flax.linen as nn
     import jax
     import jax.numpy as jnp
@@ -99,8 +161,9 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
     jax.config.update("jax_enable_x64", True)
 
     d = th.shape[1]
-    mu_x = x.reshape(-1, 2).mean(0)
-    sd_x = x.reshape(-1, 2).std(0) + 1e-12
+    x_dim = x.shape[-1]
+    mu_x = x.reshape(-1, x_dim).mean(0)
+    sd_x = x.reshape(-1, x_dim).std(0) + 1e-12
     th_j = jnp.asarray(th)
     x_j = jnp.asarray((x - mu_x) / sd_x)
     th_te_j = jnp.asarray(th_te)
@@ -155,7 +218,7 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
             h = nn.gelu(nn.Dense(self.hidden[0], name="in_proj")(theta))
             for k, w in enumerate(self.hidden[1:]):
                 h = nn.gelu(nn.Dense(w, name=f"h{k}")(h))
-            return nn.Dense(2, name="out")(h)
+            return nn.Dense(x_dim, name="out")(h)
 
     def screen_inputs(th_s, xb_s, steps: int, seed: int):
         mod = Screen()
@@ -192,7 +255,8 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
         bp = min(256, n_fit)
         act = jnp.asarray(np.asarray(active, dtype=np.int32))
         q0 = np.zeros((d, m))
-        q0[np.asarray(active, dtype=int), np.arange(m)] = 1.0
+        nset = min(m, len(active))
+        q0[np.asarray(active[:nset], dtype=int), np.arange(nset)] = 1.0
         flat_mod = Flattener(m=m, skip_init=q0)
         est_mod = Estimator(m=m)
         k0, k1 = jr.split(jr.PRNGKey(seed), 2)
@@ -201,8 +265,8 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
             "raw_log_scale": jnp.zeros(m),
             "flat": flat_mod.init(k0, th_fit[0]),
         }
-        const = 0.5 * m * np.log(2 * np.pi) + (d - m) * LOGW
-        eye_m = jnp.eye(m)
+        complement = 0.0 if not problem.hard_cut else (d - m) * LOGW
+        const = 0.5 * m * np.log(2 * np.pi) + complement
         l1_w = 2.0 / n_fit
 
         def core(p, theta):
@@ -211,7 +275,8 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
 
         def logdet_active(p, theta):
             j = jax.jacfwd(lambda a: core(p, theta.at[act].set(a)))(theta[act])
-            return 0.5 * jnp.linalg.slogdet(j.T @ j + 1e-10 * eye_m)[1]
+            gram = j @ j.T if j.shape[0] <= j.shape[1] else j.T @ j
+            return 0.5 * jnp.linalg.slogdet(gram + 1e-10 * jnp.eye(gram.shape[0]))[1]
 
         def zvec(p, th_b, x_b):
             s = jnp.exp(2.0 * p["raw_log_scale"])
@@ -276,25 +341,25 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
         return eta_fn, best_val
 
     t0 = time.time()
-    # Probe at full d. A tail-median null needs spare axes (the 20D protocol).
-    # Here d is 2-4, so rank is read against the theoretical null lambda = 1.
     m_probe = d
     en = screen_inputs(th_j, xb, steps=cfg.screen_steps, seed=cfg.seed)
     order = np.argsort(-en)
-    a_probe = tuple(sorted(int(v) for v in order[:m_probe]))
+    a_all = tuple(range(d))
+    a_probe = a_all if not problem.hard_cut else tuple(sorted(int(v) for v in order[:m_probe]))
     eta_fn, _ = fit_joint(m_probe, a_probe, cfg.oneshot_steps, cfg.seed)
     _, lam_probe = spectrum(np.asarray(eta_fn(th_te_j)))
     nats = 0.5 * np.log(np.maximum(lam_probe, 1e-12))
     r_hat = int(np.sum(nats > cfg.nats_floor))
     r_hat = max(1, min(r_hat, m_probe))
     if r_hat != m_probe:
-        a_hat = tuple(sorted(int(v) for v in order[:r_hat]))
+        a_hat = a_all if not problem.hard_cut else tuple(sorted(int(v) for v in order[:r_hat]))
         eta_fn, _ = fit_joint(r_hat, a_hat, cfg.oneshot_steps, cfg.seed + 1)
         active = a_hat
     else:
         active = a_probe
     eta = np.asarray(eta_fn(th_te_j))
-    rec = recovery(true_coords(th_te), eta, r_hat)
+    rec = recovery(problem.coord_fn(th_te), eta, r_hat)
+    expect = set(range(problem.d)) if (not problem.hard_cut or problem.rank == problem.d) else None
     rec.update({
         "method": "oneshot",
         "r_hat": r_hat,
@@ -302,8 +367,10 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
         "screen_order": [int(v) for v in order],
         "probe_lambda": [float(v) for v in lam_probe],
         "seconds": time.time() - t0,
-        "rank_ok": r_hat == TRUE_RANK,
-        "set_ok": set(active) == {I0, I1} if r_hat == TRUE_RANK else False,
+        "rank_ok": r_hat == problem.rank,
+        "set_ok": set(active) == expect if expect is not None else True,
+        "r2_min": float(np.min(rec["r2_true_from_topr"])),
+        "r2_mean": float(np.mean(rec["r2_true_from_topr"])),
     })
     return rec
 
@@ -311,7 +378,7 @@ def run_oneshot(th, x, th_te, x_te, cfg) -> dict:
 # ---------------------------------------------------------------------------
 # Three-step (Fishnets + flatten). Square map in all d coordinates.
 # ---------------------------------------------------------------------------
-def run_threestep(th, x, th_te, x_te, cfg, outdir: Path) -> dict:
+def run_threestep(th, x, th_te, x_te, cfg, outdir: Path, problem: Problem) -> dict:
     import jax
     import jax.numpy as jnp
 
@@ -327,7 +394,7 @@ def run_threestep(th, x, th_te, x_te, cfg, outdir: Path) -> dict:
     th_s = scaler.transform(th).astype(np.float32)
     th_te_s = scaler.transform(th_te).astype(np.float32)
 
-    fish_dir = outdir / f"fishnets_d{d}"
+    fish_dir = outdir / f"fishnets_{problem.name}"
     train_fishnets(
         th_s,
         x_flat.astype(np.float32),
@@ -386,7 +453,7 @@ def run_threestep(th, x, th_te, x_te, cfg, outdir: Path) -> dict:
             flattener_activation="softplus",
             noise=1e-4,
             seed=cfg.seed,
-            output_prefix=f"flatten_d{d}",
+            output_prefix=f"flatten_{problem.name}",
             use_whitening=True,
             nn_inv=False,
             forward_backward_mlp=True,
@@ -404,33 +471,39 @@ def run_threestep(th, x, th_te, x_te, cfg, outdir: Path) -> dict:
     for w_i in ensemble_w:
         etas.append(np.asarray(jax.vmap(lambda t: flatten_model.apply(w_i, t))(th_te_j)))
     eta = np.average(np.stack(etas, 0), 0, weights=wts)
-    rec = recovery(true_coords(th_te), eta, min(TRUE_RANK, d))
+    rec = recovery(problem.coord_fn(th_te), eta, min(problem.rank, d))
     rec.update({
         "method": "threestep",
         "r_hat": r_fish,
         "fisher_eigs": [float(v) for v in f_eigs],
         "fisher_rel": [float(v) for v in rel],
         "seconds": time.time() - t0,
-        "rank_ok": r_fish == TRUE_RANK,
+        "rank_ok": r_fish == problem.rank,
         "n_finite_fishnets": int(finite.sum()),
+        "r2_min": float(np.min(rec["r2_true_from_topr"])),
+        "r2_mean": float(np.mean(rec["r2_true_from_topr"])),
     })
     return rec
 
 
 # ---------------------------------------------------------------------------
-def summarize_row(d: int, rec: dict) -> str:
+def summarize_row(rec: dict) -> str:
     r2 = rec["r2_true_from_topr"]
+    shown = " ".join(f"{v:.4f}" for v in r2[:4])
+    extra = "" if len(r2) <= 4 else f" ...({len(r2)})"
     return (
-        f"d={d}  {rec['method']:9s}  r_hat={rec['r_hat']}  "
+        f"{rec['problem']:11s}  {rec['method']:9s}  r_hat={rec['r_hat']}  "
         f"rank_ok={rec.get('rank_ok')}  "
-        f"R2(true|top-r)=[{r2[0]:.4f}, {r2[1]:.4f}]  "
+        f"R2=[{shown}{extra}]  min={rec['r2_min']:.4f}  "
         f"{rec['seconds']:.1f}s"
     )
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dims", type=int, nargs="+", default=[2, 3, 4])
+    p.add_argument("--problems", nargs="+", default=None, choices=list(PROBLEMS))
+    p.add_argument("--dims", type=int, nargs="+", default=None,
+                   help="legacy banana+unused suite (2 3 4)")
     p.add_argument("--methods", nargs="+", default=["oneshot", "threestep"],
                    choices=["oneshot", "threestep"])
     p.add_argument("--nsims", type=int, default=None)
@@ -470,35 +543,44 @@ def main():
     b = budgets(args)
     cfg = argparse.Namespace(seed=args.seed, **b)
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.problems:
+        names = args.problems
+    elif args.dims:
+        names = [f"banana{d}" for d in args.dims]
+    else:
+        names = ["uncoupled4", "coupled3", "coupled4"]
     print(
-        f"test A  dims={args.dims}  methods={args.methods}  "
+        f"problems={names}  methods={args.methods}  "
         f"nsims={cfg.nsims}  ntest={cfg.ntest}"
     )
-    print("truth: informative pair theta_0, theta_1; remaining coords unused")
 
     rows = []
-    for d in args.dims:
-        if d < 2:
-            raise SystemExit("d must be >= 2")
-        rng = np.random.default_rng(args.seed + 1000 * d)
-        th, x = simulate(cfg.nsims, d, rng)
-        th_te, x_te = simulate(cfg.ntest, d, np.random.default_rng(7777 + d))
-        print(f"\n======== d={d}  ({d - 2} unused coords) ========")
+    for name in names:
+        problem = PROBLEMS[name]
+        rng = np.random.default_rng(args.seed + 1000 * (sum(map(ord, name)) % 100))
+        th, x = problem.simulate(cfg.nsims, rng)
+        th_te, x_te = problem.simulate(cfg.ntest, np.random.default_rng(7777 + problem.d))
+        print(
+            f"\n======== {problem.name}  d={problem.d}  rank={problem.rank}  "
+            f"hard_cut={problem.hard_cut}  xdim={x.shape[-1]} ========"
+        )
         for method in args.methods:
             try:
                 if method == "oneshot":
-                    rec = run_oneshot(th, x, th_te, x_te, cfg)
+                    rec = run_oneshot(th, x, th_te, x_te, cfg, problem)
                 else:
-                    rec = run_threestep(th, x, th_te, x_te, cfg, args.out)
+                    rec = run_threestep(th, x, th_te, x_te, cfg, args.out, problem)
             except Exception as exc:
                 rec = {"method": method, "error": repr(exc), "r_hat": None,
-                       "r2_true_from_topr": [float("nan"), float("nan")],
-                       "rank_ok": False, "seconds": 0.0}
+                       "r2_true_from_topr": [float("nan")],
+                       "rank_ok": False, "seconds": 0.0, "r2_min": float("nan")}
                 print(f"  FAILED {method}: {exc}")
-            rec["d"] = d
+            rec["d"] = problem.d
+            rec["problem"] = problem.name
+            rec["true_rank"] = problem.rank
             rows.append(rec)
             if "error" not in rec:
-                print("  " + summarize_row(d, rec))
+                print("  " + summarize_row(rec))
                 if method == "oneshot":
                     print(f"    screen {rec['screen_order']}  active {rec['active']}"
                           f"  set_ok={rec['set_ok']}")
@@ -510,24 +592,18 @@ def main():
     out_json = args.out / "compare_rosen_ab.json"
     out_json.write_text(json.dumps(rows, indent=2))
     print("\n======== summary ========")
-    print(f"{'d':>3}  {'method':9s}  {'r_hat':>5}  {'rank':>5}  "
-          f"{'R2_0':>7}  {'R2_1':>7}  {'sec':>7}")
+    print(f"{'problem':11s}  {'method':9s}  {'r_hat':>5}  {'ok':>5}  "
+          f"{'R2min':>7}  {'R2mean':>7}  {'sec':>7}")
     for rec in rows:
         if "error" in rec:
-            print(f"{rec['d']:3d}  {rec['method']:9s}  ERROR {rec['error']}")
+            print(f"{rec.get('problem','?'):11s}  {rec['method']:9s}  ERROR {rec['error']}")
             continue
-        r2 = rec["r2_true_from_topr"]
         print(
-            f"{rec['d']:3d}  {rec['method']:9s}  {rec['r_hat']:5}  "
-            f"{str(rec['rank_ok']):>5}  {r2[0]:7.4f}  {r2[1]:7.4f}  "
+            f"{rec['problem']:11s}  {rec['method']:9s}  {rec['r_hat']:5}  "
+            f"{str(rec['rank_ok']):>5}  {rec['r2_min']:7.4f}  {rec['r2_mean']:7.4f}  "
             f"{rec['seconds']:7.1f}"
         )
     print(f"wrote {out_json}")
-    ones = [r for r in rows if r.get("method") == "oneshot" and "error" not in r]
-    three = [r for r in rows if r.get("method") == "threestep" and "error" not in r]
-    if ones and three:
-        print("\nread: three-step should tie or win on d=2. "
-              "one-step should not collapse on d=3,4 unused coords.")
 
 
 if __name__ == "__main__":

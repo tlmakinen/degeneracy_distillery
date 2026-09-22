@@ -16,7 +16,7 @@ keeps dropping while the held-out NLL cost is within ``k`` standard errors.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +25,10 @@ import flax.linen as nn
 import optax
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+# Apple Metal does not compile float64. CUDA and CPU do, and the paper
+# uses x64. Skip the flag when Metal is the only device.
+if not any(d.platform.upper() == "METAL" for d in jax.devices()):
+    jax.config.update("jax_enable_x64", True)
 
 
 SCALE_BOOST = 8.0
@@ -33,18 +36,33 @@ DEFAULT_LR = 1e-3
 DEFAULT_BATCH = 512
 
 
+def _bound_hyper(v):
+    """Flax hyperparam form of a scalar or per-coordinate bound."""
+    a = np.asarray(v, dtype=float)
+    if a.size == 1:
+        return float(a.reshape(()))
+    return tuple(float(x) for x in np.ravel(a))
+
+
 class Flattener(nn.Module):
-    """theta -> g in R^{m0}. Skip is the first m0 standardised coords of theta."""
+    """theta -> g in R^{m0}. Skip is the first m0 standardised coords of theta.
+
+    ``use_log_features`` concatenates ``log(theta)``. Set it false when any
+    coordinate can be non-positive (Rosenbrock lives in ``[-3, 3]``).
+    """
 
     m: int
-    lo: float
-    hi: float
+    lo: Union[float, tuple]
+    hi: Union[float, tuple]
     features: Sequence[int] = (128, 128, 128)
+    use_log_features: bool = True
 
     @nn.compact
     def __call__(self, theta):
-        z = 2.0 * (theta - self.lo) / (self.hi - self.lo) - 1.0
-        h = jnp.concatenate([z, jnp.log(theta)])
+        lo = jnp.asarray(self.lo)
+        hi = jnp.asarray(self.hi)
+        z = 2.0 * (theta - lo) / (hi - lo) - 1.0
+        h = jnp.concatenate([z, jnp.log(theta)]) if self.use_log_features else z
         for w in self.features:
             h = nn.gelu(nn.Dense(w)(h))
         delta = nn.Dense(
@@ -105,6 +123,7 @@ class OneShotFit:
     coord_fn: Optional[Callable] = None
     lo: float = 1.0
     hi: float = 2.0
+    use_log_features: bool = True
 
     def _core(self, theta):
         return _core(
@@ -237,6 +256,8 @@ def train_oneshot(
     verbose: bool = True,
     flat_features: Sequence[int] = (128, 128, 128),
     est_features: Sequence[int] = (256, 256, 128),
+    use_log_features: bool = True,
+    estimator_factory: Optional[Callable] = None,
 ) -> OneShotFit:
     """Joint fit of eta_phi and eta_psi. Warm-start via ``init_params``."""
     th_fit = jnp.asarray(th_fit)
@@ -246,6 +267,8 @@ def train_oneshot(
     n_fit = int(th_fit.shape[0])
     bp = min(int(batch), n_fit)
     frozen = coord_fn is not None
+    lo_h = _bound_hyper(lo)
+    hi_h = _bound_hyper(hi)
 
     if frozen:
         g0 = coord_fn(th_fit[0])
@@ -253,9 +276,15 @@ def train_oneshot(
         flat_mod = None
     else:
         g_dim = int(m0)
-        flat_mod = Flattener(m=g_dim, lo=lo, hi=hi, features=tuple(flat_features))
+        flat_mod = Flattener(
+            m=g_dim, lo=lo_h, hi=hi_h, features=tuple(flat_features),
+            use_log_features=bool(use_log_features),
+        )
 
-    est_mod = Estimator(m=g_dim, features=tuple(est_features))
+    if estimator_factory is not None:
+        est_mod = estimator_factory(g_dim)
+    else:
+        est_mod = Estimator(m=g_dim, features=tuple(est_features))
     k0, k1 = jr.split(jr.PRNGKey(int(seed)), 2)
 
     if init_params is not None:
@@ -342,7 +371,8 @@ def train_oneshot(
         params=best, flat_mod=flat_mod, est_mod=est_mod,
         m=int(m), m0=int(m0), g_dim=int(g_dim), const=float(const),
         best_val=float(best_val), scale_boost=float(scale_boost),
-        coord_fn=coord_fn, lo=float(lo), hi=float(hi),
+        coord_fn=coord_fn, lo=lo_h, hi=hi_h,
+        use_log_features=bool(use_log_features),
     )
 
 
@@ -391,16 +421,24 @@ def whittle_ladder(
     scale_boost: float = SCALE_BOOST,
     verbose: bool = True,
     min_gap: float = 10.0,
+    use_log_features: bool = True,
+    estimator_factory: Optional[Callable] = None,
+    flat_features: Sequence[int] = (128, 128, 128),
+    est_features: Sequence[int] = (256, 256, 128),
 ) -> dict:
     """Warm-started descending ladder. Returns the kept fit and per-rung audit."""
     m_probe = int(m_probe)
+    train_kw = dict(
+        lo=lo, hi=hi, batch=batch, lr=lr, scale_boost=scale_boost,
+        verbose=verbose, use_log_features=use_log_features,
+        estimator_factory=estimator_factory,
+        flat_features=flat_features, est_features=est_features,
+    )
     if verbose:
         print(f"[ladder] probe m={m_probe}  steps={probe_steps}", flush=True)
     current = train_oneshot(
         th_fit, x_fit, th_val, x_val,
-        m=m_probe, m0=m_probe, lo=lo, hi=hi,
-        steps=probe_steps, seed=seed,
-        batch=batch, lr=lr, scale_boost=scale_boost, verbose=verbose,
+        m=m_probe, m0=m_probe, steps=probe_steps, seed=seed, **train_kw,
     )
     rungs = [_rung_record(current, th_val, x_val)]
     if verbose:
@@ -418,9 +456,7 @@ def whittle_ladder(
                 print(f"[ladder] cold refit m={m}  steps={rung_steps}", flush=True)
             nxt = train_oneshot(
                 th_fit, x_fit, th_val, x_val,
-                m=m, m0=m, lo=lo, hi=hi,
-                steps=rung_steps, seed=seed + 11 + m,
-                batch=batch, lr=lr, scale_boost=scale_boost, verbose=verbose,
+                m=m, m0=m, steps=rung_steps, seed=seed + 11 + m, **train_kw,
             )
             lam, V = rungs[-1]["lam"], None
         else:
@@ -434,10 +470,8 @@ def whittle_ladder(
                 )
             nxt = train_oneshot(
                 th_fit, x_fit, th_val, x_val,
-                m=m, m0=current.m0, lo=lo, hi=hi,
-                steps=rung_steps, seed=seed + 11 + m,
-                init_params=p_new,
-                batch=batch, lr=lr, scale_boost=scale_boost, verbose=verbose,
+                m=m, m0=current.m0, steps=rung_steps, seed=seed + 11 + m,
+                init_params=p_new, **train_kw,
             )
 
         rec = _rung_record(nxt, th_val, x_val)
@@ -495,6 +529,8 @@ def fit_ensemble(
     batch: int = DEFAULT_BATCH,
     lr: float = DEFAULT_LR,
     verbose: bool = True,
+    use_log_features: bool = True,
+    estimator_factory: Optional[Callable] = None,
 ) -> dict:
     """Fit ``K`` one-step maps at fixed ``m`` for an aligned ensemble.
 
@@ -533,6 +569,8 @@ def fit_ensemble(
             steps=steps, seed=int(seed) + 1009 * (k + 1),
             init_params=init_params,
             batch=batch, lr=lr, verbose=verbose,
+            use_log_features=use_log_features,
+            estimator_factory=estimator_factory,
         )
         fits.append(fit)
         nlls.append(float(np.mean(fit.nll_vec(th_val, x_val))))

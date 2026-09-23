@@ -77,6 +77,23 @@ NOISE_STD = 0.05
 BETA_MIN, BETA_MAX = 0.1, 1.0
 GAMMA_MIN, GAMMA_MAX = 0.05, 0.5
 DELTA = 0.15  # supercriticality cut: keep beta/gamma >= 1 + delta
+
+
+def _supercriticality_accept_rate(n: int = 400_000) -> float:
+    """Fraction of prior draws surviving the beta/gamma >= 1 + DELTA cut.
+
+    Computed from the current prior ranges rather than recorded from the actual
+    draws, so it does not depend on the manifest being written after the
+    simulator has run. Widening the prior changes this number, so the effective
+    prior is not a simple rescale of the frozen one and the ablation arms are
+    not comparable without it.
+    """
+    rng = np.random.default_rng(0)
+    b = rng.uniform(BETA_MIN, BETA_MAX, n)
+    g = rng.uniform(GAMMA_MIN, GAMMA_MAX, n)
+    return float(((b / g) >= (1.0 + DELTA)).mean())
+
+
 SR_OFFSET = 0.0
 SR_LENGTH_PENALTY = 2.0
 INVERTIBILITY_TIMEOUT_SECONDS = 30
@@ -850,6 +867,17 @@ def parse_args() -> argparse.Namespace:
         "strongly (|Pearson r|) with R0 = beta / gamma.",
     )
     parser.add_argument(
+        "--noise-std", type=float, default=None,
+        help="Override the observation noise sd (default %.3g). QfCk Q3 ablation."
+             % NOISE_STD,
+    )
+    parser.add_argument(
+        "--prior-width-scale", type=float, default=1.0,
+        help="Scale the beta and gamma prior widths about their geometric "
+             "midpoints, in log space so both stay strictly positive. 1.0 is "
+             "the frozen prior. QfCk Q3 ablation.",
+    )
+    parser.add_argument(
         "--skip-npe",
         action="store_true",
         help="Skip the downstream NPE/CRPS/coverage stage entirely (inference "
@@ -860,6 +888,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # QfCk Q3 ablation knobs. These are module constants consumed inside the
+    # simulator and the prior draws, so they are rebound here, before any
+    # simulation runs, and recorded in config_manifest.json below.
+    global NOISE_STD, BETA_MIN, BETA_MAX, GAMMA_MIN, GAMMA_MAX
+    if args.noise_std is not None:
+        NOISE_STD = float(args.noise_std)
+    if args.prior_width_scale != 1.0:
+        sc = float(args.prior_width_scale)
+
+        def _widen(lo, hi, scale):
+            # Scale in log space about the geometric midpoint: beta and gamma are
+            # strictly positive, and a linear rescale at scale=2 would push the
+            # gamma lower edge negative.
+            gm = float(np.sqrt(lo * hi))
+            half = 0.5 * float(np.log(hi / lo)) * scale
+            return gm * float(np.exp(-half)), gm * float(np.exp(half))
+
+        BETA_MIN, BETA_MAX = _widen(BETA_MIN, BETA_MAX, sc)
+        GAMMA_MIN, GAMMA_MAX = _widen(GAMMA_MIN, GAMMA_MAX, sc)
+
     config = CONFIGS[args.mode]
     outdir = args.out_dir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -885,6 +933,20 @@ def main() -> None:
         "config": asdict(config),
         "stage_seeds": seeds,
         "thresholds": {"min_r0_corr": args.min_r0_corr},
+        # QfCk Q3 ablation. Recorded explicitly because these are module
+        # constants rather than RunConfig fields, so asdict(config) above does
+        # not capture them. supercriticality_accept_rate is the fraction of
+        # prior draws surviving the beta/gamma >= 1 + DELTA cut: widening the
+        # prior changes it, so the *effective* prior is not a simple rescale of
+        # the frozen one and the arms are not directly comparable without it.
+        "ablation": {
+            "noise_std": float(NOISE_STD),
+            "prior_width_scale": float(args.prior_width_scale),
+            "beta_range": [float(BETA_MIN), float(BETA_MAX)],
+            "gamma_range": [float(GAMMA_MIN), float(GAMMA_MAX)],
+            "supercriticality_delta": float(DELTA),
+            "supercriticality_accept_rate": _supercriticality_accept_rate(),
+        },
         "git_commit": git_commit_hash(),
     }
     with open(outdir / "config_manifest.json", "w") as handle:

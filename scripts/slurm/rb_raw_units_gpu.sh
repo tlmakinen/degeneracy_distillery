@@ -36,6 +36,11 @@ NSIMS="${NSIMS:-}"
 N_TEST="${N_TEST:-}"
 MIN_NUSSELT_CORR="${MIN_NUSSELT_CORR:-0.9}"
 MIN_NUSSELT_COSINE="${MIN_NUSSELT_COSINE:-0.9}"
+# The driver default is 0.5 nats. On the n_params=3 smoke probe the third
+# Pi axis sits near that line (0.5 log lambda about 0.5-1.0), so this
+# launcher uses 0.25, inside the gap before the two collapsed axes.
+RANK_RULE="${RANK_RULE:-info}"
+INFO_FLOOR="${INFO_FLOOR:-0.25}"
 SR_TIME_LIMIT="${SR_TIME_LIMIT:-}"
 
 SEED="${SLURM_ARRAY_TASK_ID:-0}"
@@ -90,6 +95,7 @@ echo "venv: $VENV_DIR"
 echo "mode: $MODE"
 echo "n_params: $N_PARAMS"
 echo "master seed: $SEED"
+echo "rank rule: $RANK_RULE  info floor: $INFO_FLOOR"
 echo "out_dir: $OUT_DIR"
 echo "XLA_FLAGS: $XLA_FLAGS"
 
@@ -100,6 +106,8 @@ CMD=(python scripts/oneshot_sweep.py
   --problem-arg "min_nusselt_corr=${MIN_NUSSELT_CORR}"
   --problem-arg "min_nusselt_cosine=${MIN_NUSSELT_COSINE}"
   --arms oneshot
+  --rank-rule "$RANK_RULE"
+  --info-floor "$INFO_FLOOR"
   --num-trials 1
   --trial-start "$SEED"
   --seed 0

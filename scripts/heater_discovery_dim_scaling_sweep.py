@@ -212,6 +212,160 @@ def analytic_eta(theta: np.ndarray, cfg: ChainHeaterCfg, d: int) -> np.ndarray:
 
 
 # =============================================================================
+# Local workaround: the flattening module's exponential visualisation grid
+# =============================================================================
+
+class capped_visualisation_grid:
+    """Bound the ``num_pts ** n_params`` grid at the end of ``fit_flattening``.
+
+    ``training_loop_flatten.fit_flattening`` finishes with a coordinate
+    visualisation block (around lines 1448-1473) that builds a full
+    tensor-product grid over *all* ``n_params`` axes and evaluates the model on
+    it::
+
+        if n_params > 3: num_pts = 5
+        grds = jnp.meshgrid(xs, ys, *extra)
+        X = jnp.stack([g.flatten() for g in grds], axis=-1)
+        etas = jax.vmap(mymodel)(X)[:, :2]
+        if do_plot:                       # only the PLOTTING is guarded
+            ...
+
+    The ``do_plot`` guard covers only the plotting, so the grid and the vmap run
+    unconditionally and ``etas`` is discarded when ``do_plot=False`` -- which is
+    what this sweep passes. The cost is ``5 ** d`` rows:
+
+        d=8  -> 390,625        (works, pure waste)
+        d=10 -> 9,765,625      -> JaxRuntimeError INTERNAL: Autotuning failed
+        d=12 -> 244,140,625    -> JaxRuntimeError RESOURCE_EXHAUSTED
+
+    so every d >= 10 run died in the flattening stage before this workaround,
+    for reasons unrelated to the science. The block sits *after* ``np.savez``,
+    so results are unaffected -- it is wasted compute that happens to be fatal
+    at high d.
+
+    ``jnp.meshgrid`` is used nowhere else in ``training_loop_flatten``, so
+    scoping the patch to the ``fit_flattening`` call is safe. The shared module
+    is deliberately left unmodified so other experiments are unaffected.
+    """
+
+    def __init__(self, max_side: int = 32):
+        self.max_side = int(max_side)
+        self._saved: Optional[Callable] = None
+
+    def __enter__(self) -> "capped_visualisation_grid":
+        import jax.numpy as jnp
+
+        real = jnp.meshgrid
+        self._saved = real
+        side = self.max_side
+
+        def _capped(*arrays, **kwargs):
+            # Keep a usable 2-D slice for the first two axes; the remaining
+            # axes are constant dummy values in this block, so collapsing them
+            # to a single point changes nothing that is used.
+            trimmed = []
+            for i, a in enumerate(arrays):
+                a = jnp.asarray(a)
+                trimmed.append(a[:side] if i < 2 else a[:1])
+            return real(*trimmed, **kwargs)
+
+        jnp.meshgrid = _capped
+        return self
+
+    def __exit__(self, *exc) -> None:
+        import jax.numpy as jnp
+
+        if self._saved is not None:
+            jnp.meshgrid = self._saved
+            self._saved = None
+
+
+# =============================================================================
+# Product level-set recovery test
+# =============================================================================
+
+def product_preserving_partner(
+    theta: np.ndarray, cfg: ChainHeaterCfg, rng: np.random.Generator,
+) -> np.ndarray:
+    """Return ``theta'`` with **exactly** the same product, inside the prior box.
+
+    Picks two coordinates and applies ``(t_i, t_j) -> (c * t_i, t_j / c)``,
+    which leaves ``prod_i theta_i`` invariant by construction. ``c`` is drawn
+    log-uniformly over the widest interval keeping both coordinates inside
+    ``[theta_min, theta_max]``, so no rejection sampling is needed and the
+    construction works unchanged at every ``d``.
+    """
+    lo, hi = float(cfg.theta_min), float(cfg.theta_max)
+    t = np.array(theta, dtype=np.float64, copy=True)
+    n, d = t.shape
+    if d < 2:
+        return t
+    r = np.arange(n)
+    i = rng.integers(0, d, n)
+    j = (i + 1 + rng.integers(0, d - 1, n)) % d          # j != i
+    ti, tj = t[r, i], t[r, j]
+    c_lo = np.maximum(lo / ti, tj / hi)
+    c_hi = np.minimum(hi / ti, tj / lo)
+    c_lo = np.maximum(c_lo, 1e-12)
+    c_hi = np.maximum(c_hi, c_lo)
+    c = c_lo * (c_hi / c_lo) ** rng.uniform(size=n)
+    t[r, i] = np.clip(c * ti, lo, hi)
+    t[r, j] = np.clip(tj / c, lo, hi)
+    return t
+
+
+def level_set_unexplained(
+    fn: Callable[[np.ndarray], np.ndarray],
+    cfg: ChainHeaterCfg,
+    d: int,
+    rng: np.random.Generator,
+    n_pairs: int,
+) -> float:
+    """Fraction of a coordinate's variance that the product cannot explain.
+
+    The data depend on ``theta`` only through ``P = prod_i theta_i``, so a
+    correct distilled coordinate is *some* monotone function ``h(P)`` -- the
+    whole equivalence class is correct, not just the analytic representative.
+    Every member of that class is constant on the level sets of ``P``, so::
+
+        U = E_P[ Var(eta | P) ] / Var(eta)      in [0, 1]
+
+    is exactly zero iff the coordinate is a function of the product alone.
+    Estimated from matched pairs using ``E[(eta - eta')^2 | P] = 2 Var(eta|P)``.
+
+    This tests membership in the equivalence class directly, whereas the
+    Spearman score tests proximity to one hand-picked representative
+    (``h = log``). That distinction matters on this prior: ``log`` is nearly
+    affine on a narrow positive box, so a purely additive coordinate -- which
+    has no multiplicative structure at all -- scores |rho| ~ 0.996 and is
+    indistinguishable from a true recovery under any Spearman threshold. Its
+    ``U`` is small but nonzero, and crucially it is *measurable*, which is why
+    the linear surrogate is recorded alongside as the reference to beat.
+
+    ``U`` is invariant to shift and scale, so the arbitrary units SR returns
+    need no standardisation.
+
+    Returns ``nan`` if the coordinate is degenerate (zero variance) or
+    non-finite on too many draws.
+    """
+    theta = rng.uniform(
+        cfg.theta_min, cfg.theta_max, size=(int(n_pairs), d)
+    ).astype(np.float64)
+    partner = product_preserving_partner(theta, cfg, rng)
+
+    v1 = np.asarray(fn(theta), dtype=np.float64).reshape(theta.shape[0], -1)[:, 0]
+    v2 = np.asarray(fn(partner), dtype=np.float64).reshape(partner.shape[0], -1)[:, 0]
+    good = np.isfinite(v1) & np.isfinite(v2)
+    if good.sum() < 10:
+        return float("nan")
+    v1, v2 = v1[good], v2[good]
+    total_var = float(np.var(np.concatenate([v1, v2])))
+    if not np.isfinite(total_var) or total_var <= 1e-30:
+        return float("nan")
+    return float(np.mean((v1 - v2) ** 2) / (2.0 * total_var))
+
+
+# =============================================================================
 # Standardisation of a discovered coordinate
 # =============================================================================
 
@@ -476,11 +630,24 @@ def run_discovery(
     )
     runtimes["fishnets"] = time.time() - stage_start
 
-    # --- Flattening ---------------------------------------------------------
+    # --- Flattening + alignment + rank, with restart selection --------------
     # Rank-deficient regime: the forward/backward invertibility penalty pulls
     # J toward the identity, which is the opposite of what d-1 unidentifiable
     # directions need, so it is off by default here.
-    stage_start = time.time()
+    #
+    # The flattening optimum is strongly seed-sensitive. At identical settings
+    # some seeds isolate the informative direction and some do not, and the
+    # difference is already visible in the kept axis's Fisher-alignment score
+    # *before* any comparison to ground truth: measured 0.998 for a run that
+    # recovered the product exactly (level-set U ~ 1e-31) against 0.65-0.79 for
+    # runs that returned a single-variable or affine coordinate. Restarting the
+    # flow and keeping the highest-scoring attempt is therefore an oracle-free
+    # selection rule -- it reads the Fisher and the Jacobian only, never the
+    # analytic coordinate -- and it is reported as part of the method rather
+    # than applied silently.
+    #
+    # The fishnet ensemble is trained once and reused across restarts, so K
+    # restarts cost roughly (fishnets + K * flatten) rather than K full runs.
     with np.load(fishnets_dir / "fishnets_outputs.npz") as fish:
         thetas = jnp.asarray(fish["theta"])
         fs_np = np.asarray(fish["Fs"])
@@ -511,77 +678,179 @@ def run_discovery(
             flush=True,
         )
 
-    _w, ensemble_ws, _outputs, flatten_model = fit_flattening(
-        F_network_ensemble=jnp.asarray(fs_np),
-        θs=thetas,
-        ensemble_weights=ensemble_weights,
-        flattener_activation="softplus",
-        loss_type=args.loss_type,
-        forward_backward_mlp=not args.no_invertibility_mlp,
-        forward_backward_invertibility_weight=args.invertibility_weight,
-        n_layers=5,
-        offset=0.0,
-        beta_det=args.beta_det,
-        noise=args.flatten_noise,
-        batch_size=flat_batch,
-        finetune_epochs=args.flatten_finetune_epochs,
-        epochs_phase1=args.flatten_epochs_phase1,
-        epochs_phase2=args.flatten_epochs_phase2,
-        lr_phase1=2e-6,
-        lr_schedule_initial=7e-5,
-        lr_decay=0.3,
-        l1_alpha=0.0,
-        do_plot=False,
-        seed=seed,
-        output_prefix=flatten_prefix,
-        Fisher_to_flatten="best",
-        return_model=True,
-        # The module is used in-process for SR augmentation, so the per-run
-        # pickle is pure I/O overhead across a few hundred runs and would drag
-        # in a cloudpickle dependency the sweep does not otherwise need.
-        save_flatten_model_pickle=False,
-    )
-    runtimes["flatten"] = time.time() - stage_start
-
-    # --- Alignment ----------------------------------------------------------
-    stage_start = time.time()
-    flattened_npz = Path(flatten_prefix + ".npz")
-    aligned = load_and_process_data_v2(
-        datapath=str(flattened_npz.parent) + os.sep,
-        filename=flattened_npz.name,
-        num_samps=min(4000, int(theta_train.shape[0])),
-        seed=44 + seed,
-        process_ensemble=True,
-        n_d=1.0,
-        align_mode=args.align_mode,
-        separate_nonlinearity=True,
-        canonicalize="permute_and_sign",
-        use_prior_normalization=True,
-        restore_reference_mean=True,
-        Fisher_to_flatten="best",
-        verbose=False,
-    )
-    X = np.asarray(aligned["X"])
-    mask = np.isfinite(X).all(axis=1) & (X > 0.0).all(axis=1)
-    X = X[mask]
-    y = np.asarray(aligned["y"])[mask]
-    y_std = np.asarray(aligned["y_std"])[mask]
-    dy_sr = np.asarray(aligned["dy_sr"])[mask]
-    Fs = np.asarray(aligned["Fs"])[mask]
-    if X.shape[0] == 0:
-        raise RuntimeError("alignment left no finite positive samples")
-    runtimes["alignment"] = time.time() - stage_start
-
-    # --- Rank selection -----------------------------------------------------
-    stage_start = time.time()
     prior_scales = np.full(d, args.theta_max - args.theta_min, dtype=np.float64)
-    rank_info = select_informative_axes(
-        Fs, dy_sr, prior_scales, args.rank_floor_rel, max_rank=args.max_rank,
-        method=args.rank_method, min_gap=args.rank_min_gap,
-    )
-    runtimes["rank"] = time.time() - stage_start
-    keep_axes = [int(i) for i in rank_info["keep_axes"]]
+
+    # --- Fisher-linear coordinate (no flattening, no SR, deterministic) ------
+    # The learned Fisher's informative *direction* turns out to be essentially
+    # constant across theta -- measured spread (mean |cos| of each per-sample top
+    # eigenvector against the mean) is 0.9998-1.0000, against a true
+    # grad-log-P spread of 0.9855 at d=4. That is consistent with the
+    # architecture: the fishnet Fisher head is applied to the *data* only, and
+    # y = P*kernel + noise carries information about P but not about the
+    # individual theta_i, so the direction cannot track theta.
+    #
+    # Given a near-constant direction, projecting theta onto its mean is a
+    # deterministic 1-D reduction that needs none of the fragile machinery. It
+    # is oracle-free (Fisher only) and, unlike lambda_max, its level-set score
+    # is stable in d (~0.006 at d=2 to ~0.012 at d=6, versus lambda_max
+    # degrading to 0.155 by d=12, because lambda_max ~ P^2 sum(1/theta_i^2)
+    # carries a second degree of freedom that varies at fixed P).
+    #
+    # Caveat worth reporting alongside any result from this arm: it works here
+    # *because* the direction field is near-constant, which is measurable from
+    # the Fisher alone. `fisher_direction_spread` is recorded so the
+    # applicability of the linear reduction can be checked rather than assumed --
+    # a spread well below 1 means a linear projection is not enough and the
+    # flattening flow is genuinely needed.
+    F_mean_persample = 0.5 * (fs_np + np.swapaxes(fs_np, -1, -2))
+    _w_ens = np.asarray(ensemble_weights, dtype=np.float64)
+    _w_ens = _w_ens / max(_w_ens.sum(), 1e-300)
+    F_ps = np.einsum("m,mbij->bij", _w_ens, F_mean_persample)
+    _ev, _V = np.linalg.eigh(F_ps)
+    _g = _V[:, :, -1]
+    _g = _g * np.sign(_g @ _g[0])[:, None]          # resolve per-sample sign
+    _u = _g / np.maximum(np.linalg.norm(_g, axis=1, keepdims=True), 1e-300)
+    fisher_v = _u.mean(axis=0)
+    fisher_v = fisher_v / max(float(np.linalg.norm(fisher_v)), 1e-300)
+    _m = fisher_v / max(float(np.linalg.norm(fisher_v)), 1e-300)
+    fisher_direction_spread = float(np.abs(_u @ _m).mean())
+    print(f"[fisher-linear] direction spread {fisher_direction_spread:.4f} "
+          f"(1.0 = perfectly constant field); v = "
+          f"{np.array2string(fisher_v, precision=3)}", flush=True)
+
+    def _flatten_align_rank(attempt_seed: int, prefix: str) -> dict[str, Any]:
+        """One flattening restart, through to its Fisher-alignment score."""
+        t0 = time.time()
+        # See capped_visualisation_grid: without this, every d >= 10 run dies in
+        # the flattening stage on a 5**d visualisation grid that is discarded.
+        with capped_visualisation_grid():
+            _w, ens_ws, _outputs, model = fit_flattening(
+                F_network_ensemble=jnp.asarray(fs_np),
+                θs=thetas,
+                ensemble_weights=ensemble_weights,
+                flattener_activation="softplus",
+                loss_type=args.loss_type,
+                forward_backward_mlp=not args.no_invertibility_mlp,
+                forward_backward_invertibility_weight=args.invertibility_weight,
+                hidden_size=args.flatten_hidden_size,
+                n_layers=args.flatten_n_layers,
+                offset=0.0,
+                beta_det=args.beta_det,
+                noise=args.flatten_noise,
+                batch_size=flat_batch,
+                finetune_epochs=args.flatten_finetune_epochs,
+                epochs_phase1=args.flatten_epochs_phase1,
+                epochs_phase2=args.flatten_epochs_phase2,
+                lr_phase1=2e-6,
+                lr_schedule_initial=7e-5,
+                lr_decay=0.3,
+                l1_alpha=0.0,
+                do_plot=False,
+                seed=attempt_seed,
+                output_prefix=prefix,
+                Fisher_to_flatten="best",
+                return_model=True,
+                # The module is used in-process for SR augmentation, so the per-run
+                # pickle is pure I/O overhead across a few hundred runs and would
+                # drag in a cloudpickle dependency the sweep does not need.
+                save_flatten_model_pickle=False,
+            )
+        t_flat = time.time() - t0
+
+        t0 = time.time()
+        npz = Path(prefix + ".npz")
+        al = load_and_process_data_v2(
+            datapath=str(npz.parent) + os.sep,
+            filename=npz.name,
+            num_samps=min(4000, int(theta_train.shape[0])),
+            seed=44 + attempt_seed,
+            process_ensemble=True,
+            n_d=1.0,
+            align_mode=args.align_mode,
+            separate_nonlinearity=True,
+            canonicalize="permute_and_sign",
+            use_prior_normalization=True,
+            restore_reference_mean=True,
+            Fisher_to_flatten="best",
+            verbose=False,
+        )
+        Xa = np.asarray(al["X"])
+        m = np.isfinite(Xa).all(axis=1) & (Xa > 0.0).all(axis=1)
+        Xa = Xa[m]
+        if Xa.shape[0] == 0:
+            raise RuntimeError("alignment left no finite positive samples")
+        ya = np.asarray(al["y"])[m]
+        ystd = np.asarray(al["y_std"])[m]
+        dysr = np.asarray(al["dy_sr"])[m]
+        Fsa = np.asarray(al["Fs"])[m]
+        t_align = time.time() - t0
+
+        t0 = time.time()
+        ri = select_informative_axes(
+            Fsa, dysr, prior_scales, args.rank_floor_rel, max_rank=args.max_rank,
+            method=args.rank_method, min_gap=args.rank_min_gap,
+        )
+        t_rank = time.time() - t0
+
+        kept = [int(i) for i in ri["keep_axes"]]
+        score = float(np.mean([ri["axis_scores"][i] for i in kept])) if kept else 0.0
+        return {
+            "score": score, "rank_info": ri, "keep_axes": kept, "aligned": al,
+            "X": Xa, "y": ya, "y_std": ystd, "dy_sr": dysr, "Fs": Fsa,
+            "flatten_model": model, "ensemble_ws": ens_ws,
+            "t_flat": t_flat, "t_align": t_align, "t_rank": t_rank,
+        }
+
+    n_restarts = max(1, int(args.flatten_restarts))
+    attempts: list[dict[str, Any]] = []
+    restart_errors: list[str] = []
+    t_flat = t_align = t_rank = 0.0
+    for k in range(n_restarts):
+        # Distinct seeds per restart; k=0 keeps the original single-run seed so
+        # --flatten-restarts 1 reproduces earlier behaviour exactly.
+        att_seed = seed if k == 0 else seed + 100_003 * k
+        prefix = flatten_prefix if k == 0 else f"{flatten_prefix}_r{k}"
+        try:
+            att = _flatten_align_rank(att_seed, prefix)
+        except Exception as exc:
+            # A restart that blows up numerically (e.g. the non-finite
+            # eta_ensemble seen with noise=1e-2 + squared_frob_det) is recorded
+            # and skipped rather than failing the run, provided some restart
+            # survives.
+            restart_errors.append(f"restart{k}: {type(exc).__name__}: {exc}")
+            print(f"[flatten] restart {k} failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+            continue
+        t_flat += att["t_flat"]; t_align += att["t_align"]; t_rank += att["t_rank"]
+        attempts.append(att)
+        print(f"[flatten] restart {k}: rank {att['rank_info']['rank']}, "
+              f"keep {att['keep_axes']}, alignment score {att['score']:.4f}",
+              flush=True)
+
+    if not attempts:
+        raise RuntimeError(
+            "every flattening restart failed: " + " | ".join(restart_errors)
+        )
+
+    scores_all = [float(a["score"]) for a in attempts]
+    best_idx = int(np.argmax(scores_all))
+    best = attempts[best_idx]
+    runtimes["flatten"] = t_flat
+    runtimes["alignment"] = t_align
+    runtimes["rank"] = t_rank
+
+    rank_info = best["rank_info"]
+    keep_axes = best["keep_axes"]
+    aligned = best["aligned"]
+    X, y, y_std = best["X"], best["y"], best["y_std"]
+    dy_sr, Fs = best["dy_sr"], best["Fs"]
+    flatten_model, ensemble_ws = best["flatten_model"], best["ensemble_ws"]
+
     spec = rank_info["median_relative_spectrum"]
+    if n_restarts > 1:
+        print(f"[flatten] selected restart {best_idx} of {len(attempts)} "
+              f"(scores {np.array2string(np.asarray(scores_all), precision=4)})",
+              flush=True)
     print(
         f"[rank] retained rank {rank_info['rank']} of {d}; keep axes {keep_axes}; "
         f"median relative spectrum "
@@ -591,7 +860,18 @@ def run_discovery(
         flush=True,
     )
 
-    result: dict[str, Any] = {"rank_info": rank_info, "n_params": d}
+    result: dict[str, Any] = {
+        "rank_info": rank_info,
+        "n_params": d,
+        "fisher_v": fisher_v,
+        "fisher_direction_spread": fisher_direction_spread,
+        "n_flatten_restarts": n_restarts,
+        "n_flatten_restarts_ok": len(attempts),
+        "selected_restart": best_idx,
+        "alignment_score": float(best["score"]),
+        "restart_scores": scores_all,
+        "restart_errors": restart_errors,
+    }
     if args.rank_only:
         return result
 
@@ -805,6 +1085,26 @@ def write_recovery_table(df: pd.DataFrame, out_dir: Path) -> None:
             "median_abs_spearman": (
                 float(ok["spearman_abs"].median()) if "spearman_abs" in ok else np.nan
             ),
+            # Level-set criterion, reported beside the Spearman one rather than
+            # replacing it: the two disagree exactly where a coordinate is
+            # rank-correlated with the analytic axis without being a function
+            # of the product, which is the failure mode Spearman cannot see.
+            "levelset_recovered": (
+                int(ok["levelset_recovered"].sum())
+                if "levelset_recovered" in ok else 0
+            ),
+            "median_levelset_U": (
+                float(ok["levelset_unexplained"].median())
+                if "levelset_unexplained" in ok else np.nan
+            ),
+            "median_levelset_U_linear": (
+                float(ok["levelset_unexplained_linear"].median())
+                if "levelset_unexplained_linear" in ok else np.nan
+            ),
+            "median_levelset_ratio_vs_linear": (
+                float(ok["levelset_ratio_vs_linear"].median())
+                if "levelset_ratio_vs_linear" in ok else np.nan
+            ),
             "median_complexity": (
                 float(ok["complexity"].median()) if "complexity" in ok else np.nan
             ),
@@ -918,6 +1218,26 @@ def parse_args() -> argparse.Namespace:
                         "number of samples reaching the stage, since "
                         "fit_flattening drops every sample when the count is "
                         "below the batch size.")
+    p.add_argument("--flatten-hidden-size", type=int, default=256,
+                   help="Hidden width of the flattening residual MLP. The "
+                        "shared module's default is 256 and it does NOT scale "
+                        "with d, so the same capacity maps R^2 -> R^2 and "
+                        "R^12 -> R^12. Exposed here to test whether the "
+                        "falling per-restart success rate at high d is a "
+                        "capacity limit. 256 reproduces previous behaviour.")
+    p.add_argument("--flatten-n-layers", type=int, default=5,
+                   help="Residual blocks in the flattening MLP (module default "
+                        "is 3; this sweep has always passed 5).")
+    p.add_argument("--flatten-restarts", type=int, default=1,
+                   help="Independent flattening restarts per run, sharing one "
+                        "fishnet ensemble. The attempt whose retained axes have "
+                        "the highest Fisher-alignment score is kept. This is an "
+                        "oracle-free selection rule (it reads only the Fisher "
+                        "and the Jacobian) and it matters: at fixed settings the "
+                        "flattening optimum is seed-dependent, and the alignment "
+                        "score separates exact recoveries (~0.998) from "
+                        "single-variable or affine coordinates (0.65-0.79). "
+                        "1 reproduces the previous single-fit behaviour.")
     p.add_argument("--flatten-epochs-phase1", type=int, default=1000)
     p.add_argument("--flatten-epochs-phase2", type=int, default=500)
     p.add_argument("--flatten-finetune-epochs", type=int, default=200)
@@ -961,6 +1281,11 @@ def parse_args() -> argparse.Namespace:
                         "unrepresentable.")
     p.add_argument("--sr-max-depth", type=int, default=None,
                    help="Default max(10, d+4).")
+    p.add_argument("--levelset-n-pairs", type=int, default=20000,
+                   help="Matched product-preserving pairs used for the "
+                        "level-set recovery test. Pure numpy on the symbolic "
+                        "expression, so this is cheap and never touches the "
+                        "simulator; it is not part of the simulation budget.")
     p.add_argument("--recovery-corr-thresh", type=float, default=0.99,
                    help="Spearman |rho| against the analytic axis at or above "
                         "which a run counts as symbolic recovery.")
@@ -1102,6 +1427,19 @@ def main() -> None:
                     row["keep_axes"] = ";".join(
                         str(int(i)) for i in rank_info["keep_axes"]
                     )
+                    # Restart selection is part of the method, so it is
+                    # recorded per run: how many restarts ran, how many
+                    # survived, which was kept, and the full score vector, so
+                    # the selection can be audited without rerunning.
+                    row["alignment_score"] = disc.get("alignment_score", np.nan)
+                    row["n_flatten_restarts"] = disc.get("n_flatten_restarts", 1)
+                    row["n_flatten_restarts_ok"] = disc.get(
+                        "n_flatten_restarts_ok", 1
+                    )
+                    row["selected_restart"] = disc.get("selected_restart", 0)
+                    row["restart_scores"] = ";".join(
+                        f"{s:.6f}" for s in disc.get("restart_scores", [])
+                    )
                     spectra[f"{tag}_median_relative_spectrum"] = \
                         rank_info["median_relative_spectrum"]
                     spectra[f"{tag}_gap_ratios"] = rank_info["gap_ratios"]
@@ -1161,10 +1499,50 @@ def main() -> None:
                         row["symbolic_recovered"] = bool(
                             abs(rho) >= args.recovery_corr_thresh
                         )
+
+                        # Level-set test: does the coordinate depend on theta
+                        # only through the product? Scored against two
+                        # references computed on the same prior and the same
+                        # pair draws -- the analytic axis (must come out ~0,
+                        # so it doubles as a check that the estimator itself
+                        # is working) and an additive surrogate carrying no
+                        # multiplicative structure, which is the bar a genuine
+                        # recovery has to clear.
+                        ls_rng = np.random.default_rng(seed + 909_091)
+                        n_pairs = int(args.levelset_n_pairs)
+                        u_disc = level_set_unexplained(
+                            lambda t: project(t)[:, 0], cfg, d, ls_rng, n_pairs,
+                        )
+                        u_lin = level_set_unexplained(
+                            lambda t: t.sum(axis=1), cfg, d, ls_rng, n_pairs,
+                        )
+                        u_an = level_set_unexplained(
+                            lambda t: np.log(t).sum(axis=1), cfg, d,
+                            ls_rng, n_pairs,
+                        )
+                        row["levelset_unexplained"] = u_disc
+                        row["levelset_unexplained_linear"] = u_lin
+                        row["levelset_unexplained_analytic"] = u_an
+                        row["levelset_ratio_vs_linear"] = (
+                            float(u_disc / u_lin)
+                            if np.isfinite(u_disc) and np.isfinite(u_lin) and u_lin > 0
+                            else np.nan
+                        )
+                        # Baseline-relative, so there is no threshold to tune
+                        # and no d-dependent cutoff to defend: U falls like 1/d
+                        # for every coordinate, and dividing by the surrogate
+                        # measured at the same d cancels that trend.
+                        row["levelset_recovered"] = bool(
+                            np.isfinite(u_disc) and np.isfinite(u_lin)
+                            and u_disc < u_lin
+                        )
                         print(
                             f"[recovery] |rho|={abs(rho):.4f}  "
                             f"rank_correct={row['rank_correct']}  "
-                            f"symbolic_recovered={row['symbolic_recovered']}",
+                            f"symbolic_recovered={row['symbolic_recovered']}  "
+                            f"levelset_U={u_disc:.5f} "
+                            f"(linear {u_lin:.5f}, analytic {u_an:.2e})  "
+                            f"levelset_recovered={row['levelset_recovered']}",
                             flush=True,
                         )
 
@@ -1213,6 +1591,26 @@ def main() -> None:
                         )
                         row["discovered_log_prob"] = di_lp
                         row["n_eta"] = n_eta
+
+                        # --- fisher-linear arm (no flattening, no SR) ---
+                        # theta projected onto the Fisher's mean informative
+                        # direction. Deterministic: no seeds, no restarts, and
+                        # it cannot "fail to recover", so it yields a usable
+                        # column at every d -- including the dimensions where
+                        # the discovered arm has no valid coordinate.
+                        fisher_v = np.asarray(disc["fisher_v"], dtype=np.float64)
+                        eta_fl_tr = (theta_np.astype(np.float64) @ fisher_v)[:, None]
+                        std_fl = AffineStandardiser.fit(eta_fl_tr)
+                        fl_lp, _fl_curve, fl_post = train_npe(
+                            std_fl(eta_fl_tr), data_np,
+                            np.array([-5.0], dtype=np.float32),
+                            np.array([5.0], dtype=np.float32),
+                            args, device, seed + 3, eta_model,
+                        )
+                        row["fisher_linear_log_prob"] = fl_lp
+                        row["fisher_direction_spread"] = float(
+                            disc["fisher_direction_spread"]
+                        )
 
                         # --- common-axis evaluation ---
                         eta_an_ev = analytic_eta(theta_ev, cfg, d).astype(np.float64)
@@ -1267,9 +1665,50 @@ def main() -> None:
                                 args.n_marginal_samples, device,
                             )
                         ))
+                        # Fisher-linear axis. theta -> v.theta is exact, so the
+                        # raw arm's push-forward onto this axis is exact too --
+                        # same footing as the discovered axis, and available at
+                        # every d because this arm never fails.
+                        eta_fl_ev = std_fl(
+                            (theta_ev.astype(np.float64) @ fisher_v)[:, None]
+                        )[:, 0].astype(np.float64)
+
+                        def to_fisher_linear(theta_s: np.ndarray) -> np.ndarray:
+                            t = np.asarray(theta_s, dtype=np.float64)
+                            return std_fl((t @ fisher_v)[:, None])[:, 0]
+
+                        row["raw_on_fisher_linear_marg"] = float(np.nanmean(
+                            marginal_log_probs_on_axis(
+                                raw_post, data_ev, eta_fl_ev, to_fisher_linear,
+                                args.n_marginal_samples, device,
+                            )
+                        ))
+                        row["fisher_linear_on_fisher_linear_marg"] = float(
+                            np.nanmean(
+                                marginal_log_probs_on_axis(
+                                    fl_post, data_ev, eta_fl_ev,
+                                    lambda s: np.asarray(s)[:, 0]
+                                    if np.asarray(s).ndim > 1
+                                    else np.asarray(s).reshape(-1),
+                                    args.n_marginal_samples, device,
+                                )
+                            )
+                        )
+
+                        # Level-set score for the Fisher-linear coordinate, on
+                        # the same footing as the discovered one, so the two
+                        # reductions are directly comparable.
+                        ls_rng2 = np.random.default_rng(seed + 909_093)
+                        row["levelset_unexplained_fisher_linear"] = \
+                            level_set_unexplained(
+                                lambda t: t @ fisher_v, cfg, d, ls_rng2,
+                                int(args.levelset_n_pairs),
+                            )
+
                         print(
                             f"[npe] raw={raw_lp:.4f}  analytic={an_lp:.4f}  "
-                            f"discovered={di_lp:.4f}  (n_eta={n_eta} of {d})",
+                            f"discovered={di_lp:.4f}  fisher_linear={fl_lp:.4f}  "
+                            f"(n_eta={n_eta} of {d})",
                             flush=True,
                         )
 

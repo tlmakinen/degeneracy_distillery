@@ -517,7 +517,11 @@ def whittle_ladder(
     r_hat = m_probe
     if rank_rule == "info":
         info = rungs[0]["info_nats"]
-        r_hat = int(max(1, np.sum(info > float(info_floor))))
+        # When m_probe > d the spare axes collapse (lam ~ 0) and their info
+        # is a ratio of two near-zero variances. eta has at most d
+        # independent directions, so cap there.
+        d_theta = int(np.asarray(th_fit).shape[-1])
+        r_hat = int(max(1, min(np.sum(info > float(info_floor)), d_theta)))
         if verbose:
             print(
                 f"[ladder] info rule  nats={np.round(info, 3)}  "

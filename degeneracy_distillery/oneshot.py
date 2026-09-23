@@ -463,7 +463,7 @@ def whittle_ladder(
     refit_steps: Optional[int] = None,
     refit_pad: Optional[int] = None,
     rank_rule: str = "nll",
-    info_floor: float = 1.0,
+    info_floor: float = 0.5,
     batch: int = DEFAULT_BATCH,
     lr: float = DEFAULT_LR,
     scale_boost: float = SCALE_BOOST,

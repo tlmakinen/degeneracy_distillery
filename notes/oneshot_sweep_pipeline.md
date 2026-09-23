@@ -27,7 +27,10 @@ and it does not remove any coordinate from later steps.
 The rank comes from the probe. `--rank-rule info` (the default) scores
 each probe axis on held-out data as
 `0.5 log(prior var of eta_j / var of (eta_j - eta_hat_j(x)))` and counts
-the axes above `--info-floor` (1 nat). That is the one-step loss of the
+the axes above `--info-floor` (0.5 nats), capped at `d`. Uninformed axes
+score 0 plus sampling error; over the Rosenbrock grid the largest was
+0.23, and a 1-nat floor missed the real second axis at `d=32` (0.66-1.25
+nats). That is the one-step loss of the
 axis against a model that sees no data, so it does not depend on the
 units of theta. `--rank-rule nll` keeps the old descent, which drops
 axes while held-out NLL does not rise; that compares densities over

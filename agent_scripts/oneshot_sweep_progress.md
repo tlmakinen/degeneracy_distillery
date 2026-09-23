@@ -11,7 +11,8 @@ Rayleigh-Benard `n_params=3` gate. The heater sweep has its own note,
 2. Probe at `m_probe` latents (Rosenbrock 4, RB 5), 20k steps.
 3. Rank, `--rank-rule info` (default). Per probe axis, on held-out data,
    `info_j = 0.5 log(prior var of eta_j / var of (eta_j - eta_hat_j(x)))`.
-   `r_hat` counts axes above `--info-floor` (1 nat), capped at `d`.
+   `r_hat` counts axes above `--info-floor` (0.5 nats since 23 Sep 23:20;
+   the first grid used 1 nat), capped at `d`.
    The old NLL drop test (`--rank-rule nll`) depends on the units of theta
    and read `r_hat=1` in 49/49 Rosenbrock trials.
 4. `m_fit = r_hat`, plus one when the probe latent spectrum drops by less

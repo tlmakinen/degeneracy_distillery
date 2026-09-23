@@ -347,7 +347,10 @@ def parse_args() -> argparse.Namespace:
                    help="info: count probe axes above --info-floor nats of held-out "
                         "information. nll: the NLL drop test, which depends on the "
                         "units of theta.")
-    p.add_argument("--info-floor", type=float, default=1.0)
+    p.add_argument("--info-floor", type=float, default=0.5,
+                   help="Uninformed probe axes score 0 +- sampling error (max 0.23 "
+                        "over the Rosenbrock grid); 1.0 missed the real second "
+                        "axis at d=32 (0.66-1.25).")
     p.add_argument("--screen-steps", type=int, default=None)
     p.add_argument("--oneshot-batch", type=int, default=512)
     p.add_argument("--oneshot-lr", type=float, default=1e-3)

@@ -4,7 +4,7 @@ Covers `scripts/oneshot_sweep.py`: Rosenbrock scaling and the
 Rayleigh-Benard `n_params=3` gate. The heater sweep has its own note,
 `agent_scripts/heater_oneshot_progress.md`.
 
-## Protocol (commit `828be86`)
+## Protocol (commit `114db61`)
 
 1. Input screen (group-L1 on theta). Diagnostic only. It does not choose
    the rank or remove coordinates.
@@ -22,11 +22,11 @@ Rayleigh-Benard `n_params=3` gate. The heater sweep has its own note,
 7. Alignment on the test set (`process_ensemble_rotation_v2`).
 8. SR rows: aligned test points plus `1000 d` prior draws. The prior draws
    go through `apply_ensemble_alignment`, so both share one origin.
-   Before `b723f7f`/`e8ed6d6` they were only rotated, and sat a constant
+   Before `4c20bf8`/`61fcb30` they were only rotated, and sat a constant
    27-160 eta units away from the aligned rows.
 9. Operon per component, `pow` kept, complexity cap `max(20, max_length)`.
 10. Frozen rescore of up to 8 stacks on held-out one-step NLL. Before
-    `e8ed6d6` every candidate failed (`th_fit[:1]` shape bug), so
+    `61fcb30` every candidate failed (`th_fit[:1]` shape bug), so
     `expression` was always the MDL pick.
 
 End-to-end check, Rosenbrock `d=4`, reduced budget: info
@@ -39,11 +39,11 @@ Output: `/data103/makinen/degeneracy_experiments/rosenbrock_oneshot_scaling_info
 
 | Job | Tasks | Code | Status at 17:20 |
 |---|---|---|---|
-| `3833302` CPU | oneshot `d=2` (0-9) | `code_snapshots/oneshot_828be86` (exact `git archive`) | queued/running |
+| `3833302` CPU | oneshot `d=2` (0-9) | `code_snapshots/oneshot_828be86` (exact `git archive` of `114db61`; named before the trailer rewrite) | queued/running |
 | `3833239` CPU | oneshot `d=4..32` (10-49) | `code_snapshots/oneshot_20260923_1701` | running |
 | `3833240` GPU | threestep all dims (50-99) | `code_snapshots/oneshot_20260923_1701` | running; `d=32` skipped by budget |
 
-`oneshot_20260923_1701` matches `828be86` in every code file except the
+`oneshot_20260923_1701` matches `114db61` in every code file except the
 `r_hat <= d` cap, which cannot bind for `d >= 4` with `m_probe=4`.
 The `d=2` tasks were resubmitted because, without the cap, the collapsed
 spare probe axes read above 1 nat (`r_hat=3-4` in 8/10); the refit was
@@ -74,5 +74,5 @@ relaxed for RB before any rerun. `n_params=8` not launched.
 - `rosenbrock_oneshot_scaling_projected_a41fd21`: projected probe map.
 - `rosenbrock_oneshot_scaling`: fresh refit, NLL rank rule, alignment
   offset, frozen rescore broken. `threestep/d16` all failed on the
-  `fit_flattening` grid overflow (fixed in `e8ed6d6`).
+  `fit_flattening` grid overflow (fixed in `61fcb30`).
 - `rebuttal_discovery/rayleigh_benard_oneshot_n3*`: pre-fix RB runs.

@@ -360,6 +360,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sr-time-limit", type=int, default=300)
     p.add_argument("--sr-n-aug", type=int, default=None)
     p.add_argument("--sr-n-aug-per-dim", type=int, default=1000)
+    p.add_argument("--sr-allowed-symbols", type=str, default=None,
+                   help="Override the adapter's Operon operator set. Recorded "
+                        "in config_manifest.json so a matched run is auditable.")
     p.add_argument("--sr-max-length", type=int, default=None)
     p.add_argument("--sr-max-depth", type=int, default=None)
     p.add_argument("--sr-fisher", choices=("jtj", "ridge", "identity"), default="jtj")
@@ -514,6 +517,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     else:
         hints = problem.sr_hints()
         n_aug = int(args.sr_n_aug if args.sr_n_aug else args.sr_n_aug_per_dim * problem.d)
+        row["n_sr_aug"] = n_aug
         max_length = int(args.sr_max_length or hints.get("max_length") or max(25, 4 * problem.d + 8))
         max_depth = int(args.sr_max_depth or hints.get("max_depth") or max(10, problem.d + 4))
         rng_sr = np.random.default_rng(seed + 17)
@@ -547,7 +551,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
             time_limit=args.sr_time_limit,
             max_length=max_length,
             max_depth=max_depth,
-            allowed_symbols=hints.get(
+            allowed_symbols=args.sr_allowed_symbols or hints.get(
                 "allowed_symbols",
                 "add,mul,div,pow,constant,variable,sqrt",
             ),
@@ -620,6 +624,16 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     }
     gates = problem.gates(payload)
     row.update(gates)
+    # The frozen-NLL pick and the MDL pick can differ; which coordinates each
+    # one carries is its own question, so score the MDL stack separately
+    # rather than inferring it from the NLL pick.
+    expr_mdl = row.get("expression_mdl")
+    if expr_mdl and expr_mdl != row.get("expression"):
+        try:
+            for k, v in problem.gates({**payload, "expression": expr_mdl}).items():
+                row[f"{k}_mdl"] = v
+        except Exception as exc:
+            print(f"[gates mdl] failed: {exc}", flush=True)
     if "rank_correct" not in row and problem.expected_rank is not None:
         row["rank_correct"] = bool(r_hat == int(problem.expected_rank))
     if "screen_set_correct" not in row:
@@ -785,16 +799,47 @@ def main() -> None:
                         "counts": {
                             "n_train_simulations": int(args.nsims),
                             "n_eval_simulations": int(args.n_test),
+                            "n_augmented_coordinate_evaluations": row.get("n_sr_aug"),
                         },
                         "discovery": {
                             "success": discovery_ok,
                             "r_hat": row.get("r_hat"),
+                            "m_fit": row.get("m_fit"),
                             "expression": row.get("expression"),
-                            "physics_alignment": row.get(
-                                "best_nusselt_abs_corr", row.get("r2_true_min"),
+                            "expression_mdl": row.get("expression_mdl"),
+                            "picks_agree": row.get("picks_agree"),
+                            "physics_alignment_mdl": row.get("physics_alignment_mdl"),
+                            "complementary_mass_diff_alignment_mdl": row.get(
+                                "complementary_mass_diff_alignment_mdl",
                             ),
-                            "mdl_total": row.get("nll_symbolic"),
+                            # Adapters that reproduce a published correlation
+                            # statistic set "physics_alignment" directly; the
+                            # older keys stay as fallbacks so RB is unaffected.
+                            "physics_alignment": row.get(
+                                "physics_alignment",
+                                row.get(
+                                    "best_nusselt_abs_corr", row.get("r2_true_min"),
+                                ),
+                            ),
+                            "physics_alignment_spearman": row.get(
+                                "physics_alignment_spearman",
+                            ),
+                            "physics_alignment_grad_cosine": row.get(
+                                "physics_alignment_grad_cosine",
+                            ),
+                            "complementary_mass_diff_alignment": row.get(
+                                "complementary_mass_diff_alignment",
+                            ),
+                            # This slot used to be filled with nll_symbolic,
+                            # which is a held-out NLL in nats, not a description
+                            # length. The driver computes no raw DL, so it is
+                            # null rather than a wrong number.
+                            "mdl_total": None,
+                            "nll_symbolic": row.get("nll_symbolic"),
+                            "nll_neural": row.get("nll_neural"),
                             "complexity_total": row.get("complexity"),
+                            "r2_true_min": row.get("r2_true_min"),
+                            "r2_sr_min": row.get("r2_sr_min"),
                         },
                         "runtime_seconds": {
                             **{k: float(v) for k, v in runtimes.items()},
@@ -810,16 +855,47 @@ def main() -> None:
                         "counts": {
                             "n_train_simulations": int(args.nsims),
                             "n_eval_simulations": int(args.n_test),
+                            "n_augmented_coordinate_evaluations": row.get("n_sr_aug"),
                         },
                         "discovery": {
                             "success": discovery_ok,
                             "r_hat": row.get("r_hat"),
+                            "m_fit": row.get("m_fit"),
                             "expression": row.get("expression"),
-                            "physics_alignment": row.get(
-                                "best_nusselt_abs_corr", row.get("r2_true_min"),
+                            "expression_mdl": row.get("expression_mdl"),
+                            "picks_agree": row.get("picks_agree"),
+                            "physics_alignment_mdl": row.get("physics_alignment_mdl"),
+                            "complementary_mass_diff_alignment_mdl": row.get(
+                                "complementary_mass_diff_alignment_mdl",
                             ),
-                            "mdl_total": row.get("nll_symbolic"),
+                            # Adapters that reproduce a published correlation
+                            # statistic set "physics_alignment" directly; the
+                            # older keys stay as fallbacks so RB is unaffected.
+                            "physics_alignment": row.get(
+                                "physics_alignment",
+                                row.get(
+                                    "best_nusselt_abs_corr", row.get("r2_true_min"),
+                                ),
+                            ),
+                            "physics_alignment_spearman": row.get(
+                                "physics_alignment_spearman",
+                            ),
+                            "physics_alignment_grad_cosine": row.get(
+                                "physics_alignment_grad_cosine",
+                            ),
+                            "complementary_mass_diff_alignment": row.get(
+                                "complementary_mass_diff_alignment",
+                            ),
+                            # This slot used to be filled with nll_symbolic,
+                            # which is a held-out NLL in nats, not a description
+                            # length. The driver computes no raw DL, so it is
+                            # null rather than a wrong number.
+                            "mdl_total": None,
+                            "nll_symbolic": row.get("nll_symbolic"),
+                            "nll_neural": row.get("nll_neural"),
                             "complexity_total": row.get("complexity"),
+                            "r2_true_min": row.get("r2_true_min"),
+                            "r2_sr_min": row.get("r2_sr_min"),
                         },
                         "runtime_seconds": {"total": row["runtime_total_s"]},
                     })

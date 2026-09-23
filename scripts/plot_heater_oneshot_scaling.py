@@ -165,30 +165,101 @@ def write_tables(ok: pd.DataFrame, out_dir: Path) -> dict:
     return {"t1": t1, "t2": t2, "t3": t3, "t4": t4, "slopes": slopes}
 
 
-def draw_figure(ok: pd.DataFrame, out_dir: Path) -> None:
-    if not {"raw_on_discovered_marg", "discovered_on_discovered_marg"}.issubset(ok.columns):
+def _errorbar(ax, ok: pd.DataFrame, col: str, label: str, color: str, marker: str) -> None:
+    rows = []
+    for d, grp in ok.groupby("d", sort=True):
+        rows.append((int(d), float(grp[col].mean()), sem(grp[col])))
+    ds, mu, err = zip(*rows)
+    ax.errorbar(ds, mu, yerr=err, marker=marker, color=color, label=label, capsize=3)
+
+
+def draw_figure(ok: pd.DataFrame, out_dir: Path, all_rows: pd.DataFrame | None = None) -> None:
+    """Three panels: oracle NPE, recovered-only discovery, recovery rate.
+
+    Averaging discovered-axis scores over failed recoveries hides the
+    signal. The first figure file keeps the original all-trial overlay
+    for the archive; the split figure is the one to read.
+    """
+    plt.rcParams.update({"font.family": "DejaVu Sans", "axes.unicode_minus": False})
+    need = {"raw_on_discovered_marg", "discovered_on_discovered_marg"}
+    if not need.issubset(ok.columns):
         print("skipping figure: discovered-axis columns missing")
         return
+
+    # Archive overlay (all ok trials). Same as before, so old links still work.
     fig, ax = plt.subplots(figsize=(6.4, 4.0))
-    series = [
-        ("raw_on_discovered_marg", "raw on discovered axis", "C0", "o"),
-        ("discovered_on_discovered_marg", "discovered", "C1", "s"),
-    ]
+    _errorbar(ax, ok, "raw_on_discovered_marg", "raw on discovered axis", "C0", "o")
+    _errorbar(ax, ok, "discovered_on_discovered_marg", "discovered", "C1", "s")
     if "analytic_on_analytic_marg" in ok.columns:
-        series.append(("analytic_on_analytic_marg", "analytic (oracle axis)", "C2", "^"))
-    for col, label, color, marker in series:
-        rows = []
-        for d, grp in ok.groupby("d", sort=True):
-            rows.append((int(d), float(grp[col].mean()), sem(grp[col])))
-        ds, mu, err = zip(*rows)
-        ax.errorbar(ds, mu, yerr=err, marker=marker, color=color, label=label, capsize=3)
+        _errorbar(ax, ok, "analytic_on_analytic_marg", "analytic (oracle axis)", "C2", "^")
     ax.set_xlabel("ambient dimension d")
     ax.set_ylabel("mean log-density on a scalar axis (nats)")
     ax.legend(frameon=False)
-    ax.set_title("heater one-step discovery scaling")
+    ax.set_title("all completed trials (failed recoveries included)")
     fig.tight_layout()
     fig.savefig(out_dir / "heater_oneshot_scaling.pdf")
     fig.savefig(out_dir / "heater_oneshot_scaling.png", dpi=150)
+    plt.close(fig)
+
+    rec = ok
+    if "symbolic_recovered" in ok.columns:
+        rec = ok[ok["symbolic_recovered"].astype(bool)]
+    fail = ok
+    if "symbolic_recovered" in ok.columns:
+        fail = ok[~ok["symbolic_recovered"].astype(bool)]
+    denom = all_rows if all_rows is not None and not all_rows.empty else ok
+
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.7))
+
+    ax = axes[0]
+    if {"raw_on_analytic_marg", "analytic_on_analytic_marg"}.issubset(ok.columns):
+        _errorbar(ax, ok, "raw_on_analytic_marg", "raw on analytic axis", "C0", "o")
+        _errorbar(ax, ok, "analytic_on_analytic_marg", "analytic (oracle)", "C2", "^")
+    ax.set_xlabel("ambient dimension d")
+    ax.set_ylabel("mean log-density (nats)")
+    ax.set_title("A  oracle axis, all trials")
+    ax.legend(frameon=False, fontsize=8)
+
+    ax = axes[1]
+    if len(rec):
+        _errorbar(ax, rec, "raw_on_discovered_marg", "raw, recovered trials", "C0", "o")
+        _errorbar(ax, rec, "discovered_on_discovered_marg", "discovered, recovered", "C1", "s")
+    if len(fail) and "discovered_on_discovered_marg" in fail.columns:
+        rows = []
+        for d, grp in fail.groupby("d", sort=True):
+            rows.append((int(d), float(grp["discovered_on_discovered_marg"].mean()), sem(grp["discovered_on_discovered_marg"])))
+        if rows:
+            ds, mu, err = zip(*rows)
+            ax.errorbar(
+                ds, mu, yerr=err, marker="x", color="0.55",
+                label="discovered, not recovered", capsize=3, linestyle=":",
+            )
+    ax.set_xlabel("ambient dimension d")
+    ax.set_title("B  discovered axis, split by recovery")
+    ax.legend(frameon=False, fontsize=8)
+
+    ax = axes[2]
+    rows = []
+    for d, grp in denom.groupby("d", sort=True):
+        n = int(len(grp))
+        n_rank = int(grp["rank_correct"].sum()) if "rank_correct" in grp else 0
+        n_sr = int(grp["symbolic_recovered"].sum()) if "symbolic_recovered" in grp else 0
+        rows.append((int(d), n_rank / n, n_sr / n, n))
+    ds, rank_f, sr_f, ns = zip(*rows)
+    ax.plot(ds, rank_f, marker="D", color="C3", label="rank $r=1$")
+    ax.plot(ds, sr_f, marker="s", color="C1", label=r"symbolic $|\rho|\geq 0.99$")
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlabel("ambient dimension d")
+    ax.set_ylabel("fraction of all trials")
+    ax.set_title("C  recovery (failures in denominator)")
+    ax.legend(frameon=False, fontsize=8)
+    for d, n in zip(ds, ns):
+        ax.text(d, 1.0, f"n={n}", ha="center", va="bottom", fontsize=7, color="0.4")
+
+    fig.suptitle("heater one-step discovery", fontsize=11, y=1.02)
+    fig.tight_layout()
+    fig.savefig(out_dir / "heater_oneshot_scaling_split.pdf", bbox_inches="tight")
+    fig.savefig(out_dir / "heater_oneshot_scaling_split.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -247,7 +318,7 @@ def main() -> None:
         raise RuntimeError("no completed rows to plot")
     ok.to_csv(out_dir / "metrics_concat.csv", index=False)
     tables = write_tables(ok, out_dir)
-    draw_figure(ok, out_dir)
+    draw_figure(ok, out_dir, all_rows=df)
     print_tables(tables)
     print(f"\nwrote tables and figure under {out_dir}")
 

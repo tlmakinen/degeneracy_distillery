@@ -1634,7 +1634,7 @@ def fit_symbolic_regression(
             'max_length': max_length,
             'max_depth': max_depth,
             'initialization_method': 'btc',
-            'n_threads': multiprocessing.cpu_count(),
+            'n_threads': int(os.environ.get("SLURM_CPUS_PER_TASK") or multiprocessing.cpu_count()),
             'objectives': objectives,
             'epsilon': epsilon,
             'random_state': random_state,

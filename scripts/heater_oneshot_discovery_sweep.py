@@ -123,29 +123,40 @@ def align_ensemble(
     return aligned
 
 
+def alignment_replay_error(aligned: dict[str, Any]) -> float:
+    """Max abs gap between ``aligned["ys"]`` and a replay of its own inputs."""
+    from degeneracy_distillery.align_coords import apply_ensemble_alignment
+
+    ys, _ = apply_ensemble_alignment(
+        aligned["eta_ensemble_raw"], aligned["jac_ensemble_raw"], aligned,
+    )
+    mask = np.asarray(aligned["mask"], dtype=bool)
+    ref = np.asarray(aligned["ys"], dtype=np.float64)
+    return float(np.max(np.abs(ys[:, mask, :] - ref)))
+
+
 def augment_aligned(
     fits: list,
     weights: np.ndarray,
-    rotmats: np.ndarray,
+    aligned: dict[str, Any],
     X_sr: np.ndarray,
     fisher_mode: str,
     ridge: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Push prior draws through the aligned ensemble."""
+    """Push prior draws through the aligned ensemble, in the aligned frame.
+
+    Rotation alone is not enough: alignment also centres each member,
+    restores the reference mean and applies the global floor shift.
+    """
+    from degeneracy_distillery.align_coords import apply_ensemble_alignment
     from degeneracy_distillery.preprocessing_utils import weighted_std
     import jax.numpy as jnp
 
     w = np.asarray(weights, dtype=np.float64)
     w = w / np.maximum(w.sum(), 1e-12)
-    etas = []
-    jacs = []
-    for fit, R in zip(fits, rotmats):
-        e = np.asarray(fit.eta(X_sr), dtype=np.float64)
-        j = np.asarray(fit.jac(X_sr), dtype=np.float64)
-        etas.append(np.einsum("ij,nj->ni", R, e))
-        jacs.append(np.einsum("ij,njk->nik", R, j))
-    ys = np.stack(etas, axis=0)
-    js = np.stack(jacs, axis=0)
+    etas = np.stack([np.asarray(f.eta(X_sr), dtype=np.float64) for f in fits], 0)
+    jacs = np.stack([np.asarray(f.jac(X_sr), dtype=np.float64) for f in fits], 0)
+    ys, js = apply_ensemble_alignment(etas, jacs, aligned)
     y = np.average(ys, axis=0, weights=w)
     y_std = np.asarray(weighted_std(jnp.asarray(ys), weights=jnp.asarray(w), axis=0))
     dy = np.average(js, axis=0, weights=w)
@@ -245,8 +256,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rung-steps", type=int, default=5000)
     p.add_argument("--ladder-k", type=float, default=2.0)
     p.add_argument("--cold-rungs", action="store_true")
+    p.add_argument("--no-refit-at-rhat", action="store_true",
+                   help="Ablation: skip the fresh refit and keep the projected discovery map.")
+    p.add_argument("--refit-steps", type=int, default=None,
+                   help="Steps for the fresh refit at m_fit (default: --probe-steps).")
     p.add_argument("--oneshot-batch", type=int, default=512)
     p.add_argument("--oneshot-lr", type=float, default=1e-3)
+    p.add_argument("--rank-rule", choices=("info", "nll"), default="info",
+                   help="info: count probe axes above --info-floor nats. "
+                        "nll: held-out NLL drop test (overcounts on a narrow prior box).")
+    p.add_argument("--info-floor", type=float, default=1.0,
+                   help="Nats of held-out information an axis needs to count toward r_hat.")
     p.add_argument("--rank-min-gap", type=float, default=10.0)
     p.add_argument("--expected-rank", type=int, default=1)
     p.add_argument("--n-ensemble", type=int, default=8,
@@ -262,6 +282,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sr-n-aug-per-dim", type=int, default=1000)
     p.add_argument("--sr-max-length", type=int, default=None)
     p.add_argument("--sr-max-depth", type=int, default=None)
+    p.add_argument("--sr-allowed-symbols", default="add,mul,div,constant,variable,sqrt",
+                   help="No pow by default: Operon spends its budget on X_i ** (c X_j), "
+                        "which the structure predicate then rejects.")
     p.add_argument("--sr-fisher", choices=("jtj", "ridge", "identity"), default="jtj")
     p.add_argument("--sr-fisher-ridge", type=float, default=1e-4)
     p.add_argument("--n-frozen-candidates", type=int, default=8)
@@ -395,6 +418,10 @@ def main() -> None:
                         seed=seed,
                         ladder_k=args.ladder_k,
                         cold_rungs=args.cold_rungs,
+                        refit_at_rhat=not args.no_refit_at_rhat,
+                        refit_steps=args.refit_steps,
+                        rank_rule=args.rank_rule,
+                        info_floor=args.info_floor,
                         batch=args.oneshot_batch,
                         lr=args.oneshot_lr,
                         min_gap=args.rank_min_gap,
@@ -404,24 +431,41 @@ def main() -> None:
                     r_hat = int(lad["r_hat"])
                     row["r_hat"] = r_hat
                     row["retained_rank"] = r_hat
+                    row["m_fit"] = int(fit.m)
                     row["rank_correct"] = bool(r_hat == int(args.expected_rank))
+                    row["refit_at_rhat"] = bool(lad.get("refit_at_rhat", True))
+                    row["rank_rule"] = str(lad["rank_rule"])
+                    row["info_probe_nats"] = ";".join(f"{v:.3f}" for v in lad["info_probe"])
+                    row["info_final_nats"] = ";".join(f"{v:.3f}" for v in lad["info_final"])
                     row["jtj_eigengap_rank"] = int(lad["jtj_gap"]["rank"])
+                    if lad.get("jtj_gap_screen") is not None:
+                        row["jtj_eigengap_rank_screen"] = int(
+                            lad["jtj_gap_screen"]["rank"]
+                        )
                     row["nll_neural"] = float(np.mean(fit.nll_vec(th_hold, x_hold)))
                     for i, rec in enumerate(lad["rungs"]):
                         ladder_dump[f"{tag}_rung{i}_lam"] = np.asarray(rec["lam"])
                         ladder_dump[f"{tag}_rung{i}_nats"] = np.asarray(rec["nats"])
+                        ladder_dump[f"{tag}_rung{i}_info_nats"] = np.asarray(rec["info_nats"])
                         if "dif_mean" in rec:
                             ladder_dump[f"{tag}_rung{i}_dif_mean"] = np.array([rec["dif_mean"]])
                             ladder_dump[f"{tag}_rung{i}_dif_se"] = np.array([rec["dif_se"]])
                     spectra[f"{tag}_jtj_median_relative"] = lad["jtj_gap"]["median_relative_spectrum"]
                     spectra[f"{tag}_jtj_gap_ratios"] = lad["jtj_gap"]["gap_ratios"]
+                    if lad.get("jtj_gap_screen") is not None:
+                        spectra[f"{tag}_jtj_screen_median_relative"] = (
+                            lad["jtj_gap_screen"]["median_relative_spectrum"]
+                        )
+                        spectra[f"{tag}_jtj_screen_gap_ratios"] = (
+                            lad["jtj_gap_screen"]["gap_ratios"]
+                        )
 
                     if not args.ladder_only:
                         stage = "ensemble"
                         t0 = time.time()
                         ens = fit_ensemble(
                             th_fit, x_fit, th_hold, x_hold,
-                            m=r_hat, lo=cfg.theta_min, hi=cfg.theta_max,
+                            m=int(fit.m), lo=cfg.theta_min, hi=cfg.theta_max,
                             n_members=int(args.n_ensemble),
                             steps=int(args.ensemble_steps),
                             seed=seed,
@@ -473,8 +517,16 @@ def main() -> None:
                         X_sr = rng_sr.uniform(
                             cfg.theta_min, cfg.theta_max, size=(n_aug, d),
                         )
+                        replay_err = alignment_replay_error(aligned)
+                        row["align_replay_err"] = replay_err
+                        print(f"[align] replay max |err| = {replay_err:.3g}", flush=True)
+                        if not replay_err < 1e-6 * max(1.0, float(np.max(np.abs(aligned["ys"])))):
+                            raise RuntimeError(
+                                f"augmented rows would not share the aligned origin "
+                                f"(replay err {replay_err:.3g})"
+                            )
                         y_sr, y_std_sr, dy_sr, Fs_sr = augment_aligned(
-                            ens["fits"], ens["weights"], aligned["rotmats"],
+                            ens["fits"], ens["weights"], aligned,
                             X_sr, args.sr_fisher, args.sr_fisher_ridge,
                         )
                         y_std_sr = floor_y_std(y_std_sr, y_sr)
@@ -516,8 +568,8 @@ def main() -> None:
                                     time_limit=args.sr_time_limit,
                                     max_length=max_length,
                                     max_depth=max_depth,
-                                    allowed_symbols="add,mul,div,pow,constant,variable,sqrt",
-                                    max_complexity_thresh=max(20, 3 * d),
+                                    allowed_symbols=args.sr_allowed_symbols,
+                                    max_complexity_thresh=max(20, max_length),
                                     equation_set="pareto",
                                     length_penalty=2.0,
                                     equation_predicate=sr_structure_predicate(

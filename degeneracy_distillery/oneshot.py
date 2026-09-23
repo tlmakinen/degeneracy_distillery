@@ -10,8 +10,13 @@ an axis can be projected out without re-initialising the trunk::
 
     eta_m(theta) = s * (A_m @ g_phi(theta)),   A_m in R^{m x m0}.
 
-``whittle_ladder`` starts at m = M_PROBE, drops the lowest-lambda axis, and
-keeps dropping while the held-out NLL cost is within ``k`` standard errors.
+``whittle_ladder`` is two stages. The probe is low-rank discovery: it only
+chooses ``r_hat``, either by the NLL drop test or (``rank_rule="info"``) by
+counting probe axes with held-out information above a floor. The production
+map is then a fresh network at
+``m_fit`` latents (``r_hat``, or ``r_hat + 1`` when the probe spectrum has no
+clean cutoff), trained from random init with ``m0 = m_fit``. No projected
+probe weights survive into it.
 """
 from __future__ import annotations
 
@@ -237,6 +242,30 @@ def project_params(params: Any, n_keep: int, eta: np.ndarray, scale_boost: float
     return new_p, lam, V
 
 
+def refit_rank(
+    r_hat: int,
+    lam_probe: np.ndarray,
+    cap: int,
+    min_gap: float = 10.0,
+    pad: Optional[int] = None,
+) -> int:
+    """Latent width for the fresh refit.
+
+    ``pad=None`` adds one axis when the probe latent spectrum drops by less
+    than ``min_gap`` between axis ``r_hat`` and ``r_hat + 1``. An integer
+    ``pad`` is used as given. The result never exceeds ``cap``.
+    """
+    r_hat = int(r_hat)
+    lam = np.asarray(lam_probe, dtype=np.float64)
+    if pad is None:
+        pad = 0
+        if r_hat < lam.size:
+            ratio = lam[r_hat - 1] / max(lam[r_hat], 1e-300)
+            if ratio < float(min_gap):
+                pad = 1
+    return int(max(1, min(r_hat + int(pad), int(cap))))
+
+
 def train_oneshot(
     th_fit,
     x_fit,
@@ -376,6 +405,19 @@ def train_oneshot(
     )
 
 
+def info_nats(eta: np.ndarray, eta_hat: np.ndarray) -> np.ndarray:
+    """Per-axis information, ``0.5 log(prior var / residual var)``, descending.
+
+    Both variances are taken in the prior PCA basis of ``eta``. This is the
+    one-step loss of each axis measured against the no-data null (``eta_hat``
+    replaced by the prior mean), so an axis the data cannot predict scores 0.
+    """
+    rot, lam, V = spectrum(eta)
+    hat_rot = (np.asarray(eta_hat, dtype=np.float64) - np.asarray(eta).mean(0)) @ V
+    resid = np.mean((rot - hat_rot) ** 2, axis=0)
+    return 0.5 * np.log(lam / np.maximum(resid, 1e-12))
+
+
 def _rung_record(fit: OneShotFit, th, x, extra: Optional[dict] = None) -> dict:
     eta = fit.eta(th)
     hat = fit.eta_hat(x)
@@ -392,6 +434,7 @@ def _rung_record(fit: OneShotFit, th, x, extra: Optional[dict] = None) -> dict:
         "nll_vec": nll,
         "lam": lam,
         "nats": 0.5 * np.log(np.maximum(lam, 1e-12)),
+        "info_nats": info_nats(eta, hat),
         "residual_var": np.asarray(((eta - hat) ** 2).mean(0)),
         "median_sqrt_det_JJT": float(np.exp(np.median(vol))),
         "eta": eta,
@@ -416,6 +459,11 @@ def whittle_ladder(
     seed: int = 0,
     ladder_k: float = 2.0,
     cold_rungs: bool = False,
+    refit_at_rhat: bool = True,
+    refit_steps: Optional[int] = None,
+    refit_pad: Optional[int] = None,
+    rank_rule: str = "nll",
+    info_floor: float = 1.0,
     batch: int = DEFAULT_BATCH,
     lr: float = DEFAULT_LR,
     scale_boost: float = SCALE_BOOST,
@@ -426,7 +474,25 @@ def whittle_ladder(
     flat_features: Sequence[int] = (128, 128, 128),
     est_features: Sequence[int] = (256, 256, 128),
 ) -> dict:
-    """Warm-started descending ladder. Returns the kept fit and per-rung audit."""
+    """Discover ``r_hat``, then refit a fresh network at ``m_fit`` latents.
+
+    The descent (warm projection, or ``cold_rungs``) only chooses ``r_hat``.
+    Unless ``refit_at_rhat`` is off, the production ``fit`` is trained from
+    random init with ``m = m0 = m_fit``, where ``m_fit`` comes from
+    ``refit_rank`` on the probe latent spectrum. ``refit_at_rhat=False``
+    returns the projected discovery map and exists only for ablation.
+    ``jtj_gap_screen`` is the discovery map; ``jtj_gap`` is the returned map.
+
+    ``rank_rule="nll"`` drops axes while held-out NLL does not rise by more
+    than ``ladder_k`` standard errors. That compares densities of different
+    dimension, so a spare axis on a narrow prior box still lowers NLL and the
+    rule overcounts. ``rank_rule="info"`` skips the descent and counts probe
+    axes whose held-out information (:func:`info_nats`) exceeds ``info_floor``.
+    """
+    if rank_rule not in ("nll", "info"):
+        raise ValueError(f"rank_rule must be 'nll' or 'info', got {rank_rule!r}")
+    if rank_rule == "info" and not refit_at_rhat:
+        raise ValueError("rank_rule='info' has no descent map; it needs refit_at_rhat=True")
     m_probe = int(m_probe)
     train_kw = dict(
         lo=lo, hi=hi, batch=batch, lr=lr, scale_boost=scale_boost,
@@ -449,7 +515,20 @@ def whittle_ladder(
         )
 
     r_hat = m_probe
+    if rank_rule == "info":
+        info = rungs[0]["info_nats"]
+        r_hat = int(max(1, np.sum(info > float(info_floor))))
+        if verbose:
+            print(
+                f"[ladder] info rule  nats={np.round(info, 3)}  "
+                f"floor={info_floor}  -> r_hat={r_hat}",
+                flush=True,
+            )
+            if r_hat >= m_probe:
+                print("[ladder] WARNING: r_hat reached m_probe; raise --m-probe", flush=True)
     for m in range(m_probe - 1, 0, -1):
+        if rank_rule == "info":
+            break
         nll_m = rungs[-1]["nll_vec"]
         if cold_rungs:
             if verbose:
@@ -498,18 +577,53 @@ def whittle_ladder(
         current = nxt
         r_hat = m
 
-    J = current.jac(th_val)
-    gap = jtj_eigengap(J, min_gap=min_gap)
+    gap_screen = jtj_eigengap(current.jac(th_val), min_gap=min_gap)
+    n_refit = int(probe_steps if refit_steps is None else refit_steps)
+    m_fit = int(r_hat)
+    if refit_at_rhat:
+        d = int(np.asarray(th_fit).shape[-1])
+        m_fit = refit_rank(
+            r_hat, rungs[0]["lam"], cap=min(m_probe, d),
+            min_gap=min_gap, pad=refit_pad,
+        )
+        if verbose:
+            print(
+                f"[ladder] fresh refit at m={m_fit} (r_hat={r_hat})  "
+                f"steps={n_refit}  probe lam={np.round(rungs[0]['lam'], 3)}  "
+                f"(screen J^T J rank={gap_screen['rank']})",
+                flush=True,
+            )
+        current = train_oneshot(
+            th_fit, x_fit, th_val, x_val,
+            m=m_fit, m0=m_fit, steps=n_refit, seed=int(seed) + 97,
+            **train_kw,
+        )
+        rungs.append(_rung_record(
+            current, th_val, x_val, extra={"refit": True, "m_fit": m_fit},
+        ))
+
+    gap = jtj_eigengap(current.jac(th_val), min_gap=min_gap)
     if verbose:
         print(
-            f"[ladder] r_hat={r_hat}  J^T J eigengap rank={gap['rank']}",
+            f"[ladder] r_hat={r_hat}  J^T J eigengap rank={gap['rank']}"
+            + (
+                f"  (screen {gap_screen['rank']})"
+                if refit_at_rhat else ""
+            )
+            + f"  refit info={np.round(rungs[-1]['info_nats'], 3)}",
             flush=True,
         )
     return {
         "r_hat": int(r_hat),
+        "m_fit": int(current.m),
         "fit": current,
         "rungs": rungs,
         "jtj_gap": gap,
+        "jtj_gap_screen": gap_screen,
+        "refit_at_rhat": bool(refit_at_rhat),
+        "rank_rule": rank_rule,
+        "info_probe": np.asarray(rungs[0]["info_nats"]),
+        "info_final": np.asarray(rungs[-1]["info_nats"]),
     }
 
 
@@ -539,6 +653,11 @@ def fit_ensemble(
     when it is given. Weights are ``1 / exp(held-out NLL)``.
     """
     n_members = max(2, int(n_members))
+    if init_fit is not None and int(init_fit.m) != int(m):
+        raise ValueError(
+            f"init_fit has m={init_fit.m} but the ensemble asks for m={m}; "
+            "pass m=init_fit.m so members are not projected"
+        )
     rng = np.random.default_rng(int(seed) + 41)
     n = int(np.asarray(th_fit).shape[0])
     fits: list[OneShotFit] = []

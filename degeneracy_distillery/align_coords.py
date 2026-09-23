@@ -747,6 +747,7 @@ def process_ensemble_rotation_v2(
     Fs_list: list = []
     ensemble_weights: list = []
     rotmats: list = []
+    member_means: list = []
 
     X = np.asarray(datafile["theta"][randidx])
 
@@ -809,6 +810,7 @@ def process_ensemble_rotation_v2(
         dys.append(dy_orig)
         dys_sr.append(dy_sr_rot)
         rotmats.append(rotmat)
+        member_means.append(np.asarray(y, dtype=np.float64).mean(0))
         ensemble_weights.append(w_sub[k])
         Fs_list.append(F_i)
 
@@ -898,10 +900,40 @@ def process_ensemble_rotation_v2(
         "eta_ensemble": eta_ensemble_masked,
         "norm_factor": datafile["norm_factor"],
         "reference_offset": reference_offset,
+        "member_means": np.asarray(member_means),
     }
     if eta_floor_shift is not None:
         out["eta_coordinate_shift"] = eta_floor_shift
     return out
+
+
+def apply_ensemble_alignment(
+    etas: np.ndarray,
+    jacs: np.ndarray,
+    aligned: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Map raw member outputs at new points into an existing aligned frame.
+
+    ``etas`` is ``(K, n, D)`` and ``jacs`` is ``(K, n, D, d)``, in the member
+    order of ``aligned["rotmats"]``. Each member gets the same centring,
+    rotation, ``n_d`` scaling, reference offset and floor shift that
+    :func:`process_ensemble_rotation_v2` gave its ``ys``. Rows built here and
+    ``aligned["y"]`` therefore share one origin; a rotation alone does not.
+
+    Returns ``ys`` ``(K, n, D)`` and ``dys_sr`` ``(K, n, D, d)``.
+    """
+    etas = np.asarray(etas, dtype=np.float64)
+    jacs = np.asarray(jacs, dtype=np.float64)
+    R = np.asarray(aligned["rotmats"], dtype=np.float64)
+    mu = np.asarray(aligned["member_means"], dtype=np.float64)
+    scale = 1.0 / np.sqrt(float(aligned.get("n_d", 1.0)))
+    ys = np.einsum("kij,knj->kni", R, etas - mu[:, None, :]) * scale
+    if aligned.get("reference_offset") is not None:
+        ys = ys + np.asarray(aligned["reference_offset"], dtype=np.float64)[None, None, :]
+    if aligned.get("eta_coordinate_shift") is not None:
+        ys = ys - np.asarray(aligned["eta_coordinate_shift"], dtype=np.float64)[None, None, :]
+    dys = np.einsum("kij,knjl->knil", R, jacs) * scale
+    return ys, dys
 
 
 # =============================================================================

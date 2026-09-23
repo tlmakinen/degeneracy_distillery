@@ -101,7 +101,8 @@ requires `r_hat==3`, Nusselt corr `>=0.9`, and Nusselt cosine `>=0.9`.
 - Do not set `N_PARAMS=8` until at least 5 of 10 gate seeds pass.
 - Do not write outputs under `$HOME`. Use `SCRATCH`.
 - Do not change the DNS in `scripts/rayleigh_benard_notebook_run.py`.
-- Do not rerun the ladder per ensemble member. `m` is fixed at `r_hat`.
+- Do not rerun the ladder per ensemble member. `m` is fixed at `m_fit`,
+  the width of the fresh refit after the ladder.
 
 ## If a task fails
 

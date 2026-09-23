@@ -36,8 +36,8 @@ sys.path.insert(0, str(REPO))
 
 METRIC_COLUMNS = [
     "problem", "arm", "d", "trial", "seed", "status", "failed_stage",
-    "r_hat", "rank_correct", "jtj_rank_agreement_k", "screen_set_correct",
-    "jtj_eigengap_rank", "median_y_std", "r2_true_min", "r2_sr_min",
+    "r_hat", "m_fit", "rank_correct", "jtj_rank_agreement_k", "screen_set_correct",
+    "jtj_eigengap_rank", "jtj_eigengap_rank_screen", "median_y_std", "r2_true_min", "r2_sr_min",
     "nll_neural", "nll_symbolic", "nll_gap", "expression", "expression_mdl",
     "picks_agree", "complexity", "symbolic_recovered", "n_sims",
     "runtime_screen_s", "runtime_probe_s", "runtime_fit_s",
@@ -232,20 +232,16 @@ def r2_true_min(truth: np.ndarray | None, eta: np.ndarray) -> float:
     return float(np.min(scores)) if scores else float("nan")
 
 
-def augment_aligned(fits, rotmats, weights, X_sr, fisher_mode, ridge):
+def augment_aligned(fits, aligned, weights, X_sr, fisher_mode, ridge):
+    from degeneracy_distillery.align_coords import apply_ensemble_alignment
     from degeneracy_distillery.preprocessing_utils import weighted_std
     import jax.numpy as jnp
 
     w = np.asarray(weights, dtype=np.float64)
     w = w / np.maximum(w.sum(), 1e-12)
-    etas, jacs = [], []
-    for fit, R in zip(fits, rotmats):
-        e = np.asarray(fit.eta(X_sr), dtype=np.float64)
-        j = np.asarray(fit.jac(X_sr), dtype=np.float64)
-        etas.append(np.einsum("ij,nj->ni", R, e))
-        jacs.append(np.einsum("ij,njk->nik", R, j))
-    ys = np.stack(etas, 0)
-    js = np.stack(jacs, 0)
+    etas = np.stack([np.asarray(f.eta(X_sr), dtype=np.float64) for f in fits], 0)
+    jacs = np.stack([np.asarray(f.jac(X_sr), dtype=np.float64) for f in fits], 0)
+    ys, js = apply_ensemble_alignment(etas, jacs, aligned)
     y = np.average(ys, 0, weights=w)
     y_std = np.asarray(weighted_std(jnp.asarray(ys), weights=jnp.asarray(w), axis=0))
     dy = np.average(js, 0, weights=w)
@@ -269,7 +265,7 @@ def rescore_frozen(
         print(f"[frozen] {i + 1}/{len(candidates)}  cx={cx:.1f}  {exprs}", flush=True)
         try:
             coord_fn = compile_jax_stack(list(exprs), d)
-            m = int(np.asarray(coord_fn(np.asarray(th_fit)[:1])).reshape(-1).size)
+            m = int(np.asarray(coord_fn(np.asarray(th_fit)[0])).reshape(-1).size)
             fr = train_oneshot(
                 th_fit, x_fit, th_val, x_val,
                 m=m, m0=m, lo=lo, hi=hi,
@@ -347,6 +343,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--probe-steps", type=int, default=None)
     p.add_argument("--rung-steps", type=int, default=None)
     p.add_argument("--ladder-k", type=float, default=2.0)
+    p.add_argument("--rank-rule", choices=("info", "nll"), default="info",
+                   help="info: count probe axes above --info-floor nats of held-out "
+                        "information. nll: the NLL drop test, which depends on the "
+                        "units of theta.")
+    p.add_argument("--info-floor", type=float, default=1.0)
     p.add_argument("--screen-steps", type=int, default=None)
     p.add_argument("--oneshot-batch", type=int, default=512)
     p.add_argument("--oneshot-lr", type=float, default=1e-3)
@@ -444,6 +445,8 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         rung_steps=int(args.rung_steps),
         seed=seed,
         ladder_k=args.ladder_k,
+        rank_rule=args.rank_rule,
+        info_floor=args.info_floor,
         batch=args.oneshot_batch,
         lr=args.oneshot_lr,
         min_gap=args.rank_min_gap,
@@ -453,10 +456,16 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     runtimes["probe"] = time.time() - t0
     fit = lad["fit"]
     r_hat = int(lad["r_hat"])
+    m_fit = int(fit.m)
     row["r_hat"] = r_hat
+    row["m_fit"] = m_fit
+    row["rank_rule"] = str(lad["rank_rule"])
+    row["info_probe_nats"] = ";".join(f"{v:.3f}" for v in lad["info_probe"])
+    row["info_final_nats"] = ";".join(f"{v:.3f}" for v in lad["info_final"])
     row["jtj_eigengap_rank"] = int(lad["jtj_gap"]["rank"])
+    row["jtj_eigengap_rank_screen"] = int(lad["jtj_gap_screen"]["rank"])
     row["nll_neural"] = float(np.mean(fit.nll_vec(th_hold, x_hold)))
-    row["n_outputs"] = int(r_hat)
+    row["n_outputs"] = m_fit
     row["n_params_count"] = count_params(fit.params)
     lam = np.asarray(lad["rungs"][0]["lam"], dtype=np.float64)
     if r_hat < lam.size:
@@ -469,7 +478,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     row["sampling_band"] = float(np.sqrt(max(r_hat, 1) / max(nval, 1)))
 
     ens = fit_oneshot_ensemble(
-        th_fit, x_fit, r_hat, int(args.ensemble_k),
+        th_fit, x_fit, m_fit, int(args.ensemble_k),
         lo=lo, hi=hi, th_te=th_te, x_te=x_va,
         steps=int(args.ensemble_steps), seed=seed,
         use_log_features=problem.use_log_features,
@@ -511,7 +520,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         X_sr = problem.sample_prior(n_aug, rng_sr)
         t0 = time.time()
         y_sr, y_std_sr, dy_sr, Fs_sr = augment_aligned(
-            ens["fits"], ens["rotmats"], ens["weights"],
+            ens["fits"], ens["aligned"], ens["weights"],
             X_sr, args.sr_fisher, args.sr_fisher_ridge,
         )
         y_std_sr = floor_y_std(y_std_sr, y_sr)
@@ -542,7 +551,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
                 "allowed_symbols",
                 "add,mul,div,pow,constant,variable,sqrt",
             ),
-            max_complexity_thresh=max(20, 3 * problem.d),
+            max_complexity_thresh=max(20, max_length),
             equation_set="pareto",
             length_penalty=2.0,
             equation_predicate=sr_structure_predicate(

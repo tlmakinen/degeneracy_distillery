@@ -248,6 +248,11 @@ class RosenbrockProblem:
             for w_i in ensemble_w
         ]
         eta = np.average(np.stack(etas, 0), 0, weights=wts)
+        if not np.isfinite(eta).all():
+            raise RuntimeError(
+                f"flattener produced non-finite eta on {int((~np.isfinite(eta).all(1)).sum())}"
+                f"/{eta.shape[0]} test points"
+            )
         truth = self.truth_coords(th_te)
         r2s = [poly_r2(truth[:, k], eta) for k in range(truth.shape[1])]
         n_fisher = int(d * (d + 1) / 2)

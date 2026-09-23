@@ -12,19 +12,41 @@ heater-only script.
 flowchart TD
     Sim["simulate theta, x"] --> Screen["group-L1 screen -> active set S"]
     Screen --> Probe["probe fit at m_probe"]
-    Probe --> Ladder["whittle_ladder -> r_hat"]
-    Ladder --> Members["fit K members at FIXED m = r_hat"]
+    Probe --> Ladder["info rule on probe axes -> r_hat"]
+    Ladder --> Refit["fresh refit from random init at m_fit"]
+    Refit --> Members["fit K members at FIXED m = m_fit"]
     Members --> Align["process_ensemble_rotation_v2"]
     Align --> SRin["aligned y, y_std, dy_sr"]
     SRin --> Operon["fit_and_analyze_sr"]
     Operon --> Pick["select by MDL, flattening, frozen NLL"]
 ```
 
-The screen names the active coordinates. It does not choose the rank.
-The rank comes from one probe ladder. Every ensemble member then trains
-at that fixed `m`. A per-member ladder would give members different
-`m`, and `process_ensemble_rotation_v2` needs one `m` to stack
-`eta_ensemble` as `(K, n, m)`.
+The screen names the active coordinates. It does not choose the rank,
+and it does not remove any coordinate from later steps.
+
+The rank comes from the probe. `--rank-rule info` (the default) scores
+each probe axis on held-out data as
+`0.5 log(prior var of eta_j / var of (eta_j - eta_hat_j(x)))` and counts
+the axes above `--info-floor` (1 nat). That is the one-step loss of the
+axis against a model that sees no data, so it does not depend on the
+units of theta. `--rank-rule nll` keeps the old descent, which drops
+axes while held-out NLL does not rise; that compares densities over
+different numbers of axes, and on Rosenbrock's `[-3, 3]` box it drops
+informative axes.
+
+The probe is only a discovery device. The production map is a new
+network trained from random init with `m = m0 = m_fit`, where `m_fit` is
+`r_hat`, or `r_hat + 1` when the probe latent spectrum falls by less
+than `--rank-min-gap` between axes `r_hat` and `r_hat + 1`. Every
+ensemble member then trains at that fixed `m_fit`.
+
+The symbolic-regression rows are the aligned test points plus prior
+draws. The prior draws go through `apply_ensemble_alignment`, so they get
+the same centring, rotation, reference mean and floor shift as the
+aligned rows.
+A per-member ladder would give members different `m`, and
+`process_ensemble_rotation_v2` needs one `m` to stack `eta_ensemble` as
+`(K, n, m)`.
 
 Each member still reports `jtj_eigengap` on its Jacobian. That cost is
 an eigendecomposition of `J^T J`. It needs no extra fit.

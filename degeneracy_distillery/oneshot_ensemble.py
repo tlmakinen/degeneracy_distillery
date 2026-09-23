@@ -61,6 +61,11 @@ def fit_oneshot_ensemble(
     x_te = np.asarray(x_te)
     K = max(2, int(K))
     m = int(m)
+    if init_fit is not None and int(init_fit.m) != m:
+        raise ValueError(
+            f"init_fit has m={init_fit.m} but the ensemble asks for m={m}; "
+            "pass m=init_fit.m so members are not projected"
+        )
     n = int(theta.shape[0])
     rng = np.random.default_rng(int(seed) + 41)
     t_fit = time.time()

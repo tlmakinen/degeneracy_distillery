@@ -1453,20 +1453,15 @@ def fit_flattening(F_network_ensemble, θs,
 
     xs = jnp.linspace(min_x[0], max_x[0], num_pts)
     ys = jnp.linspace(min_x[1], max_x[1], num_pts)
+    xs, ys = jnp.meshgrid(xs, ys)
+    cols = [xs.flatten(), ys.flatten()]
 
-    # add in dummy last index
-    if n_params > 2:
-        extra = []
-        for j in range(n_params - 2):
-            zs = jnp.ones(num_pts) * ((max_x[2+j:3+j] - min_x[2+j:3+j]) / 2.) # middle dummy value
-            extra.append(zs)
-        
-        grds = jnp.meshgrid(xs, ys, *extra)
-        X = jnp.stack([g.flatten() for g in grds], axis=-1)
-
-    else:
-        xs, ys = jnp.meshgrid(xs, ys)
-        X = jnp.stack([xs.flatten(), ys.flatten()], axis=-1)
+    # Hold params 3..n at a dummy value. Meshgridding them too would give
+    # num_pts**n_params rows, which overflows at n_params=16.
+    for j in range(n_params - 2):
+        dummy = (max_x[2 + j] - min_x[2 + j]) / 2.0
+        cols.append(jnp.full(xs.size, dummy))
+    X = jnp.stack(cols, axis=-1)
 
 
     

@@ -102,10 +102,25 @@ def _load_builtin(name: str) -> None:
         register("rayleigh_benard", RayleighBenardProblem)
         register("rb", RayleighBenardProblem)
         return
+    if name == "sir":
+        from degeneracy_distillery.problems.sir import SIRProblem
+        register("sir", SIRProblem)
+        return
+    if name in ("gw_taylorf2", "gw"):
+        from degeneracy_distillery.problems.gw import GWTaylorF2Problem
+        register("gw_taylorf2", GWTaylorF2Problem)
+        register("gw", GWTaylorF2Problem)
+        return
+    if name in ("gw_imrphenomd", "imrphenomd", "imr"):
+        from degeneracy_distillery.problems.gw import GWIMRPhenomDProblem
+        register("gw_imrphenomd", GWIMRPhenomDProblem)
+        register("imrphenomd", GWIMRPhenomDProblem)
+        register("imr", GWIMRPhenomDProblem)
+        return
 
 
 def available_problems() -> tuple[str, ...]:
-    for key in ("rosenbrock", "rayleigh_benard"):
+    for key in ("rosenbrock", "rayleigh_benard", "sir", "gw_taylorf2", "gw_imrphenomd"):
         try:
             _load_builtin(key)
         except Exception:

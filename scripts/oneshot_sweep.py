@@ -368,6 +368,10 @@ def parse_args() -> argparse.Namespace:
                         "in config_manifest.json so a matched run is auditable.")
     p.add_argument("--sr-max-length", type=int, default=None)
     p.add_argument("--sr-max-depth", type=int, default=None)
+    p.add_argument("--sr-eq-timeout", type=float, default=60.0,
+                   help="Seconds per Pareto equation for the structure predicate and "
+                        "for compute_DL, each. At d=32 some nested-pow expressions "
+                        "took hours to parse. 0 disables the limit.")
     p.add_argument("--sr-fisher", choices=("jtj", "ridge", "identity"), default="jtj")
     p.add_argument("--sr-fisher-ridge", type=float, default=1e-4)
     p.add_argument("--n-frozen-candidates", type=int, default=8)
@@ -567,6 +571,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
                 check_nested_exp=False,
                 forbid_x_in_pow_exponent=True,
             ),
+            equation_timeout=float(args.sr_eq_timeout) or None,
         )
         runtimes["sr"] = time.time() - t0
         n_comp = int(y.shape[1])

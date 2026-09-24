@@ -71,6 +71,7 @@ source "$VENV_DIR/bin/activate"
 
 export XLA_FLAGS="${XLA_FLAGS:-"--xla_gpu_cuda_data_dir=${CUDA_PATH:-${CUDA_HOME:-/usr/local/cuda}}"}"
 export MPLBACKEND=Agg
+export PYTHONUNBUFFERED=1
 
 cd "$REPO_DIR"
 mkdir -p logs "$OUT_DIR"

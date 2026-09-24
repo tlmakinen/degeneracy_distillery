@@ -74,6 +74,9 @@ import sys
 import os
 import string
 import multiprocessing
+import signal
+import threading
+from contextlib import contextmanager
 from typing import List, Tuple, Dict, Optional, Callable, Any
 from tqdm import tqdm
 
@@ -89,6 +92,48 @@ try:
     ESR_AVAILABLE = True
 except ImportError:
     ESR_AVAILABLE = False
+
+
+class EquationTimeout(BaseException):
+    """Raised when one equation exceeds its analysis time budget.
+
+    A ``BaseException`` so the ``except Exception`` blocks inside the
+    predicate and ``compute_DL`` cannot swallow it.
+    """
+
+
+@contextmanager
+def equation_time_limit(seconds: Optional[float]):
+    """Raise :class:`EquationTimeout` in the main thread after ``seconds``.
+
+    No-op when ``seconds`` is falsy or off the main thread. The alarm
+    re-fires every second after the deadline, because a signal that lands
+    inside a C-level callback (e.g. JAX's GC hook) is printed as "Exception
+    ignored" and dropped.
+    """
+    if not seconds or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    armed = [True]
+
+    def _raise(signum, frame):
+        if armed[0]:
+            raise EquationTimeout()
+
+    old = signal.signal(signal.SIGALRM, _raise)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds), 1.0)
+    try:
+        yield
+    finally:
+        # A late alarm can land inside this block; retry until disarmed.
+        while True:
+            try:
+                armed[0] = False
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, old)
+                break
+            except EquationTimeout:
+                continue
 
 
 # =============================================================================
@@ -1716,6 +1761,7 @@ def analyze_equations(
     verbose: bool = True,
     length_penalty: float = 2.0,
     equation_predicate: Optional[Callable[[str], bool]] = None,
+    equation_timeout: Optional[float] = None,
 ) -> Tuple[List[str], List[str], Dict[str, List]]:
     """
     Analyze symbolic regression results and rank equations.
@@ -1753,6 +1799,11 @@ def analyze_equations(
         ``log``, or ``log(Abs(...))`` (SR ``logAbs``).
         Parse errors
         should be handled inside the predicate (return False to skip).
+    equation_timeout : float, optional
+        Seconds allowed per equation for the predicate and for ``compute_DL``
+        separately. An equation over budget fails the predicate, or keeps
+        ``DL = inf`` if it was being scored. ``None`` (default) means no
+        limit, so equations that finish in time score exactly as before.
     equation_set : str
         Which equation set to use for analysis. Options:
         - 'pareto': Use only equations from pareto.csv (default)
@@ -1840,11 +1891,22 @@ def analyze_equations(
         eqs = [str(eq) for eq in np.array(data['model'])[mse_mask]]
 
         if equation_predicate is not None:
-            keep = np.array([bool(equation_predicate(eq)) for eq in eqs], dtype=bool)
+            n_pred_timeout = 0
+            keep_list = []
+            for eq in eqs:
+                try:
+                    with equation_time_limit(equation_timeout):
+                        keep_list.append(bool(equation_predicate(eq)))
+                except EquationTimeout:
+                    n_pred_timeout += 1
+                    keep_list.append(False)
+            keep = np.array(keep_list, dtype=bool)
             if verbose:
                 print(
                     f"{keep.sum()} / {len(eqs)} equations pass equation_predicate "
-                    f"(skipped {len(eqs) - keep.sum()})"
+                    f"(skipped {len(eqs) - keep.sum()}, of which {n_pred_timeout} "
+                    f"over the {equation_timeout}s limit)",
+                    flush=True,
                 )
             complexity = complexity[keep]
             eqs = [eq for eq, k in zip(eqs, keep) if k]
@@ -1856,22 +1918,33 @@ def analyze_equations(
         all_latex = [None] * len(eqs)
         all_complexity = np.ones(len(eqs)) * np.inf
 
+        n_dl_timeout = 0
         for j, eq in enumerate(tqdm(eqs, desc=f"Component {i+1}")):
             try:
-                c, latex, logL, DL, frobloss = compute_DL(
-                    eq, idx, X, y, y_std, dy_sr, Fs, n_params,
-                    length_penalty=length_penalty,
-                )
+                with equation_time_limit(equation_timeout):
+                    c, latex, logL, DL, frobloss = compute_DL(
+                        eq, idx, X, y, y_std, dy_sr, Fs, n_params,
+                        length_penalty=length_penalty,
+                    )
                 all_complexity[j] = c
                 all_latex[j] = latex
                 all_logL[j] = logL
                 all_DL[j] = DL
                 all_frobloss[j] = frobloss
+            except EquationTimeout:
+                n_dl_timeout += 1
+                continue
             except Exception as e:
                 if verbose:
                     print(f"  Warning: Failed to process equation {j}: {eq}")
                     print(f"  Error: {e}")
                 continue
+        if verbose and equation_timeout:
+            print(
+                f"{n_dl_timeout} / {len(eqs)} equations over the "
+                f"{equation_timeout}s compute_DL limit (scored DL = inf)",
+                flush=True,
+            )
 
         # Set nans to infs
         all_DL[np.isnan(all_DL)] = np.inf
@@ -2223,6 +2296,7 @@ def fit_and_analyze_sr(
     # ── Separate kwargs for fitting vs. analysis ─────────────────────────────
     _analysis_only = frozenset({
         'equation_set', 'max_complexity_thresh', 'length_penalty', 'equation_predicate',
+        'equation_timeout',
     })
     fit_kwargs = {k: v for k, v in sr_kwargs.items() if k not in _analysis_only}
 
@@ -2230,6 +2304,7 @@ def fit_and_analyze_sr(
     max_complexity_thresh = sr_kwargs.get('max_complexity_thresh', 14)
     length_penalty        = float(sr_kwargs.get('length_penalty', 2.0))
     equation_predicate    = sr_kwargs.get('equation_predicate', None)
+    equation_timeout      = sr_kwargs.get('equation_timeout', None)
     verbose_sr            = bool(sr_kwargs.get('verbose', True))
 
     # ── Fit SR models ────────────────────────────────────────────────────────
@@ -2250,6 +2325,7 @@ def fit_and_analyze_sr(
         verbose=verbose_sr,
         length_penalty=length_penalty,
         equation_predicate=equation_predicate,
+        equation_timeout=equation_timeout,
     )
 
     # ── Package split data ───────────────────────────────────────────────────

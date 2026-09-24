@@ -122,13 +122,28 @@ pushd "$REPO_DIR" >/dev/null
 GIT_HEAD="$(git rev-parse HEAD)"
 SHORT="$(git rev-parse --short HEAD)"
 SNAPSHOT_DIR="$SNAPSHOT_ROOT/${SNAPSHOT_TAG}_${SHORT}"
-if [[ ! -d "$SNAPSHOT_DIR" || ! -f "$SNAPSHOT_DIR/scripts/rosenbrock_npe_scaling.py" ]]; then
-  tmp="${SNAPSHOT_DIR}.tmp.$$"
-  rm -rf "$tmp"
-  mkdir -p "$tmp"
-  git archive HEAD | tar -x -C "$tmp"
-  mv -T "$tmp" "$SNAPSHOT_DIR"
-  echo "$GIT_HEAD" > "$SNAPSHOT_DIR/.git_head"
+# Concurrent array tasks land here at the same time. mkdir is atomic on
+# posix; whichever task wins the mkdir race populates the snapshot and
+# writes the marker file. Losers just wait for the marker.
+if [[ ! -f "$SNAPSHOT_DIR/.git_head" ]]; then
+  if mkdir "$SNAPSHOT_DIR" 2>/dev/null; then
+    tmp="${SNAPSHOT_DIR}.tmp.$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    git archive HEAD | tar -x -C "$tmp"
+    (cd "$tmp" && tar -cf - .) | (cd "$SNAPSHOT_DIR" && tar -xf -)
+    rm -rf "$tmp"
+    echo "$GIT_HEAD" > "$SNAPSHOT_DIR/.git_head"
+  else
+    for _ in $(seq 1 120); do
+      [[ -f "$SNAPSHOT_DIR/.git_head" ]] && break
+      sleep 1
+    done
+    if [[ ! -f "$SNAPSHOT_DIR/.git_head" ]]; then
+      echo "timed out waiting for snapshot at $SNAPSHOT_DIR" >&2
+      exit 3
+    fi
+  fi
 fi
 popd >/dev/null
 

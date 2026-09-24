@@ -104,6 +104,9 @@ ex_*/
 !docs/**/*.jpg
 !docs/**/*.jpeg
 !docs/**/*.gif
+# Paper figure packaged for the laptop.
+!paper/heater_oneshot_scaling/*.png
+!paper/heater_oneshot_scaling/*.pdf
 *.tar
 *.npy
 *.npz

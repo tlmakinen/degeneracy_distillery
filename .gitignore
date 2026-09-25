@@ -107,6 +107,8 @@ ex_*/
 # Paper figure packaged for the laptop.
 !paper/heater_oneshot_scaling/*.png
 !paper/heater_oneshot_scaling/*.pdf
+!paper/rosenbrock_npe_scaling/*.png
+!paper/rosenbrock_npe_scaling/*.pdf
 *.tar
 *.npy
 *.npz

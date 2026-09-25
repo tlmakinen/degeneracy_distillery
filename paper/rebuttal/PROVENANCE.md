@@ -30,6 +30,7 @@ of headroom.
 | one-step | gw_imrphenomd | `oneshot_rebuttal/gw_imrphenomd` | `seed_{0..9}` |
 | variant | sir, info-floor 0.5 | `oneshot_rebuttal/sir_rerun_mdl` | `seed_{0..9}` |
 | variant | gw_imrphenomd, forced `m=2` | `oneshot_rebuttal/gw_imrphenomd_m2_discovery` | `seed_{0..9}` |
+| variant | gw_taylorf2, replicate | `oneshot_rebuttal/gw_taylorf2_rerun_mdl` | `seed_{0..9}` |
 
 The one-step Rosenbrock arm is the `d=2` slice of the N=500 scaling sweep, not
 a dedicated rebuttal array. Its held-out set is 1000 simulations where the other
@@ -55,6 +56,8 @@ one-step `sir`, `gw_taylorf2` and `gw_imrphenomd` baseline trees here.
 | 3833465 | one-step GW IMRPhenomD array |
 | 3833491 | GW IMRPhenomD forced `m=2` array |
 | 3833571 | SIR rerun at info-floor 0.5 |
+| 3834268 | GW TaylorF2 replicate, identical config on current code |
+| 3834298 | requeue of replicate seed 1; task `3834268_1` hung on node h13 with `do_ypcall: clnt_call: RPC: Timed out` before reaching the screen stage |
 | 3833384-87 | step-count diagnostic that set `--probe-steps 2000 --ensemble-steps 2000 --frozen-steps 1500` |
 
 Smoke and cancelled jobs: 3833363, 3833380, 3833462 (smokes); 3833444 and

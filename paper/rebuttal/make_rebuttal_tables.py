@@ -68,6 +68,7 @@ COLUMNS = [
     "physics_alignment", "alignment_statistic", "comparable",
     "second_conjunct_name", "second_conjunct_value", "threshold",
     "second_threshold", "recovered",
+    "physics_alignment_mdl", "second_conjunct_value_mdl", "recovered_mdl",
     "r_hat", "m_fit",
     "n_train_simulations", "n_eval_simulations",
     "n_augmented_coordinate_evaluations",
@@ -109,18 +110,29 @@ def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[
 
         align = d.get("physics_alignment")
         second = d.get(second_name) if second_name else None
+        # The MDL pick and the frozen-NLL pick can select different coordinate
+        # stacks, so score both. Records written before db4b146 have no *_mdl
+        # fields at all; those cells stay blank rather than echoing the NLL pick.
+        align_mdl = d.get("physics_alignment_mdl")
+        second_mdl = d.get(second_name + "_mdl") if second_name else None
+        if align_mdl is None and d.get("expression_mdl") and d.get("picks_agree"):
+            align_mdl, second_mdl = align, second
 
         if not comparable:
             stat, recovered = "r2_true_min", ""
+            _score = lambda a, b: ""  # noqa: E731 - not scorable, see NOT_COMPARABLE
         else:
             stat = "pearson_abs_corr"
-            if align is None:
-                recovered = ""
-            else:
-                ok = abs(float(align)) >= thr
+
+            def _score(a, b):
+                if a is None:
+                    return ""
+                ok = abs(float(a)) >= thr
                 if second_name is not None:
-                    ok = ok and abs(float(second or 0.0)) >= thr2
-                recovered = int(bool(ok))
+                    ok = ok and abs(float(b or 0.0)) >= thr2
+                return int(bool(ok))
+
+            recovered = _score(align, second)
 
         rows.append({
             "arm": arm,
@@ -137,6 +149,9 @@ def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[
             "threshold": thr,
             "second_threshold": _num(thr2),
             "recovered": recovered,
+            "physics_alignment_mdl": _num(align_mdl),
+            "second_conjunct_value_mdl": _num(second_mdl),
+            "recovered_mdl": ("" if not comparable else _score(align_mdl, second_mdl)),
             "r_hat": _num(d.get("r_hat")),
             "m_fit": _num(d.get("m_fit")),
             "n_train_simulations": _num(counts.get("n_train_simulations")),
@@ -177,11 +192,11 @@ def med_iqr(values) -> str:
             f"{np.percentile(v, 75):.3f})")
 
 
-def recovery(rows) -> str:
-    scored = [r for r in rows if r["recovered"] != ""]
+def recovery(rows, field: str = "recovered") -> str:
+    scored = [r for r in rows if r[field] != ""]
     if not scored:
         return "n/a"
-    return f"{sum(int(r['recovered']) for r in scored)}/{len(rows)}"
+    return f"{sum(int(r[field]) for r in scored)}/{len(rows)}"
 
 
 def build_tables(rows) -> str:
@@ -221,10 +236,11 @@ def build_tables(rows) -> str:
     out += ["", "## Config variants", "",
             "Deliberate config changes, not reruns of the frozen baseline. Listed "
             "separately so the headline table stays like-for-like.", "",
-            "| Variant | Change | Recovered | Alignment |", "|---|---|---|---|"]
+            "| Variant | Change | Recovered (NLL pick) | Recovered (MDL pick) | Alignment |", "|---|---|---|---|---|"]
     for variant, (label, _exp, change) in VARIANTS.items():
         sel = [r for r in rows if r["variant"] == variant]
         out.append(f"| {label} | `{change}` | {recovery(sel)} | "
+                   f"{recovery(sel, 'recovered_mdl')} | "
                    f"{med_iqr([r['physics_alignment'] for r in sel])} |")
     return "\n".join(out) + "\n"
 

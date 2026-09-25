@@ -15,7 +15,7 @@ Ten independent trials per experiment per arm, 500 training simulations each. Al
 
 Deliberate config changes, not reruns of the frozen baseline. Listed separately so the headline table stays like-for-like.
 
-| Variant | Change | Recovered | Alignment |
-|---|---|---|---|
-| SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 0.770 (0.633,0.862) |
-| GW IMRPhenomD, forced m=2 | `--rank-min-gap 1e9` | 9/10 | 0.987 (0.981,0.996) |
+| Variant | Change | Recovered (NLL pick) | Recovered (MDL pick) | Alignment |
+|---|---|---|---|---|
+| SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 10/10 | 0.770 (0.633,0.862) |
+| GW IMRPhenomD, forced m=2 | `--rank-min-gap 1e9` | 9/10 | 10/10 | 0.987 (0.981,0.996) |

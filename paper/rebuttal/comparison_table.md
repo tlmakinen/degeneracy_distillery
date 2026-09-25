@@ -19,6 +19,6 @@ Deliberate config changes, not reruns of the frozen baseline. Listed separately 
 |---|---|---|---|---|
 | SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 10/10 | 0.770 (0.633,0.862) |
 | GW IMRPhenomD, forced m=2 | `--rank-min-gap 1e9` | 10/10 | 10/10 | 0.987 (0.981,0.996) |
-| GW TaylorF2, replicate | `identical config, rerun` | 9/9 | 9/9 | 0.977 (0.971,0.978) |
+| GW TaylorF2, replicate | `identical config, rerun` | 10/10 | 10/10 | 0.977 (0.971,0.982) |
 
 The MDL column reads `n/a` for the baseline one-step trees that predate `db4b146`, when `expression_mdl` was computed and then dropped before the record was written.

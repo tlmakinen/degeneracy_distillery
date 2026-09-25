@@ -86,7 +86,7 @@ like-for-like.
 |---|---|---|---|---|
 | SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 10/10 | 0.770 (0.633,0.862) |
 | GW IMRPhenomD, forced `m=2` | `--rank-min-gap 1e9` | 10/10 | 10/10 | 0.987 (0.981,0.996) |
-| GW TaylorF2, replicate | identical config, rerun | 9/9 | 9/9 | 0.977 (0.971,0.978) |
+| GW TaylorF2, replicate | identical config, rerun | 10/10 | 10/10 | 0.977 (0.971,0.982) |
 
 The MDL column is `n/a` for the three baseline one-step trees: they were run
 before `db4b146`, when `expression_mdl` was computed and then dropped before
@@ -216,9 +216,12 @@ lands in the same place. The SR stage does not:
 
 So the two baseline misses are **not** seed-specific training failures. Operon
 runs under a 120 s wall-clock budget and is multithreaded, so two runs of
-identical config explore different Pareto fronts. The aggregate count is stable
-to about a seed (baseline 8/10, replicate 8/9 taking the better of the NLL and
-MDL picks) but *which* seeds miss is a coin flip.
+identical config explore different Pareto fronts.
+
+At the pre-registered 0.75 bar the replicate scores **8/10 on the NLL pick**,
+exactly the baseline's count -- on a different pair of seeds. The aggregate is
+reproducible; the per-seed identity is not. Taking the better of the NLL and
+MDL picks the replicate reaches 9/10.
 
 The failure mode is the same one seen on SIR and IMRPhenomD: the good
 expressions combine both variables, the bad ones collapse to a function of one.

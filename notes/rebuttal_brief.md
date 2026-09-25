@@ -86,6 +86,7 @@ like-for-like.
 |---|---|---|---|---|
 | SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 10/10 | 0.770 (0.633,0.862) |
 | GW IMRPhenomD, forced `m=2` | `--rank-min-gap 1e9` | 10/10 | 10/10 | 0.987 (0.981,0.996) |
+| GW TaylorF2, replicate | identical config, rerun | 9/9 | 9/9 | 0.977 (0.971,0.978) |
 
 The MDL column is `n/a` for the three baseline one-step trees: they were run
 before `db4b146`, when `expression_mdl` was computed and then dropped before
@@ -196,6 +197,37 @@ never combine them, yet their gradient cosine is still ~0.93. The map has `R0`;
 SR expressed it in the raw parameter basis. Same failure mode as IMRPhenomD
 seeds 1 and 4, whose second component collapses to a function of `m2` alone.
 
+## Reproducibility of the SR stage
+
+GW TaylorF2 was rerun once under byte-identical configuration (same master
+seeds, same budgets, same operator set, same `--info-floor 1.0`); the only
+difference is the code version, which adds MDL recording. The tree is
+`records/one_step_variants/gw_taylorf2_rerun_mdl/`.
+
+**The neural map is reproducible. The symbolic regression is not.**
+`nll_neural` agrees to the fourth decimal on every seed, so the one-step fit
+lands in the same place. The SR stage does not:
+
+| seed | master seed | baseline | replicate (NLL) | what changed |
+|---|---|---|---|---|
+| 2 | 15900 | 0.690 | 0.690, **0.788 on the MDL pick** | MDL finds a better representative |
+| 7 | 55495 | 0.681 | **0.971** | baseline took two single-variable `exp` terms; the replicate found `2.407*X1 + 2.454*X2` |
+| 8 | 63414 | 0.991 | **0.701** | baseline had `exp(X1*X2)`, chirp-mass-like; the replicate collapsed to `exp(-0.781*X1)` |
+
+So the two baseline misses are **not** seed-specific training failures. Operon
+runs under a 120 s wall-clock budget and is multithreaded, so two runs of
+identical config explore different Pareto fronts. The aggregate count is stable
+to about a seed (baseline 8/10, replicate 8/9 taking the better of the NLL and
+MDL picks) but *which* seeds miss is a coin flip.
+
+The failure mode is the same one seen on SIR and IMRPhenomD: the good
+expressions combine both variables, the bad ones collapse to a function of one.
+
+This is the strongest argument for the uniform 0.6 bar, and it does not depend
+on hindsight. At 0.75 the pass/fail pattern reshuffles between identical runs,
+because the bar sits inside the region where the SR search is noisy. At 0.6
+every seed passes in both runs.
+
 ## What is not comparable
 
 **Rosenbrock's alignment cells are different statistics.** The one-step
@@ -260,9 +292,13 @@ baseline to line up against.
 
 ## Open threads
 
-1. **GW TaylorF2, two misses.** Seeds 15900 (0.690) and 55495 (0.681) sit well
-   below the 0.75 gate and well below the rest of the distribution. Not
-   threshold-boundary cases; worth a spot-check for a genuine training failure.
+1. **SR search nondeterminism.** Resolved for TaylorF2 and now the open
+   question everywhere: the per-seed misses are not reproducible, so any
+   recovery count at a bar inside the noisy region carries a seed or so of
+   uncertainty. Either widen the SR budget until the search is stable, report
+   the count as a range over replicates, or keep the bar below the noise. Only
+   TaylorF2 has a replicate; SIR and IMRPhenomD have not been rerun under
+   identical config.
 2. **The `min_gap` rule.** A hard threshold on a continuous random quantity, and
    IMRPhenomD sits on top of it — seed 0's ratio is 10.63 against a threshold of
    10. A margin-aware or information-aware pad would be principled, but it

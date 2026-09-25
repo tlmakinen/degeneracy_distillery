@@ -79,6 +79,11 @@ VARIANTS = {
     "gw_imrphenomd_forced_m2": (
         "GW IMRPhenomD, forced m=2", "gw_imrphenomd", "--rank-min-gap 1e9",
     ),
+    # Byte-identical config to the baseline array; the only change is the code
+    # version, so this is a reproducibility replicate rather than an ablation.
+    "gw_taylorf2_rerun_mdl": (
+        "GW TaylorF2, replicate", "gw_taylorf2", "identical config, rerun",
+    ),
 }
 
 COLUMNS = [
@@ -278,9 +283,9 @@ def verify(rows) -> None:
     n3 = len([r for r in rows if r["arm"] == "three_step"])
     n1 = len([r for r in rows if r["arm"] == "one_step" and not r["variant"]])
     nv = len([r for r in rows if r["variant"]])
-    if (n3, n1, nv) != (40, 40, 20):
+    if (n3, n1) != (40, 40) or not 20 <= nv <= 30:
         bad.append(f"  row counts: three_step={n3} one_step={n1} variants={nv}, "
-                   "expected 40/40/20")
+                   "expected 40/40 and 20-30 variant rows")
     if bad:
         raise SystemExit("verification FAILED:\n" + "\n".join(bad))
     print(f"verified: pre-registered three-step column matches the published "

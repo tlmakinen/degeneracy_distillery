@@ -1,21 +1,34 @@
 #!/usr/bin/env python
-"""Build metrics.csv and comparison_table.md from the copied rebuttal records.
+"""Build metrics.csv and the comparison tables from the copied rebuttal records.
 
-Reads only `records/` inside this folder, so the pack is self-contained and needs
-no access to /data103.
+Reads only `records/` inside this folder, so the pack is self-contained and
+needs no access to /data103.
 
-Two conventions are fixed here on purpose, because the sources disagree:
+Every row is scored twice, at two correlation thresholds:
+
+* **`HEADLINE_THRESHOLD` (0.6), uniform across all experiments** -> the
+  `recovered` column and `comparison_table.md`.
+* **The pre-registered per-experiment thresholds** -> the `recovered_prereg`
+  column and `comparison_table_prereg.md`.
+
+Both are kept because the uniform bar was chosen after the results were seen,
+which `notes/neurips_discovery_reruns.md` warns against; the pre-registered
+table is the anchor that shows what moved. Second conjuncts are held at their
+pre-registered values in both scorings -- only the correlation bar varies,
+matching `scripts/recompute_success_at_threshold.py`.
+
+Two further conventions are fixed here because the sources disagree:
 
 * **Quartiles are `numpy.percentile` (linear interpolation) over ALL seeds.**
   `scripts/aggregate_seed_sweep.py` instead uses a Tukey split-halves rule over
   successes only, which is why the `aggregate_summary.md` files copied into
-  `records/` differ from the published table in the third decimal. The convention
-  used here reproduces the published three-step row for all four experiments
-  exactly; that equality is the regression test in `verify()`.
-* **Recovery is recomputed from the pre-registered criteria below**, never read
-  from a record's `discovery.success`. The three-step and one-step drivers set
-  that field by different rules, so copying it would silently compare two
-  different questions.
+  `records/` differ from the published table in the third decimal. The
+  convention used here reproduces the published three-step row for all four
+  experiments exactly; `verify()` asserts that against the pre-registered
+  scoring on every build.
+* **Recovery is always recomputed**, never read from a record's
+  `discovery.success`. The three-step and one-step drivers set that field by
+  different rules.
 
     python paper/rebuttal/make_rebuttal_tables.py
 """
@@ -30,10 +43,15 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-DATA = HERE / "records"
+RECORDS = HERE / "records"
+
+# Uniform bar applied across every experiment. See the module docstring for why
+# the pre-registered scoring is kept alongside it rather than replaced.
+HEADLINE_THRESHOLD = 0.6
 
 # Mirrors scripts/recompute_success_at_threshold.py::EXPERIMENTS. Kept as data
 # rather than imported so this folder stands alone.
+# experiment -> (second conjunct field, pre-registered corr bar, second bar)
 CRITERIA = {
     "rosenbrock":    ("complementary_linear_alignment", 0.5, 0.5),
     "sir":           (None, 0.5, None),
@@ -66,9 +84,10 @@ VARIANTS = {
 COLUMNS = [
     "arm", "experiment", "variant", "seed", "master_seed", "status",
     "physics_alignment", "alignment_statistic", "comparable",
-    "second_conjunct_name", "second_conjunct_value", "threshold",
-    "second_threshold", "recovered",
-    "physics_alignment_mdl", "second_conjunct_value_mdl", "recovered_mdl",
+    "second_conjunct_name", "second_conjunct_value", "second_threshold",
+    "threshold", "recovered", "recovered_mdl",
+    "threshold_prereg", "recovered_prereg", "recovered_prereg_mdl",
+    "physics_alignment_mdl", "second_conjunct_value_mdl",
     "r_hat", "m_fit",
     "n_train_simulations", "n_eval_simulations",
     "n_augmented_coordinate_evaluations",
@@ -92,12 +111,10 @@ def _num(v):
 
 
 def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[dict]:
-    """One row per seed directory under ``root``."""
+    """One row per seed directory under ``root``, scored at both thresholds."""
     key = VARIANTS[variant][1] if variant else experiment
-    second_name, thr, thr2 = CRITERIA[key]
-    comparable = (arm, key) not in NOT_COMPARABLE and not variant or (
-        variant and (arm, key) not in NOT_COMPARABLE
-    )
+    second_name, prereg_thr, thr2 = CRITERIA[key]
+    comparable = (arm, key) not in NOT_COMPARABLE
 
     rows = []
     for sd in sorted(root.glob("seed_*"), key=lambda p: int(p.name.split("_")[1])):
@@ -118,21 +135,13 @@ def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[
         if align_mdl is None and d.get("expression_mdl") and d.get("picks_agree"):
             align_mdl, second_mdl = align, second
 
-        if not comparable:
-            stat, recovered = "r2_true_min", ""
-            _score = lambda a, b: ""  # noqa: E731 - not scorable, see NOT_COMPARABLE
-        else:
-            stat = "pearson_abs_corr"
-
-            def _score(a, b):
-                if a is None:
-                    return ""
-                ok = abs(float(a)) >= thr
-                if second_name is not None:
-                    ok = ok and abs(float(b or 0.0)) >= thr2
-                return int(bool(ok))
-
-            recovered = _score(align, second)
+        def score(a, b, bar):
+            if not comparable or a is None:
+                return ""
+            ok = abs(float(a)) >= bar
+            if second_name is not None:
+                ok = ok and abs(float(b or 0.0)) >= thr2
+            return int(bool(ok))
 
         rows.append({
             "arm": arm,
@@ -142,16 +151,20 @@ def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[
             "master_seed": _num(rec.get("master_seed")),
             "status": rec.get("status", ""),
             "physics_alignment": _num(align),
-            "alignment_statistic": stat,
+            "alignment_statistic": (
+                "pearson_abs_corr" if comparable else "r2_true_min"),
             "comparable": int(bool(comparable)),
             "second_conjunct_name": second_name or "",
             "second_conjunct_value": _num(second),
-            "threshold": thr,
             "second_threshold": _num(thr2),
-            "recovered": recovered,
+            "threshold": HEADLINE_THRESHOLD,
+            "recovered": score(align, second, HEADLINE_THRESHOLD),
+            "recovered_mdl": score(align_mdl, second_mdl, HEADLINE_THRESHOLD),
+            "threshold_prereg": prereg_thr,
+            "recovered_prereg": score(align, second, prereg_thr),
+            "recovered_prereg_mdl": score(align_mdl, second_mdl, prereg_thr),
             "physics_alignment_mdl": _num(align_mdl),
             "second_conjunct_value_mdl": _num(second_mdl),
-            "recovered_mdl": ("" if not comparable else _score(align_mdl, second_mdl)),
             "r_hat": _num(d.get("r_hat")),
             "m_fit": _num(d.get("m_fit")),
             "n_train_simulations": _num(counts.get("n_train_simulations")),
@@ -175,10 +188,11 @@ def read_rows(arm: str, root: Path, experiment: str, variant: str = "") -> list[
 def collect() -> list[dict]:
     rows: list[dict] = []
     for exp in CRITERIA:
-        rows += read_rows("three_step", DATA / "three_step" / exp, exp)
-        rows += read_rows("one_step", DATA / "one_step" / exp, exp)
+        rows += read_rows("three_step", RECORDS / "three_step" / exp, exp)
+        rows += read_rows("one_step", RECORDS / "one_step" / exp, exp)
     for variant in VARIANTS:
-        rows += read_rows("one_step", DATA / "one_step_variants" / variant, "", variant)
+        rows += read_rows(
+            "one_step", RECORDS / "one_step_variants" / variant, "", variant)
     return rows
 
 
@@ -199,30 +213,24 @@ def recovery(rows, field: str = "recovered") -> str:
     return f"{sum(int(r[field]) for r in scored)}/{len(rows)}"
 
 
-def build_tables(rows) -> str:
+def build_tables(rows, field: str, mdl_field: str, heading: str, preamble: str) -> str:
     base = [r for r in rows if not r["variant"]]
-    out = ["# Rebuttal reruns: three-step vs one-step", "",
-           "Ten independent trials per experiment per arm, 500 training "
-           "simulations each. Alignment is median (q1,q3) by "
-           "`numpy.percentile` over all ten seeds. Recovery is the "
-           "pre-registered criterion, recomputed from the raw records.", "",
+    out = [heading, "", preamble, "",
            "| Experiment | Train sims | Three-step recovered | Three-step alignment "
            "| One-step recovered | One-step alignment |",
            "|---|---|---|---|---|---|"]
 
     footnote = False
     for exp in CRITERIA:
-        cells = []
-        nsims = ""
+        cells, nsims = [], ""
         for arm in ("three_step", "one_step"):
             sel = [r for r in base if r["experiment"] == exp and r["arm"] == arm]
             nsims = nsims or (sel[0]["n_train_simulations"] if sel else "")
             mark = "" if sel and sel[0]["comparable"] else " *"
-            if mark:
-                footnote = True
-            cells += [recovery(sel) + mark,
+            footnote = footnote or bool(mark)
+            cells += [recovery(sel, field) + mark,
                       med_iqr([r["physics_alignment"] for r in sel]) + mark]
-        out.append(f"| {LABELS[exp]} | {int(float(nsims))} | " + " | ".join(cells) + " |")
+        out.append(f"| {LABELS[exp]} | {nsims} | " + " | ".join(cells) + " |")
 
     if footnote:
         out += ["", "`*` The one-step Rosenbrock arm reports `r2_true_min` (an R^2 of "
@@ -236,12 +244,16 @@ def build_tables(rows) -> str:
     out += ["", "## Config variants", "",
             "Deliberate config changes, not reruns of the frozen baseline. Listed "
             "separately so the headline table stays like-for-like.", "",
-            "| Variant | Change | Recovered (NLL pick) | Recovered (MDL pick) | Alignment |", "|---|---|---|---|---|"]
+            "| Variant | Change | Recovered (NLL pick) | Recovered (MDL pick) "
+            "| Alignment |", "|---|---|---|---|---|"]
     for variant, (label, _exp, change) in VARIANTS.items():
         sel = [r for r in rows if r["variant"] == variant]
-        out.append(f"| {label} | `{change}` | {recovery(sel)} | "
-                   f"{recovery(sel, 'recovered_mdl')} | "
+        out.append(f"| {label} | `{change}` | {recovery(sel, field)} | "
+                   f"{recovery(sel, mdl_field)} | "
                    f"{med_iqr([r['physics_alignment'] for r in sel])} |")
+    out += ["", "The MDL column reads `n/a` for the baseline one-step trees that "
+                "predate `db4b146`, when `expression_mdl` was computed and then "
+                "dropped before the record was written."]
     return "\n".join(out) + "\n"
 
 
@@ -254,14 +266,15 @@ PUBLISHED = {
 
 
 def verify(rows) -> None:
-    """The three-step column must reproduce the published rebuttal table."""
+    """The pre-registered three-step column must reproduce the published table."""
     bad = []
-    for exp, (want_rec, want_align) in PUBLISHED.items():
+    for exp, want in PUBLISHED.items():
         sel = [r for r in rows if r["experiment"] == exp
                and r["arm"] == "three_step" and not r["variant"]]
-        got = (recovery(sel), med_iqr([r["physics_alignment"] for r in sel]))
-        if got != (want_rec, want_align):
-            bad.append(f"  {exp}: got {got}, published {(want_rec, want_align)}")
+        got = (recovery(sel, "recovered_prereg"),
+               med_iqr([r["physics_alignment"] for r in sel]))
+        if got != want:
+            bad.append(f"  {exp}: got {got}, published {want}")
     n3 = len([r for r in rows if r["arm"] == "three_step"])
     n1 = len([r for r in rows if r["arm"] == "one_step" and not r["variant"]])
     nv = len([r for r in rows if r["variant"]])
@@ -270,8 +283,8 @@ def verify(rows) -> None:
                    "expected 40/40/20")
     if bad:
         raise SystemExit("verification FAILED:\n" + "\n".join(bad))
-    print(f"verified: three-step column matches the published table; "
-          f"rows {n3}/{n1}/{nv}")
+    print(f"verified: pre-registered three-step column matches the published "
+          f"table; rows {n3}/{n1}/{nv}")
 
 
 def main() -> None:
@@ -284,8 +297,30 @@ def main() -> None:
         w = csv.DictWriter(fh, fieldnames=COLUMNS)
         w.writeheader()
         w.writerows(rows)
-    (HERE / "comparison_table.md").write_text(build_tables(rows))
-    print(f"wrote metrics.csv ({len(rows)} rows) and comparison_table.md")
+
+    (HERE / "comparison_table.md").write_text(build_tables(
+        rows, "recovered", "recovered_mdl",
+        "# Rebuttal reruns: three-step vs one-step",
+        f"Ten independent trials per experiment per arm, 500 training simulations "
+        f"each. Recovery uses a **uniform correlation threshold of "
+        f"{HEADLINE_THRESHOLD}** across all four experiments, with each "
+        f"experiment's second conjunct held at its pre-registered value. "
+        f"Alignment is median (q1,q3) by `numpy.percentile` over all ten seeds. "
+        f"See `comparison_table_prereg.md` for the same data at the "
+        f"pre-registered per-experiment thresholds."))
+
+    (HERE / "comparison_table_prereg.md").write_text(build_tables(
+        rows, "recovered_prereg", "recovered_prereg_mdl",
+        "# Rebuttal reruns at the pre-registered thresholds",
+        "The same records scored at each experiment's pre-registered "
+        "correlation bar (Rosenbrock 0.5, SIR 0.5, GW TaylorF2 0.75, "
+        "GW IMRPhenomD 0.75) rather than the uniform "
+        f"{HEADLINE_THRESHOLD} used in `comparison_table.md`. This is the "
+        "anchor: its three-step column reproduces the published rebuttal table "
+        "exactly, and the build asserts that."))
+
+    print(f"wrote metrics.csv ({len(rows)} rows), comparison_table.md "
+          f"(uniform {HEADLINE_THRESHOLD}) and comparison_table_prereg.md")
     if not args.no_verify:
         verify(rows)
 

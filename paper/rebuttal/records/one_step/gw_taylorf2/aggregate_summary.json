@@ -1,0 +1,49 @@
+{
+  "complexity_total": {
+    "median": 8.5,
+    "q1": 5.0,
+    "q3": NaN
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "mdl_total": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "n_crashed": 0,
+  "n_success": 8,
+  "n_threshold_miss": 2,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.9828746051117279,
+    "q1": 0.9799163843345284,
+    "q3": 0.9871026140565753
+  },
+  "problem": "gw_taylorf2",
+  "recovery_count": "8/10",
+  "representative_expressions": null,
+  "representative_run_id": "gw_taylorf2_oneshot_d2_trial9",
+  "run_dir": "/data103/makinen/degeneracy_experiments/oneshot_rebuttal/gw_taylorf2",
+  "threshold_misses": [
+    {
+      "master_seed": 15900,
+      "physics_alignment": 0.6898998691128952,
+      "run_id": "gw_taylorf2_oneshot_d2_trial2"
+    },
+    {
+      "master_seed": 55495,
+      "physics_alignment": 0.6814059111148395,
+      "run_id": "gw_taylorf2_oneshot_d2_trial7"
+    }
+  ]
+}

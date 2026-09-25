@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": 0.9739588545108662,
+    "complementary_mass_diff_alignment_mdl": 0.9726605813482283,
+    "complexity_total": 16.0,
+    "expression": "((-13.278596) + ((-11.899632) * ((0.905008 * X2) * ((-1.088775) * X1)))) | ((-0.000000) + (1.000000 * (((2.090078 * X2) + 4.637052) + ((-3.372181) * X1))))",
+    "expression_mdl": "((-6.990804) + (1.347407 * exp(((0.886033 * X2) + (0.869745 * X1))))) | (0.000047 + (0.999985 * ((exp((0.269423 * X2)) / 0.193414) + ((-3.370922) * X1))))",
+    "m_fit": 2,
+    "mdl_total": null,
+    "nll_neural": -1.5302528961037616,
+    "nll_symbolic": -1.0677033029740663,
+    "physics_alignment": 0.9906975001865548,
+    "physics_alignment_grad_cosine": null,
+    "physics_alignment_mdl": 0.9777333790596299,
+    "physics_alignment_spearman": null,
+    "picks_agree": false,
+    "r2_sr_min": 0.9969512624273156,
+    "r2_true_min": 0.9968226871438075,
+    "r_hat": 1,
+    "success": true
+  },
+  "master_seed": 47576,
+  "problem": "gw_imrphenomd",
+  "run_id": "gw_imrphenomd_oneshot_d2_trial6",
+  "runtime_seconds": {
+    "total": 345.6398253440857
+  },
+  "status": "success"
+}

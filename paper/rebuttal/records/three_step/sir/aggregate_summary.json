@@ -1,0 +1,43 @@
+{
+  "complexity_total": {
+    "median": 17.0,
+    "q1": 14.0,
+    "q3": 26.0
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 7554,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 0,
+    "n_train_simulations": 500
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": 5.742709261876644,
+    "q1": 4.348037294967977,
+    "q3": 6.71681541201506
+  },
+  "mdl_total": {
+    "median": 14801.218933105469,
+    "q1": 6735.944610595703,
+    "q3": 23562.035888671875
+  },
+  "n_crashed": 0,
+  "n_success": 10,
+  "n_threshold_miss": 0,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.6736652554882063,
+    "q1": 0.6333874439168782,
+    "q3": 0.7447377358867572
+  },
+  "problem": "sir",
+  "recovery_count": "10/10",
+  "representative_expressions": [
+    "1.65*gamma - 0.119*(1.116*beta + 0.886)**2 + 1.0/(0.447*beta + 0.894*gamma + 0.71)**1.43 + 0.655",
+    "1.65*gamma + 1.176"
+  ],
+  "representative_run_id": "sir_seed2",
+  "run_dir": "follow_up_results/sir/rebuttal",
+  "threshold_misses": []
+}

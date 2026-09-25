@@ -1,0 +1,60 @@
+{
+  "complexity_total": {
+    "median": 24.0,
+    "q1": 19.0,
+    "q3": 26.0
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 1000,
+    "n_train_simulations": 500,
+    "pca_basis_shared_with_training": true
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": 1.887291239218639,
+    "q1": 1.2183067695103014,
+    "q3": 2.240137860447256
+  },
+  "mdl_total": {
+    "median": 564361.90625,
+    "q1": 386468.640625,
+    "q3": 665230.3125
+  },
+  "n_crashed": 0,
+  "n_success": 7,
+  "n_threshold_miss": 3,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.9974205710419966,
+    "q1": 0.9855660734338533,
+    "q3": 0.9994283089647795
+  },
+  "problem": "gw_imrphenomd",
+  "recovery_count": "7/10",
+  "representative_expressions": [
+    "0.005*m2 - 0.025",
+    "1.605*(0.006*m1 + 0.006*m2 + 0.491)**1.896 - 0.541"
+  ],
+  "representative_run_id": "gw_imrphenomd_seed2",
+  "run_dir": "follow_up_results/gw_imrphenomd/rebuttal",
+  "threshold_misses": [
+    {
+      "master_seed": 0,
+      "physics_alignment": 0.9997689426238314,
+      "run_id": "gw_imrphenomd_seed0"
+    },
+    {
+      "master_seed": 1,
+      "physics_alignment": 0.9937752438285835,
+      "run_id": "gw_imrphenomd_seed1"
+    },
+    {
+      "master_seed": 7,
+      "physics_alignment": 0.7126343789051104,
+      "run_id": "gw_imrphenomd_seed7"
+    }
+  ]
+}

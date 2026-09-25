@@ -1,0 +1,58 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 0,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_linear_alignment": 1.0,
+    "complexity_total": 24.0,
+    "expressions_canonical": [
+      "(2.695994 + (0.612838 * (((((-0.832662) * X1) ^ 2) + ((-1.115479) * X2)) + (0.993574 * X1))))",
+      "(6.647942 + ((-1.552333) * (1.273843 * X1)))"
+    ],
+    "expressions_physical": [
+      "0.427*theta1**2 + 0.605*theta1 - 0.689*theta2 + 4.662",
+      "4.685 - 1.982*theta1"
+    ],
+    "mdl_total": 266.34930419921875,
+    "physics_alignment": 0.8222583451309402,
+    "rank_deficient": false,
+    "success": true,
+    "symbolically_invertible": null
+  },
+  "heldout_geometry": {
+    "frob_neural": 0.22028887915840784,
+    "frob_raw": 4.473127879722512,
+    "frob_symbolic": 0.5352544517716631,
+    "median_condition_raw": 21.284109115600586,
+    "median_condition_symbolic": 1.754887342453003,
+    "rotation_accepted": false,
+    "rotation_rel_delta": 1.4368512152484103
+  },
+  "inference": {
+    "coverage_error_eta": null,
+    "coverage_error_theta": null,
+    "crps_eta": null,
+    "crps_theta": null
+  },
+  "master_seed": 7,
+  "postprocess_fix": {
+    "commit": "4514c64",
+    "rerun_utc": "2026-07-27T11:39:18.424126Z",
+    "side": "post-fix"
+  },
+  "problem": "rosenbrock",
+  "run_id": "rosenbrock_seed7",
+  "runtime_seconds": {
+    "alignment": 3.6307053565979004,
+    "fishnets": 224.0009961128235,
+    "flatten": 375.59838700294495,
+    "npe": null,
+    "symbolic_regression": 656.7693672180176,
+    "total": 1260.2536079883575
+  },
+  "status": "success"
+}

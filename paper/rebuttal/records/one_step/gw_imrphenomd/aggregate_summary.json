@@ -1,0 +1,64 @@
+{
+  "complexity_total": {
+    "median": 17.0,
+    "q1": 12.5,
+    "q3": 17.5
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "mdl_total": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "n_crashed": 0,
+  "n_success": 5,
+  "n_threshold_miss": 5,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.9906975001865548,
+    "q1": 0.9861810775487805,
+    "q3": 0.9943188729465828
+  },
+  "problem": "gw_imrphenomd",
+  "recovery_count": "5/10",
+  "representative_expressions": null,
+  "representative_run_id": "gw_imrphenomd_oneshot_d2_trial6",
+  "run_dir": "/data103/makinen/degeneracy_experiments/oneshot_rebuttal/gw_imrphenomd",
+  "threshold_misses": [
+    {
+      "master_seed": 62,
+      "physics_alignment": 0.9957850372531419,
+      "run_id": "gw_imrphenomd_oneshot_d2_trial0"
+    },
+    {
+      "master_seed": 7981,
+      "physics_alignment": 0.9909598486877645,
+      "run_id": "gw_imrphenomd_oneshot_d2_trial1"
+    },
+    {
+      "master_seed": 15900,
+      "physics_alignment": 0.7007234524958328,
+      "run_id": "gw_imrphenomd_oneshot_d2_trial2"
+    },
+    {
+      "master_seed": 39657,
+      "physics_alignment": 0.9997650519916691,
+      "run_id": "gw_imrphenomd_oneshot_d2_trial5"
+    },
+    {
+      "master_seed": 63414,
+      "physics_alignment": 0.980808429901038,
+      "run_id": "gw_imrphenomd_oneshot_d2_trial8"
+    }
+  ]
+}

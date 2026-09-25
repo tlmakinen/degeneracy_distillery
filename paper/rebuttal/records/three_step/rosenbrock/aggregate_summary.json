@@ -1,0 +1,43 @@
+{
+  "complexity_total": {
+    "median": 28.0,
+    "q1": 24.0,
+    "q3": 28.0
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 0,
+    "n_train_simulations": 500
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": 0.4832468099456817,
+    "q1": 0.44374920475362567,
+    "q3": 0.535255221136793
+  },
+  "mdl_total": {
+    "median": 324.17591857910156,
+    "q1": 273.3978805541992,
+    "q3": 395.6628189086914
+  },
+  "n_crashed": 0,
+  "n_success": 10,
+  "n_threshold_miss": 0,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.9289941578832529,
+    "q1": 0.8118318406361296,
+    "q3": 0.963406024686498
+  },
+  "problem": "rosenbrock",
+  "recovery_count": "10/10",
+  "representative_expressions": [
+    "0.473*theta1**2 + 0.331*theta1 - 0.622*theta2 + 4.585",
+    "4.564 - 1.882*theta1"
+  ],
+  "representative_run_id": "rosenbrock_seed5",
+  "run_dir": "follow_up_results/rosenbrock/rebuttal",
+  "threshold_misses": []
+}

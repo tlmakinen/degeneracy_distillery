@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_eval_simulations": 1000,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": null,
+    "complementary_mass_diff_alignment_mdl": null,
+    "complexity_total": 18.0,
+    "expression": "(59.033215 + (53.569870 * (((27.948790 * X1) * ((-0.003545) * X1)) + (0.104688 * X2)))) | (41.236538 + ((-4.236503) * ((5.443419 * X1) / ((0.034683 * X2) + 1.803926))))",
+    "expression_mdl": "(59.562401 + (1.000001 * ((0.501387 * X1) + ((((3.485775 * X1) * ((-0.234376) * X1)) + 58.982613) * (((0.031800 * X1) * ((-3.154443) * X1)) + (0.099371 * X2)))))) | (41.237091 + (0.999998 * (((-117.482635) * X1) / sqrt(((3.265333 * X2) + 84.550407)))))",
+    "m_fit": 2,
+    "mdl_total": null,
+    "nll_neural": -0.9510021783921705,
+    "nll_symbolic": -1.0919354967148847,
+    "physics_alignment": 0.9995847471799855,
+    "physics_alignment_grad_cosine": null,
+    "physics_alignment_mdl": null,
+    "physics_alignment_spearman": null,
+    "picks_agree": false,
+    "r2_sr_min": 0.9999960590861351,
+    "r2_true_min": 0.9995847471799855,
+    "r_hat": 2,
+    "success": true
+  },
+  "master_seed": 7981,
+  "problem": "rosenbrock",
+  "run_id": "rosenbrock_oneshot_d2_trial1",
+  "runtime_seconds": {
+    "total": 831.0391433238983
+  },
+  "status": "success"
+}

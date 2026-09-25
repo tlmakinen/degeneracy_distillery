@@ -82,10 +82,14 @@ structural reason, not because the maps are worse.
 Deliberate config changes, kept out of the headline table so it stays
 like-for-like.
 
-| Variant | Change | Recovered | Alignment |
-|---|---|---|---|
-| SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 0.770 (0.633,0.862) |
-| GW IMRPhenomD, forced `m=2` | `--rank-min-gap 1e9` | 9/10 (10/10 on the MDL pick) | 0.987 (0.981,0.996) |
+| Variant | Change | Recovered (NLL pick) | Recovered (MDL pick) | Alignment |
+|---|---|---|---|---|
+| SIR, info-floor 0.5 | `--info-floor 0.5` | 10/10 | 10/10 | 0.770 (0.633,0.862) |
+| GW IMRPhenomD, forced `m=2` | `--rank-min-gap 1e9` | 9/10 | 10/10 | 0.987 (0.981,0.996) |
+
+The MDL column is `n/a` for the three baseline one-step trees: they were run
+before `db4b146`, when `expression_mdl` was computed and then dropped before
+the record was written, so those records carry no MDL pick to score.
 
 ## Why IMRPhenomD is 5/10
 

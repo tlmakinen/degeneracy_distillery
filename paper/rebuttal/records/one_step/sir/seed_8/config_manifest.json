@@ -1,0 +1,58 @@
+{
+  "arms": [
+    "oneshot"
+  ],
+  "config": {
+    "align_subsample": null,
+    "arms": [
+      "oneshot"
+    ],
+    "dims": null,
+    "ensemble_k": 4,
+    "ensemble_steps": 5000,
+    "fish_epochs": 250,
+    "flatten_epochs": 250,
+    "frozen_steps": 3000,
+    "info_floor": 1.0,
+    "keep_workdirs": true,
+    "ladder_k": 2.0,
+    "m_probe": null,
+    "n_frozen_candidates": 8,
+    "n_test": 500,
+    "no_bootstrap": false,
+    "nsims": 500,
+    "num_fishnets": 3,
+    "num_trials": 1,
+    "nval_frac": 0.15,
+    "oneshot_batch": 512,
+    "oneshot_lr": 0.001,
+    "out_dir": "/data103/makinen/degeneracy_experiments/oneshot_rebuttal/sir/seed_8",
+    "probe_steps": 20000,
+    "problem": "sir",
+    "problem_arg": [],
+    "quick": false,
+    "rank_min_gap": 10.0,
+    "rank_rule": "info",
+    "resume": true,
+    "rung_steps": 5000,
+    "screen_steps": 2000,
+    "seed": 0,
+    "skip_sr": false,
+    "sr_allowed_symbols": "add,mul,div,pow,constant,variable",
+    "sr_fisher": "jtj",
+    "sr_fisher_ridge": 0.0001,
+    "sr_max_depth": 10,
+    "sr_max_length": 25,
+    "sr_n_aug": 10000,
+    "sr_n_aug_per_dim": 1000,
+    "sr_time_limit": 60,
+    "trial_start": 8
+  },
+  "dims": [
+    3
+  ],
+  "git_commit": "c134652901a4267ce9c05de1d9e18d8447f19dd3",
+  "problem": "sir",
+  "problem_args": {},
+  "script": "oneshot_sweep.py"
+}

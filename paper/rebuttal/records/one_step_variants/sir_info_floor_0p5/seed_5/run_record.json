@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 10000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": null,
+    "complementary_mass_diff_alignment_mdl": null,
+    "complexity_total": 15.0,
+    "expression": "((-9.733940) + (1.519389 * (12.530111 * X2))) | ((-7.128279) + (2.084865 * (3.958492 * X1))) | ((-14.816224) + (2.314180 * (6.872929 * X1)))",
+    "expression_mdl": "((-9.733940) + (1.519389 * (12.530111 * X2))) | ((-7.128279) + (2.084865 * (3.958492 * X1))) | ((-14.816224) + (2.314180 * (6.872929 * X1)))",
+    "m_fit": 3,
+    "mdl_total": null,
+    "nll_neural": -3.0647024001879366,
+    "nll_symbolic": 10.630616822394858,
+    "physics_alignment": 0.6164837998617921,
+    "physics_alignment_grad_cosine": 0.9326486098373316,
+    "physics_alignment_mdl": null,
+    "physics_alignment_spearman": 0.6997097428389714,
+    "picks_agree": true,
+    "r2_sr_min": 0.9740174209472897,
+    "r2_true_min": 0.9891247294228849,
+    "r_hat": 2,
+    "success": true
+  },
+  "master_seed": 39688,
+  "problem": "sir",
+  "run_id": "sir_oneshot_d3_trial5",
+  "runtime_seconds": {
+    "total": 263.8525605201721
+  },
+  "status": "success"
+}

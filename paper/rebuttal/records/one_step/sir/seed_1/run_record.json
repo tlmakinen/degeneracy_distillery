@@ -1,0 +1,29 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 10000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": null,
+    "complexity_total": 10.0,
+    "expression": "((-14.981945) + (1.792696 * (12.670787 * X2))) | (37.649452 + (27.167480 * ((0.374429 * X2) + ((-0.883943) * X1))))",
+    "mdl_total": null,
+    "nll_neural": -2.550668756480681,
+    "nll_symbolic": -1.285197935968,
+    "physics_alignment": 0.6433770892963843,
+    "physics_alignment_grad_cosine": 0.8860494251459419,
+    "physics_alignment_spearman": 0.7375125820503281,
+    "r2_sr_min": 0.9775048788502092,
+    "r2_true_min": 0.9844026314566592,
+    "r_hat": 2,
+    "success": true
+  },
+  "master_seed": 8012,
+  "problem": "sir",
+  "run_id": "sir_oneshot_d3_trial1",
+  "runtime_seconds": {
+    "total": 803.8501107692719
+  },
+  "status": "success"
+}

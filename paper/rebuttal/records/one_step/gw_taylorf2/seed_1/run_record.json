@@ -1,0 +1,29 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": null,
+    "complexity_total": 10.0,
+    "expression": "((-5.709807) + ((-8.889626) * ((0.905008 * X2) * ((-1.088775) * X1)))) | (0.000507 + (0.999854 * (((0.721549 * X1) ^ (-1.255005)) + ((3.121572 * X2) + ((-1.821362) * X1)))))",
+    "mdl_total": null,
+    "nll_neural": -0.8945159939355785,
+    "nll_symbolic": 0.1679023239976367,
+    "physics_alignment": 0.9833418025338406,
+    "physics_alignment_grad_cosine": null,
+    "physics_alignment_spearman": null,
+    "r2_sr_min": 0.9979359276120388,
+    "r2_true_min": 0.9986394128347753,
+    "r_hat": 1,
+    "success": true
+  },
+  "master_seed": 7981,
+  "problem": "gw_taylorf2",
+  "run_id": "gw_taylorf2_oneshot_d2_trial1",
+  "runtime_seconds": {
+    "total": 389.24572563171387
+  },
+  "status": "success"
+}

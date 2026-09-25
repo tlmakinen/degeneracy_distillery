@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 10000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": null,
+    "complementary_mass_diff_alignment_mdl": null,
+    "complexity_total": 15.0,
+    "expression": "((-10.117905) + (1.637820 * (10.573549 * X2))) | ((-16.366453) + (2.694096 * (5.860857 * X1))) | ((-1.006005) + (1.093611 * ((((-3.161748) * X3) + (10.090151 * X1)) + ((-2.893161) * X2))))",
+    "expression_mdl": "((-10.117905) + (1.637820 * (10.573549 * X2))) | ((-16.366453) + (2.694096 * (5.860857 * X1))) | ((-1.006005) + (1.093611 * ((((-3.161748) * X3) + (10.090151 * X1)) + ((-2.893161) * X2))))",
+    "m_fit": 3,
+    "mdl_total": null,
+    "nll_neural": -3.2126551056182127,
+    "nll_symbolic": -1.0362192611704648,
+    "physics_alignment": 0.6461481976312424,
+    "physics_alignment_grad_cosine": 0.9316847801880944,
+    "physics_alignment_mdl": null,
+    "physics_alignment_spearman": 0.7095517982071927,
+    "picks_agree": true,
+    "r2_sr_min": 0.9799986256679584,
+    "r2_true_min": 0.9905651938997184,
+    "r_hat": 2,
+    "success": true
+  },
+  "master_seed": 31769,
+  "problem": "sir",
+  "run_id": "sir_oneshot_d3_trial4",
+  "runtime_seconds": {
+    "total": 263.5956041812897
+  },
+  "status": "success"
+}

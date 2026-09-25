@@ -1,0 +1,61 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 1000,
+    "n_train_simulations": 500,
+    "pca_basis_shared_with_training": true
+  },
+  "discovery": {
+    "complementary_mass_diff_alignment": 0.7056969510949523,
+    "complexity_total": 15.0,
+    "expressions_canonical": [
+      "((-0.442311) + (2.147612 * (0.210770 * X1)))",
+      "(4.988176 + ((-3.359684) * exp((0.169205 * X2))))"
+    ],
+    "expressions_physical": [
+      "0.01*m1 - 0.042",
+      "4.988 - 3.904*exp(0.004*m2)"
+    ],
+    "geometric_loss_beats_mc_q": true,
+    "mdl_total": 207064.41796875,
+    "physics_alignment": 0.7126343789051104,
+    "rank_deficient": false,
+    "success": false,
+    "symbolically_invertible": true
+  },
+  "heldout_geometry": {
+    "frob_adhoc_mc_q": 17.26641299617453,
+    "frob_neural": 1.3040633082370912,
+    "frob_raw": 15.357889696492041,
+    "frob_symbolic": 4.40664824355323,
+    "median_condition_raw": 28.2855224609375,
+    "median_condition_symbolic": 31.650997161865234,
+    "rotation_accepted": true,
+    "rotation_rel_delta": -0.18654162719580208
+  },
+  "inference": {
+    "coverage_error_eta": null,
+    "coverage_error_theta": null,
+    "crps_eta": null,
+    "crps_theta": null
+  },
+  "master_seed": 7,
+  "postprocess_fix": {
+    "commit": "4514c64",
+    "rerun_utc": "2026-07-27T11:39:16.235350Z",
+    "side": "post-fix"
+  },
+  "problem": "gw_imrphenomd",
+  "run_id": "gw_imrphenomd_seed7",
+  "runtime_seconds": {
+    "alignment": 4.128065347671509,
+    "fishnets": 467.43652606010437,
+    "flatten": 164.67987084388733,
+    "npe": null,
+    "symbolic_regression": 251.216543674469,
+    "total": 887.5974514484406
+  },
+  "status": "success"
+}

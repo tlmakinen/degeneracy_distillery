@@ -1,0 +1,47 @@
+{
+  "config": {
+    "align_subsample": 4000,
+    "fish_epochs": 1000,
+    "fish_hids_max": 300,
+    "fish_hids_min": 10,
+    "fish_layers": [
+      2,
+      5
+    ],
+    "fish_min_epochs": 100,
+    "fish_patience": 20,
+    "flatten_epochs_phase1": 1000,
+    "flatten_epochs_phase2": 2000,
+    "flatten_finetune_epochs": 250,
+    "flatten_hidden_size": 256,
+    "flatten_layers": 7,
+    "flatten_min_epochs": 250,
+    "flatten_patience": 40,
+    "n_d": 50,
+    "nsims": 500,
+    "num_fishnets": 20,
+    "sr_grid_size": 2000,
+    "sr_max_depth": 10,
+    "sr_max_length": 25,
+    "sr_time_limit": 300
+  },
+  "git_commit": "0b1158ab2a663acfb3e42962bf90c53ebf037bac",
+  "master_seed": 5,
+  "mode": "rebuttal",
+  "problem": "rosenbrock",
+  "run_id": "rosenbrock_seed5",
+  "stage_seeds": {
+    "align": 40005,
+    "data": 5,
+    "fish_model": 10005,
+    "fish_train": 20005,
+    "flatten": 30005,
+    "sr_fit": 60005,
+    "sr_grid": 50005,
+    "validation": 70005
+  },
+  "thresholds": {
+    "min_rosen_corr": 0.5,
+    "min_theta1_corr": 0.5
+  }
+}

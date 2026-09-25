@@ -1,0 +1,38 @@
+{
+  "complexity_total": {
+    "median": 12.5,
+    "q1": 10.0,
+    "q3": 15.0
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 10000,
+    "n_eval_simulations": 500,
+    "n_train_simulations": 500
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "mdl_total": {
+    "median": NaN,
+    "q1": NaN,
+    "q3": NaN
+  },
+  "n_crashed": 0,
+  "n_success": 10,
+  "n_threshold_miss": 0,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.6673387343479911,
+    "q1": 0.634964657245878,
+    "q3": 0.7825430333164595
+  },
+  "problem": "sir",
+  "recovery_count": "10/10",
+  "representative_expressions": null,
+  "representative_run_id": "sir_oneshot_d3_trial8",
+  "run_dir": "/data103/makinen/degeneracy_experiments/oneshot_rebuttal/sir",
+  "threshold_misses": []
+}

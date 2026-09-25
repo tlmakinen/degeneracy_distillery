@@ -1,0 +1,60 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 7600,
+    "n_downstream_npe_simulations": 500,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 0,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "best_component": 1,
+    "complexity_total": 36.0,
+    "expressions_canonical": [
+      "(0.543984 + (0.633492 * (0.903219 * X1)))",
+      "((-0.000001) + (1.000000 * ((((((-21.184355) + (12.816720 * X2)) / (30.328405 * X1)) + ((1.773015 * X2) ^ (-1.207170))) / ((-0.172166) * X2)) + 3.101293)))"
+    ],
+    "expressions_physical": [
+      "0.64*beta + 1.049",
+      "(-3.255*beta + (1.883 - 5.502*gamma)*(2.242*gamma + 0.886)**1.207 + (3.47*beta + 2.735)*(2.242*gamma + 0.886)**2.207 - 2.565)/((1.119*beta + 0.882)*(2.242*gamma + 0.886)**2.207)"
+    ],
+    "mdl_total": 20056.85791015625,
+    "physics_alignment": 0.9155622579739615,
+    "physics_alignment_grad_cosine": 0.9634184912576853,
+    "physics_alignment_spearman": 0.7842709130836523,
+    "rank_deficient": false,
+    "success": true,
+    "symbolically_invertible": null
+  },
+  "heldout_geometry": {
+    "frob_neural": 0.5298388002192767,
+    "frob_raw": 11.18706858843586,
+    "frob_symbolic": 1.1302419617821018,
+    "median_condition_raw": 21.82573127746582,
+    "median_condition_symbolic": Infinity,
+    "rotation_accepted": true,
+    "rotation_rel_delta": -0.6235348306523298
+  },
+  "inference": {
+    "coverage_error_eta": 0.03244999999999999,
+    "coverage_error_theta": 0.07712,
+    "crps_eta": 0.02050646800714731,
+    "crps_theta": 0.15941444396397472
+  },
+  "master_seed": 4,
+  "postprocess_fix": {
+    "commit": "4514c64",
+    "rerun_utc": "2026-07-27T11:39:15.990336Z",
+    "side": "post-fix"
+  },
+  "problem": "sir",
+  "run_id": "sir_seed4",
+  "runtime_seconds": {
+    "alignment": 2.4747231006622314,
+    "fishnets": 236.11603546142578,
+    "flatten": 172.84292936325073,
+    "npe": 21.013062715530396,
+    "symbolic_regression": 131.83959484100342,
+    "total": 567.5714199542999
+  },
+  "status": "success"
+}

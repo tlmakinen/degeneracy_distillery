@@ -1,0 +1,44 @@
+{
+  "complexity_total": {
+    "median": 24.0,
+    "q1": 22.0,
+    "q3": 26.0
+  },
+  "counts": {
+    "n_augmented_coordinate_evaluations": 2000,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 1000,
+    "n_train_simulations": 500,
+    "pca_basis_shared_with_training": true
+  },
+  "crashes": [],
+  "held_out_frob_symbolic": {
+    "median": 4.344026908521491,
+    "q1": 2.636615776543036,
+    "q3": 6.0768096867163095
+  },
+  "mdl_total": {
+    "median": 379371.171875,
+    "q1": 295586.671875,
+    "q3": 511224.0625
+  },
+  "n_crashed": 0,
+  "n_success": 10,
+  "n_threshold_miss": 0,
+  "n_total": 10,
+  "physics_alignment": {
+    "median": 0.9717724623844174,
+    "q1": 0.9657237306099437,
+    "q3": 0.9812549389404275
+  },
+  "problem": "gw_taylorf2",
+  "recovery_count": "10/10",
+  "representative_expressions": [
+    "0.005*m1 - 0.002*m2 + 0.057",
+    "0.010416*m1 + 0.010428*m2 + 1.821404"
+  ],
+  "representative_run_id": "gw_taylorf2_seed0",
+  "run_dir": "follow_up_results/gw_taylorf2/rebuttal",
+  "threshold_misses": []
+}

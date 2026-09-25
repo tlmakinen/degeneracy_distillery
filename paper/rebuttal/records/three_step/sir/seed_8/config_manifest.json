@@ -1,0 +1,52 @@
+{
+  "config": {
+    "align_subsample": 4000,
+    "fish_epochs": 5000,
+    "fish_hids_max": 300,
+    "fish_hids_min": 50,
+    "fish_layers": [
+      2,
+      5
+    ],
+    "fish_min_epochs": 100,
+    "fish_patience": 30,
+    "fish_train_batch_size": 50,
+    "flatten_batch_size": 50,
+    "flatten_epochs_phase1": 1000,
+    "flatten_epochs_phase2": 500,
+    "flatten_finetune_epochs": 200,
+    "flatten_n_layers": 8,
+    "npe_batch_size": 32,
+    "npe_epochs": 1000,
+    "npe_eval_points": 200,
+    "npe_hidden_features": 50,
+    "npe_learning_rate": 0.0001,
+    "npe_num_transforms": 5,
+    "npe_posterior_samples": 1000,
+    "npe_repeats_maf": 2,
+    "nsims": 500,
+    "num_fishnets": 10,
+    "sr_max_depth": 10,
+    "sr_max_length": 25,
+    "sr_n_sr": 10000,
+    "sr_time_limit": 60
+  },
+  "git_commit": "0b1158ab2a663acfb3e42962bf90c53ebf037bac",
+  "master_seed": 8,
+  "mode": "rebuttal",
+  "problem": "sir",
+  "run_id": "sir_seed8",
+  "stage_seeds": {
+    "align": 40008,
+    "data": 8,
+    "fish_model": 10008,
+    "fish_train": 20008,
+    "flatten": 30008,
+    "sr_fit": 60008,
+    "sr_grid": 50008,
+    "validation": 70008
+  },
+  "thresholds": {
+    "min_r0_corr": 0.5
+  }
+}

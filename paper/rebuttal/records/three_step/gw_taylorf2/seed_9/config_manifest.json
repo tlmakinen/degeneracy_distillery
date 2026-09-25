@@ -1,0 +1,47 @@
+{
+  "config": {
+    "align_subsample": 4000,
+    "fish_batch_size": 200,
+    "fish_epochs": 5000,
+    "fish_hids_max": 300,
+    "fish_hids_min": 50,
+    "fish_layers": [
+      3,
+      5
+    ],
+    "fish_patience": 30,
+    "flatten_epochs_phase1": 2000,
+    "flatten_epochs_phase2": 2500,
+    "flatten_finetune_epochs": 500,
+    "flatten_hidden_size": 100,
+    "flatten_layers": 3,
+    "flatten_min_epochs": 1200,
+    "flatten_patience": 50,
+    "n_pca": 40,
+    "nsims": 500,
+    "num_fishnets": 10,
+    "pca_basis_max": 5000,
+    "sr_grid_size": 2000,
+    "sr_max_depth": 20,
+    "sr_max_length": 30,
+    "sr_time_limit": 120
+  },
+  "git_commit": "0b1158ab2a663acfb3e42962bf90c53ebf037bac",
+  "master_seed": 9,
+  "mode": "rebuttal",
+  "problem": "gw_taylorf2",
+  "run_id": "gw_taylorf2_seed9",
+  "stage_seeds": {
+    "align": 40009,
+    "data": 9,
+    "fish_model": 10009,
+    "fish_train": 20009,
+    "flatten": 30009,
+    "sr_fit": 60009,
+    "sr_grid": 50009,
+    "validation": 70009
+  },
+  "thresholds": {
+    "min_physics_corr": 0.75
+  }
+}

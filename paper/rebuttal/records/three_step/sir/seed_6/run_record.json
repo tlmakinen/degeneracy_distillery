@@ -1,0 +1,60 @@
+{
+  "counts": {
+    "n_augmented_coordinate_evaluations": 7622,
+    "n_downstream_npe_simulations": 0,
+    "n_eval_simulations": 500,
+    "n_pca_simulations": 0,
+    "n_train_simulations": 500
+  },
+  "discovery": {
+    "best_component": 1,
+    "complexity_total": 26.0,
+    "expressions_canonical": [
+      "(0.000139 + (0.999897 * (((0.618063 * X2) ^ (-0.807119)) + ((0.950544 * X2) + ((-0.698647) * X1)))))",
+      "(2.487028 + ((-0.324953) * ((0.464645 * X2) ^ (-1.780609))))"
+    ],
+    "expressions_physical": [
+      "-0.796*beta + 2.122*gamma + 1.474/(2.232*gamma + 0.887)**0.807 + 0.24",
+      "2.487 - 1.272/(2.232*gamma + 0.887)**1.781"
+    ],
+    "mdl_total": 2731.7017822265625,
+    "physics_alignment": 0.7306338741152003,
+    "physics_alignment_grad_cosine": 0.9316735724892727,
+    "physics_alignment_spearman": 0.7025988743954976,
+    "rank_deficient": false,
+    "success": true,
+    "symbolically_invertible": true
+  },
+  "heldout_geometry": {
+    "frob_neural": 0.5705559328582466,
+    "frob_raw": 10.734008356728012,
+    "frob_symbolic": 0.7016585283163801,
+    "median_condition_raw": 20.398046493530273,
+    "median_condition_symbolic": 2.1134746074676514,
+    "rotation_accepted": false,
+    "rotation_rel_delta": 0.38802944821985724
+  },
+  "inference": {
+    "coverage_error_eta": null,
+    "coverage_error_theta": null,
+    "crps_eta": null,
+    "crps_theta": null
+  },
+  "master_seed": 6,
+  "postprocess_fix": {
+    "commit": "4514c64",
+    "rerun_utc": "2026-07-27T11:39:18.045799Z",
+    "side": "post-fix"
+  },
+  "problem": "sir",
+  "run_id": "sir_seed6",
+  "runtime_seconds": {
+    "alignment": 2.459784984588623,
+    "fishnets": 150.10998511314392,
+    "flatten": 222.46907210350037,
+    "npe": 2.451768159866333,
+    "symbolic_regression": 138.15972590446472,
+    "total": 520.484537601471
+  },
+  "status": "success"
+}

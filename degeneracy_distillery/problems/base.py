@@ -117,10 +117,20 @@ def _load_builtin(name: str) -> None:
         register("imrphenomd", GWIMRPhenomDProblem)
         register("imr", GWIMRPhenomDProblem)
         return
+    if name == "camels":
+        from degeneracy_distillery.problems.camels import CamelsProblem
+        register("camels", CamelsProblem)
+        return
+    if name in ("mu_sigma", "mu_sig", "gaussian"):
+        from degeneracy_distillery.problems.mu_sigma import MuSigmaProblem
+        register("mu_sigma", MuSigmaProblem)
+        register("mu_sig", MuSigmaProblem)
+        register("gaussian", MuSigmaProblem)
+        return
 
 
 def available_problems() -> tuple[str, ...]:
-    for key in ("rosenbrock", "rayleigh_benard", "sir", "gw_taylorf2", "gw_imrphenomd"):
+    for key in ("rosenbrock", "rayleigh_benard", "sir", "gw_taylorf2", "gw_imrphenomd", "mu_sigma", "camels"):
         try:
             _load_builtin(key)
         except Exception:

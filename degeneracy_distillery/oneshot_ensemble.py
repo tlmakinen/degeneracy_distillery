@@ -8,7 +8,7 @@ uses ``process_ensemble_rotation_v2`` with ``F = J^T J`` and
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
@@ -30,6 +30,10 @@ def fit_oneshot_ensemble(
     seed: int,
     use_log_features: bool = True,
     estimator_factory: Optional[Callable] = None,
+    estimator_factories: Optional[Sequence[Callable]] = None,
+    flat_features: Sequence[int] = (128, 128, 128),
+    z_range: tuple[float, float] = (-1.0, 1.0),
+    delta_init: str = "zeros",
     bootstrap: bool = True,
     batch: int = 512,
     lr: float = 1e-3,
@@ -95,16 +99,32 @@ def fit_oneshot_ensemble(
         else:
             th_k, x_k = theta, x
             th_oob, x_oob = th_te, x_te
+        fac = estimator_factory
+        warm = init_params
+        if estimator_factories is not None:
+            fac = estimator_factories[k % len(estimator_factories)]
+            # Keep the flattener warm-start; drop ``est`` so a new eta(x)
+            # trunk is drawn. Same factory as member 0 can keep the trunk.
+            if fac is not estimator_factory and init_params is not None:
+                warm = {key: val for key, val in dict(init_params).items() if key != "est"}
         if verbose:
-            print(f"[ensemble] member {k + 1}/{K}  steps={steps}", flush=True)
+            est_desc = getattr(fac(m), "features", None) if fac is not None else None
+            print(
+                f"[ensemble] member {k + 1}/{K}  steps={steps}  "
+                f"eta(x)={est_desc}",
+                flush=True,
+            )
         fit = train_oneshot(
             th_k, x_k, th_oob, x_oob,
             m=m, m0=m0, lo=lo, hi=hi,
             steps=int(steps), seed=int(seed) + 1009 * (k + 1),
-            init_params=init_params,
+            init_params=warm,
             batch=batch, lr=lr, verbose=verbose,
             use_log_features=use_log_features,
-            estimator_factory=estimator_factory,
+            estimator_factory=fac,
+            flat_features=flat_features,
+            z_range=z_range,
+            delta_init=delta_init,
         )
         fits.append(fit)
         oob_nlls.append(float(np.mean(fit.nll_vec(th_oob, x_oob))))
@@ -182,3 +202,76 @@ def fit_oneshot_ensemble(
         "runtime_fit_s": float(runtime_fit_s),
         "runtime_align_s": float(time.time() - t_align),
     }
+
+
+def ensemble_calibration(
+    ens_aligned: np.ndarray,
+    y_std: Optional[np.ndarray] = None,
+) -> dict[str, Any]:
+    """Is ``y_std`` the right scale for member-to-member disagreement?
+
+    ``ens_aligned`` is ``(K, n, m)``: the K aligned member coordinates. Two
+    z-scores are returned, because they answer different questions and have
+    different reference widths.
+
+    ``z_in`` is the plain in-sample score ``(y_k - ybar) / s``, with ``s``
+    the ``ddof=1`` spread over all K members. This is the quantity the SR
+    step weights by. Because ``y_k`` sits inside its own mean and spread,
+    ``sum_k z^2 = K - 1`` identically, so its RMS is
+    ``sqrt((K - 1) / K)`` -- about 0.935 at K=8, *not* 1. Comparing it to 1
+    reads a calibrated ensemble as 7% over-dispersed.
+
+    ``z_loo`` leaves each member out::
+
+        z_loo[k] = (y_k - mean_{j != k}) / (s_{-k} * sqrt(1 + 1/(K-1)))
+
+    which is exactly ``t_{K-2}`` under normality, reference width
+    ``sqrt((K-2)/(K-4))``. This is a genuine predictive check and needs
+    ``K > 4`` to have a finite reference. ``ratio_loo > 1`` means ``y_std``
+    is too small: the members disagree by more than their own spread
+    predicts, and SR will over-trust those coordinates.
+    """
+    ens = np.asarray(ens_aligned, dtype=np.float64)
+    if ens.ndim != 3:
+        raise ValueError(f"ens_aligned must be (K, n, m), got {ens.shape}")
+    K = int(ens.shape[0])
+    if K < 3:
+        raise ValueError(f"calibration needs K >= 3 members, got {K}")
+
+    mean = ens.mean(0)
+    s_in = ens.std(0, ddof=1)
+    z_in = (ens - mean) / np.maximum(s_in, 1e-30)
+    ref_in = float(np.sqrt((K - 1) / K))
+
+    tot = ens.sum(0)
+    mean_loo = (tot - ens) / (K - 1)
+    # var_{-k} with ddof=1 over the K-1 remaining members.
+    sq = (ens ** 2).sum(0)
+    var_loo = (sq - ens ** 2 - (K - 1) * mean_loo ** 2) / (K - 2)
+    s_loo = np.sqrt(np.maximum(var_loo, 0.0))
+    infl = np.sqrt(1.0 + 1.0 / (K - 1))
+    z_loo = (ens - mean_loo) / np.maximum(s_loo * infl, 1e-30)
+    ref_loo = float(np.sqrt((K - 2) / (K - 4))) if K > 4 else float("nan")
+
+    # Spread per component, pooled over members and rows.
+    std_in = z_in.std(axis=(0, 1), ddof=0)
+    std_loo = z_loo.std(axis=(0, 1), ddof=0)
+    out = {
+        "K": K,
+        "z_in": z_in,
+        "z_loo": z_loo,
+        "ref_in": ref_in,
+        "ref_loo": ref_loo,
+        "std_in": std_in,
+        "std_loo": std_loo,
+        "ratio_in": std_in / ref_in,
+        "ratio_loo": std_loo / ref_loo,
+        "frac_gt_3sigma": float(np.mean(np.abs(z_loo) > 3.0 * ref_loo)),
+        "median_y_std": np.median(s_in, axis=0),
+    }
+    if y_std is not None:
+        ys = np.asarray(y_std, dtype=np.float64)
+        if ys.shape == s_in.shape:
+            # How much the floor/alignment inflated the raw spread.
+            out["y_std_over_raw"] = np.median(ys / np.maximum(s_in, 1e-30), axis=0)
+    return out

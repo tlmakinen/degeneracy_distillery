@@ -61,18 +61,35 @@ class Flattener(nn.Module):
     hi: Union[float, tuple]
     features: Sequence[int] = (128, 128, 128)
     use_log_features: bool = True
+    z_lo: float = -1.0
+    z_hi: float = 1.0
+    #: Init for the MLP branch. "zeros" starts eta as *exactly* the linear
+    #: skip, so the map begins life linear and only departs as the loss
+    #: pushes it. "glorot" starts the branch active. The usual argument for
+    #: zeros -- a well-conditioned Jacobian for the -0.5 logdet(JJ^T) term --
+    #: is carried by the skip, not the zeros: measured at init, cond(J) is
+    #: 1.000 with zeros and 1.179 with glorot, and logdet is 9.704 vs 9.901.
+    #: So zeros is a prior toward linear solutions, not a numerical need.
+    delta_init: str = "zeros"
 
     @nn.compact
     def __call__(self, theta):
         lo = jnp.asarray(self.lo)
         hi = jnp.asarray(self.hi)
-        z = 2.0 * (theta - lo) / (hi - lo) - 1.0
+        u = (theta - lo) / (hi - lo)
+        z = self.z_lo + (self.z_hi - self.z_lo) * u
         h = jnp.concatenate([z, jnp.log(theta)]) if self.use_log_features else z
         for w in self.features:
             h = nn.gelu(nn.Dense(w)(h))
+        if self.delta_init == "zeros":
+            d_kernel = nn.initializers.zeros
+        elif self.delta_init == "glorot":
+            d_kernel = nn.initializers.glorot_uniform()
+        else:
+            raise ValueError(f"delta_init must be zeros|glorot, got {self.delta_init!r}")
         delta = nn.Dense(
             self.m,
-            kernel_init=nn.initializers.zeros,
+            kernel_init=d_kernel,
             bias_init=nn.initializers.zeros,
         )(h)
         skip = nn.Dense(
@@ -84,22 +101,111 @@ class Flattener(nn.Module):
 
 
 class Estimator(nn.Module):
-    """x -> hat_g in R^{g_dim}. Output lives in the same space as g_phi."""
+    """x -> hat_g in R^{g_dim}. Output lives in the same space as g_phi.
+
+    ``act`` is a field so an ensemble can draw a different nonlinearity per
+    member. Fishnets varies width, depth and activation together; varying
+    only width leaves members far more correlated than the Fishnets
+    ensemble whose spread ``y_std`` is meant to match.
+    """
 
     m: int
     features: Sequence[int] = (256, 256, 128)
+    act: Callable = nn.gelu
 
     @nn.compact
     def __call__(self, x):
         h = x
         for w in self.features:
-            h = nn.gelu(nn.Dense(w)(h))
+            h = self.act(nn.Dense(w)(h))
         out = nn.Dense(
             self.m,
             kernel_init=nn.initializers.zeros,
             bias_init=nn.initializers.zeros,
         )(h)
         return out + nn.Dense(self.m, kernel_init=nn.initializers.normal(1e-2))(x)
+
+
+def _mish(x):
+    return x * jnp.tanh(nn.softplus(x))
+
+
+def _smooth_leaky(x, alpha: float = 0.2):
+    """C-infinity leaky ReLU; the ``optimized_smooth_leaky`` of ``fishnets``.
+
+    Not in the default bank. As ``x -> -inf``, ``log_sigmoid(x) -> x``, so this
+    grows like ``(1 - alpha) x**2``. Stacked four deep that compounds to about
+    ``x**16`` and diverges. It survives a bounded loss but not the unbounded
+    ``-log|det J|`` of the square-completed objective.
+    """
+    return alpha * x + (1.0 - alpha) * jax.nn.log_sigmoid(x) * x
+
+
+#: Activation bank for the eta(x) trunk, mirroring the Fishnets ensemble.
+#: Safe to include kinked functions here: the volume term differentiates
+#: eta_phi(theta) only, so eta_psi(x) never needs a smooth Jacobian.
+EST_ACTS: dict[str, Callable] = {
+    "gelu": nn.gelu,
+    "swish": nn.swish,
+    "relu": nn.relu,
+    "leaky_relu": nn.leaky_relu,
+    "mish": _mish,
+    "smooth_leaky": _smooth_leaky,
+    "tanh": nn.tanh,
+}
+
+
+def estimator_factory_for(features: Sequence[int], act: str = "gelu"):
+    """One eta(x) factory with a fixed architecture, tagged for logging."""
+    feats = tuple(int(w) for w in features)
+    if act not in EST_ACTS:
+        raise KeyError(f"unknown activation {act!r}; have {sorted(EST_ACTS)}")
+    fn = EST_ACTS[act]
+
+    def factory(m: int):
+        return Estimator(m=int(m), features=feats, act=fn)
+
+    factory.features = feats  # type: ignore[attr-defined]
+    factory.act_name = act  # type: ignore[attr-defined]
+    factory.tag = f"{act}:{'x'.join(str(w) for w in feats)}"  # type: ignore[attr-defined]
+    return factory
+
+
+def estimator_bank(
+    k: int,
+    seed: int = 0,
+    *,
+    hids: tuple[int, int] = (64, 320),
+    n_layers: tuple[int, int] = (2, 4),
+    acts: Optional[Sequence[str]] = None,
+    first: Optional[Sequence[int]] = None,
+) -> list:
+    """``k`` eta(x) factories with sampled width, depth and activation.
+
+    This is the one-step analogue of the Fishnets ensemble draw in
+    ``training_loop_fishnets``: width uniform in ``hids``, depth uniform in
+    ``n_layers``, activation uniform over ``acts``. Diversity in the data
+    map is what makes ``y_std`` an honest spread rather than seed noise, so
+    the SR step's MDL weights mean something.
+
+    ``first`` pins member 0 to a given width tuple (with the first
+    activation) so the ladder map can stay warm-started into the ensemble.
+    """
+    k = int(k)
+    if acts is None:
+        acts = ("gelu", "swish", "relu", "leaky_relu", "mish", "tanh")
+    acts = tuple(acts)
+    rng = np.random.default_rng(int(seed) + 7717)
+    out = []
+    for i in range(k):
+        if i == 0 and first is not None:
+            out.append(estimator_factory_for(first, acts[0]))
+            continue
+        depth = int(rng.integers(n_layers[0], n_layers[1] + 1))
+        width = int(rng.integers(hids[0], hids[1]))
+        a = str(acts[int(rng.integers(0, len(acts)))])
+        out.append(estimator_factory_for((width,) * depth, a))
+    return out
 
 
 def _core(p, theta, *, flat_mod, coord_fn, scale_boost):
@@ -287,6 +393,8 @@ def train_oneshot(
     est_features: Sequence[int] = (256, 256, 128),
     use_log_features: bool = True,
     estimator_factory: Optional[Callable] = None,
+    z_range: tuple[float, float] = (-1.0, 1.0),
+    delta_init: str = "zeros",
 ) -> OneShotFit:
     """Joint fit of eta_phi and eta_psi. Warm-start via ``init_params``."""
     th_fit = jnp.asarray(th_fit)
@@ -308,6 +416,8 @@ def train_oneshot(
         flat_mod = Flattener(
             m=g_dim, lo=lo_h, hi=hi_h, features=tuple(flat_features),
             use_log_features=bool(use_log_features),
+            z_lo=float(z_range[0]), z_hi=float(z_range[1]),
+            delta_init=str(delta_init),
         )
 
     if estimator_factory is not None:
@@ -473,6 +583,8 @@ def whittle_ladder(
     estimator_factory: Optional[Callable] = None,
     flat_features: Sequence[int] = (128, 128, 128),
     est_features: Sequence[int] = (256, 256, 128),
+    z_range: tuple[float, float] = (-1.0, 1.0),
+    delta_init: str = "zeros",
 ) -> dict:
     """Discover ``r_hat``, then refit a fresh network at ``m_fit`` latents.
 
@@ -499,6 +611,7 @@ def whittle_ladder(
         verbose=verbose, use_log_features=use_log_features,
         estimator_factory=estimator_factory,
         flat_features=flat_features, est_features=est_features,
+        z_range=z_range, delta_init=delta_init,
     )
     if verbose:
         print(f"[ladder] probe m={m_probe}  steps={probe_steps}", flush=True)

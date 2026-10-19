@@ -253,18 +253,37 @@ def rescore_frozen(
     th_fit, x_fit, th_val, x_val,
     lo, hi, steps, seed, neural_nll,
     use_log_features, estimator_factory,
+    keep_idx=None,
 ) -> dict[str, Any]:
+    """Refit eta_psi against each frozen coordinate stack and score held-out NLL.
+
+    ``keep_idx`` is the parameter subset SR was given (``--sr-top-k``). The
+    expressions then index the *kept* columns, so the compiled stack is
+    composed with that selection before it sees a full theta row. Without
+    this, ``X3`` in a reduced-basis expression would silently be read as
+    parameter 3 of the full space.
+    """
     from degeneracy_distillery.oneshot import train_oneshot
 
     rows = []
     best_nll = np.inf
     nll_pick = candidates[0][0]
     nll_pick_cx = candidates[0][2]
-    d = int(np.asarray(th_fit).shape[1])
+    d_full = int(np.asarray(th_fit).shape[1])
+    sel = None if keep_idx is None else np.asarray(keep_idx, dtype=int)
+    d = d_full if sel is None else int(sel.size)
     for i, (exprs, dl, cx) in enumerate(candidates):
         print(f"[frozen] {i + 1}/{len(candidates)}  cx={cx:.1f}  {exprs}", flush=True)
         try:
-            coord_fn = compile_jax_stack(list(exprs), d)
+            stack = compile_jax_stack(list(exprs), d)
+            if sel is None:
+                coord_fn = stack
+            else:
+                import jax.numpy as jnp
+                sel_j = jnp.asarray(sel)
+
+                def coord_fn(t, _stack=stack, _sel=sel_j):
+                    return _stack(jnp.asarray(t)[_sel])
             m = int(np.asarray(coord_fn(np.asarray(th_fit)[0])).reshape(-1).size)
             fr = train_oneshot(
                 th_fit, x_fit, th_val, x_val,
@@ -347,6 +366,19 @@ def parse_args() -> argparse.Namespace:
                    help="info: count probe axes above --info-floor nats of held-out "
                         "information. nll: the NLL drop test, which depends on the "
                         "units of theta.")
+    p.add_argument("--delta-init", choices=("zeros", "glorot"), default="zeros",
+                   help="Init for the Flattener's MLP branch. 'zeros' starts "
+                        "eta as exactly the linear skip, a prior toward linear "
+                        "solutions; 'glorot' starts it active. The logdet(JJ^T) "
+                        "conditioning argument is carried by the skip, not the "
+                        "zeros (cond(J) 1.000 vs 1.179 at init).")
+    p.add_argument("--refit-pad", type=int, default=None,
+                   help="Extra latents for the production refit beyond r_hat. "
+                        "Default (None) adds one whenever the probe LAMBDA "
+                        "spectrum drops by less than --rank-min-gap at the "
+                        "cut. That rule assumes a hard cliff in lambda; on a "
+                        "smoothly decaying spectrum (CAMELS) it fires "
+                        "unconditionally, so set it explicitly there.")
     p.add_argument("--info-floor", type=float, default=0.5,
                    help="Uninformed probe axes score 0 +- sampling error (max 0.23 "
                         "over the Rosenbrock grid); 1.0 missed the real second "
@@ -358,6 +390,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ensemble-k", type=int, default=4)
     p.add_argument("--ensemble-steps", type=int, default=None)
     p.add_argument("--no-bootstrap", action="store_true")
+    p.add_argument("--vary-architectures", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Draw a different eta(x) width, depth and activation "
+                        "per ensemble member, the way Fishnets does, when the "
+                        "problem supplies a bank. Seed-only diversity leaves "
+                        "members correlated and y_std too small.")
     p.add_argument("--align-subsample", type=int, default=None)
 
     p.add_argument("--sr-time-limit", type=int, default=300)
@@ -376,6 +414,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sr-fisher-ridge", type=float, default=1e-4)
     p.add_argument("--n-frozen-candidates", type=int, default=8)
     p.add_argument("--frozen-steps", type=int, default=None)
+    p.add_argument("--sr-screen", choices=("fisher", "probe"), default="fisher",
+                   help="Which ranking --sr-top-k uses. 'fisher' ranks by "
+                        "sqrt(diag(J^T J)) from the learned map; 'probe' uses "
+                        "the group-L1 input screen. The probe aggregates over "
+                        "eta directions and demotes parameters that only drive "
+                        "weak axes, which SR still needs.")
+    p.add_argument("--sr-top-k", type=int, default=None,
+                   help="Give SR only the top-k parameters by screen score, "
+                        "rather than all d. Expression variables X1..Xk then "
+                        "index the kept columns; --sr-param-names records the "
+                        "mapping in metrics.csv.")
     p.add_argument("--skip-sr", action="store_true")
 
     p.add_argument("--num-fishnets", type=int, default=3)
@@ -414,6 +463,58 @@ def apply_budgets(args: argparse.Namespace) -> argparse.Namespace:
         args.fish_epochs = args.fish_epochs or 250
         args.flatten_epochs = args.flatten_epochs or 250
     return args
+
+
+def calibration_figure(calib: dict, out_path, title: str) -> None:
+    """Histogram + Q-Q of the leave-one-out z per aligned component.
+
+    The reference curve is ``t_{K-2}`` scaled to the LOO inflation, not a
+    unit normal: with K members the LOO score is exactly ``t_{K-2}``, whose
+    tails are visibly heavier than Gaussian at K=8.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from scipy import stats
+
+    z = np.asarray(calib["z_loo"], dtype=np.float64)
+    K = int(calib["K"])
+    m = int(z.shape[2])
+    nu = max(K - 2, 1)
+    fig, axes = plt.subplots(2, m, figsize=(3.0 * m, 5.6), squeeze=False)
+    grid = np.linspace(-5, 5, 400)
+    for j in range(m):
+        zj = z[:, :, j].ravel()
+        ax = axes[0][j]
+        ax.hist(zj, bins=60, range=(-5, 5), density=True, color="0.75",
+                edgecolor="none")
+        ax.plot(grid, stats.t.pdf(grid, df=nu), "C3-", lw=1.4,
+                label=f"t({nu})")
+        ax.plot(grid, stats.norm.pdf(grid), "C0--", lw=1.0, label="N(0,1)")
+        ax.set_title(
+            f"eta_{j}   ratio {calib['ratio_loo'][j]:.3f}", fontsize=9
+        )
+        ax.set_xlabel("z (leave-one-out)")
+        if j == 0:
+            ax.set_ylabel("density")
+            ax.legend(fontsize=7, frameon=False)
+        ax = axes[1][j]
+        q = np.linspace(0.002, 0.998, 400)
+        ax.plot(stats.t.ppf(q, df=nu), np.quantile(zj, q), "k.", ms=2)
+        lim = float(np.max(np.abs(stats.t.ppf([0.002, 0.998], df=nu))))
+        ax.plot([-lim, lim], [-lim, lim], "C3-", lw=1.0)
+        ax.set_xlabel(f"t({nu}) quantile")
+        if j == 0:
+            ax.set_ylabel("empirical quantile")
+    ratios = np.round(np.asarray(calib["ratio_loo"]), 3)
+    fig.suptitle(
+        f"{title}   K={K}   LOO ratio {ratios}   "
+        f"(>1 = y_std too small)",
+        fontsize=10,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
 
 
 def count_params(params) -> int:
@@ -457,6 +558,8 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         ladder_k=args.ladder_k,
         rank_rule=args.rank_rule,
         info_floor=args.info_floor,
+        refit_pad=args.refit_pad,
+        delta_init=args.delta_init,
         batch=args.oneshot_batch,
         lr=args.oneshot_lr,
         min_gap=args.rank_min_gap,
@@ -487,12 +590,20 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         row["rank_margin"] = float("inf")
     row["sampling_band"] = float(np.sqrt(max(r_hat, 1) / max(nval, 1)))
 
+    factories = None
+    if args.vary_architectures and hasattr(problem, "estimator_factories"):
+        factories = list(problem.estimator_factories(int(args.ensemble_k)))
+        tags = [getattr(f, "tag", "?") for f in factories]
+        print(f"[ensemble] eta(x) bank: {tags}", flush=True)
+        row["ensemble_arch"] = ";".join(tags)
     ens = fit_oneshot_ensemble(
         th_fit, x_fit, m_fit, int(args.ensemble_k),
         lo=lo, hi=hi, th_te=th_te, x_te=x_va,
         steps=int(args.ensemble_steps), seed=seed,
         use_log_features=problem.use_log_features,
         estimator_factory=problem.estimator_factory,
+        estimator_factories=factories,
+        delta_init=args.delta_init,
         bootstrap=not args.no_bootstrap,
         batch=args.oneshot_batch, lr=args.oneshot_lr,
         min_gap=args.rank_min_gap, r_hat=r_hat,
@@ -508,6 +619,51 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     X = np.asarray(ens["X"], dtype=np.float64)
     Fs = np.asarray(ens["Fs"], dtype=np.float64)
     row["median_y_std"] = float(np.median(y_std))
+
+    # Persist the aligned ensemble unconditionally, before any diagnostic
+    # that might raise. Without this a failed calibration call loses the
+    # only copy of the member spread and the run has to be repeated to get
+    # a number that was already computed.
+    try:
+        np.savez_compressed(
+            workdir / "ensemble.npz",
+            ys=np.asarray(ens["aligned"]["ys"]),
+            y_std=y_std, y=y, X=X,
+            oob_nlls=np.asarray(ens["oob_nlls"]),
+            jtj_ranks=np.asarray(ens["jtj_ranks"]),
+            arch=np.array(row.get("ensemble_arch", ""), dtype=object),
+        )
+    except Exception as exc:
+        print(f"[ensemble] dump failed: {exc}", flush=True)
+
+    try:
+        from degeneracy_distillery.oneshot_ensemble import ensemble_calibration
+
+        calib = ensemble_calibration(np.asarray(ens["aligned"]["ys"]))
+        row["calib_ratio_loo"] = ";".join(
+            f"{v:.3f}" for v in np.atleast_1d(calib["ratio_loo"])
+        )
+        row["calib_ratio_loo_max"] = float(np.max(calib["ratio_loo"]))
+        row["calib_frac_gt_3sigma"] = float(calib["frac_gt_3sigma"])
+        print(
+            f"[calib] K={calib['K']}  LOO ratio "
+            f"{np.round(calib['ratio_loo'], 3)}  ref {calib['ref_loo']:.4f}  "
+            f"(>1 = y_std too small)",
+            flush=True,
+        )
+        np.savez_compressed(
+            workdir / "calibration.npz",
+            z_loo=calib["z_loo"], z_in=calib["z_in"],
+            ratio_loo=calib["ratio_loo"], ratio_in=calib["ratio_in"],
+            ref_loo=calib["ref_loo"], ref_in=calib["ref_in"],
+        )
+        calibration_figure(
+            calib, workdir / "calibration.png",
+            f"{problem.name} d={problem.d} m={m_fit}",
+        )
+    except Exception as exc:  # diagnostics must not fail a fit
+        print(f"[calib] skipped: {exc}", flush=True)
+
     eta_te = np.asarray(fit.eta(th_te))
     J_te = np.asarray(fit.jac(th_te))
     truth = problem.truth_coords(th_te)
@@ -525,8 +681,9 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         hints = problem.sr_hints()
         n_aug = int(args.sr_n_aug if args.sr_n_aug else args.sr_n_aug_per_dim * problem.d)
         row["n_sr_aug"] = n_aug
-        max_length = int(args.sr_max_length or hints.get("max_length") or max(25, 4 * problem.d + 8))
-        max_depth = int(args.sr_max_depth or hints.get("max_depth") or max(10, problem.d + 4))
+        n_sr_d = min(int(problem.d), int(args.sr_top_k) if args.sr_top_k else int(problem.d))
+        max_length = int(args.sr_max_length or hints.get("max_length") or max(25, 4 * n_sr_d + 8))
+        max_depth = int(args.sr_max_depth or hints.get("max_depth") or max(10, n_sr_d + 4))
         rng_sr = np.random.default_rng(seed + 17)
         X_sr = problem.sample_prior(n_aug, rng_sr)
         t0 = time.time()
@@ -543,12 +700,66 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         from degeneracy_distillery.sr_utils import (
             fit_and_analyze_sr, sr_structure_predicate,
         )
+        # Optionally hand SR only the parameters the screen says carry
+        # signal. At d=35 the search wastes most of its budget on columns
+        # that do not enter eta, and every spurious variable it does pick
+        # up inflates the description length of an otherwise correct
+        # expression. X, dy and Fs are sliced together so the Fisher stays
+        # conformable with the reduced basis.
+        # The learned Fisher F = J^T J is (n, d, d) and until now was built
+        # only for Procrustes alignment. Its diagonal is how much eta moves
+        # per unit theta, which is a rank check and a parameter screen for
+        # free.
+        F_mean = np.asarray(Fs, dtype=np.float64).mean(0)
+        fisher_sens = np.sqrt(np.clip(np.diag(F_mean), 0.0, None))
+        f_eigs = np.linalg.eigvalsh(F_mean)[::-1]
+        row["fisher_sens"] = ";".join(f"{v:.4g}" for v in fisher_sens)
+        row["fisher_eigs"] = ";".join(f"{v:.4g}" for v in f_eigs[: 2 * max(1, int(y.shape[1]))])
+        pos = f_eigs[f_eigs > 0]
+        if pos.size > 1:
+            ratios = pos[:-1] / np.maximum(pos[1:], 1e-300)
+            row["fisher_gap_rank"] = int(np.argmax(ratios) + 1)
+            row["fisher_gap_ratio"] = float(ratios.max())
+            print(
+                f"[fisher] eigs {np.round(f_eigs[:min(12, f_eigs.size)], 3)}  "
+                f"largest gap after {row['fisher_gap_rank']} "
+                f"({row['fisher_gap_ratio']:.1f}x)",
+                flush=True,
+            )
+
+        sr_d = int(problem.d)
+        keep_idx = None
+        if args.sr_top_k and int(args.sr_top_k) < problem.d:
+            if args.sr_screen == "fisher":
+                # The group-L1 probe ranks theta by influence on x aggregated
+                # over every eta direction, so a parameter that only drives a
+                # weak axis scores low while SR still needs it. On CAMELS that
+                # put both AGN amplitudes at 31st and 26th; by Fisher
+                # sensitivity they are 7th and 8th, and dropping them cost a
+                # whole component (R^2 0.96 -> 0.11).
+                rank = [int(v) for v in np.argsort(-fisher_sens)]
+            else:
+                rank = list(order)
+            row["sr_screen"] = str(args.sr_screen)
+            keep_idx = np.asarray(sorted(rank[: int(args.sr_top_k)]), dtype=int)
+            names = [problem.param_names[i] for i in keep_idx]
+            print(
+                f"[sr] restricting to top-{len(keep_idx)} params "
+                f"by {args.sr_screen} screen: {names}",
+                flush=True,
+            )
+            X = X[:, keep_idx]
+            dy = dy[:, :, keep_idx]
+            Fs = Fs[:, keep_idx][:, :, keep_idx]
+            sr_d = int(keep_idx.size)
+            row["sr_param_index"] = ";".join(str(int(v)) for v in keep_idx)
+            row["sr_param_names"] = ";".join(names)
         sr_dir = workdir / "sr"
         sr_dir.mkdir(parents=True, exist_ok=True)
         print(f"[sr] n={X.shape[0]}  m={y.shape[1]}  max_length={max_length}", flush=True)
         mdl_coords, frob_coords, analysis, _ = fit_and_analyze_sr(
             X, y, y_std, dy, Fs,
-            n_params=problem.d,
+            n_params=sr_d,
             components_to_fit=list(range(int(y.shape[1]))),
             slice_fisher=False,
             parent_dir=str(sr_dir) + os.sep,
@@ -566,7 +777,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
             equation_set="pareto",
             length_penalty=2.0,
             equation_predicate=sr_structure_predicate(
-                n_params=problem.d,
+                n_params=sr_d,
                 forbid_self_transcendental=True,
                 check_nested_exp=False,
                 forbid_x_in_pow_exponent=True,
@@ -599,6 +810,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
             candidates, th_fit, x_fit, th_hold, x_hold,
             lo, hi, args.frozen_steps, seed, row["nll_neural"],
             problem.use_log_features, problem.estimator_factory,
+            keep_idx=keep_idx,
         )
         runtimes["frozen"] = time.time() - t0
         frozen_pick = list(frozen["nll_pick"])
@@ -753,7 +965,15 @@ def main() -> None:
                     n_test = int(args.n_test)
                     th, x = problem.sample(int(args.nsims), rng)
                     aux_tr = dict(getattr(problem, "last_aux", {}) or {})
-                    th_te, x_te = problem.sample(n_test, rng)
+                    if hasattr(problem, "held_out"):
+                        # Fixed-dataset problem: the test split is carved out
+                        # at load time. Drawing it with ``sample`` again would
+                        # hand back training rows and score the map on its own
+                        # fit set.
+                        th_te, x_te = problem.held_out()
+                        th_te, x_te = th_te[:n_test], x_te[:n_test]
+                    else:
+                        th_te, x_te = problem.sample(n_test, rng)
                     aux_te = dict(getattr(problem, "last_aux", {}) or {})
                     if aux_te:
                         problem.last_aux = aux_te

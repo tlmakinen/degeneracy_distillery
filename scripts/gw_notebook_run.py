@@ -323,6 +323,14 @@ def simulator_data(config: RunConfig, seed: int, outdir: Path) -> dict[str, obje
         # PCA basis is fit on noiseless waveforms already required for train+test data
         # generation above -- shared preprocessing, not an additional simulator cost.
         "n_pca_basis_waveforms": int(len(basis_idx)),
+        # Exposed so a downstream NPE sweep can project further simulations with
+        # exactly this basis (see --save-training-data): data = PCA.transform(
+        # [Re, Im](h * whiten) + unit noise) = (vec - pca_mean) @ pca_components.T.
+        "pca_mean": np.asarray(pca.mean_, dtype=np.float64),
+        "pca_components": np.asarray(pca.components_, dtype=np.float64),
+        "pca_explained_variance_ratio": np.asarray(pca.explained_variance_ratio_, dtype=np.float64),
+        "freqs": np.asarray(freqs, dtype=np.float64),
+        "whiten": np.asarray(whiten, dtype=np.float64),
     }
 
 
@@ -742,6 +750,16 @@ def parse_args() -> argparse.Namespace:
         default=0.75,
         help="Fail if no discovered physical expression correlates with a standard GW mass coordinate this strongly.",
     )
+    parser.add_argument(
+        "--save-training-data",
+        type=Path,
+        default=None,
+        help="Write the discovery simulations (theta_train, data_train, theta_test, "
+        "data_test exactly as simulator_data produced them) together with the PCA "
+        "basis, frequency grid and whitening vector they were compressed with to "
+        "this .npz, so the NPE budget sweep can reuse them (--training-data) and "
+        "project any further simulations with the same basis.",
+    )
     return parser.parse_args()
 
 
@@ -804,6 +822,30 @@ def main() -> None:
         stage_start = time.time()
         data = simulator_data(config, seeds["data"], outdir)
         n_pca_basis_waveforms = data["n_pca_basis_waveforms"]
+        if args.save_training_data is not None:
+            save_path = args.save_training_data.resolve()
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                save_path,
+                theta_train=data["theta_train"],
+                data_train=data["data_train"],
+                theta_test=data["theta_test"],
+                data_test=data["data_test"],
+                pca_mean=data["pca_mean"],
+                pca_components=data["pca_components"],
+                pca_explained_variance_ratio=data["pca_explained_variance_ratio"],
+                freqs=data["freqs"],
+                whiten=data["whiten"],
+                sim_mass_range=np.asarray([M1_MIN, M1_MAX, M2_MIN, M2_MAX], dtype=np.float64),
+                sim_d_l_mpc=np.asarray(float(D_L_MPC)),
+                sim_f_low=np.asarray(float(F_LOW)),
+                sim_df=np.asarray(float(DF)),
+                sim_n_pca=np.asarray(int(config.n_pca)),
+                sim_n_pca_basis_waveforms=np.asarray(int(n_pca_basis_waveforms)),
+                sim_waveform=np.asarray("taylorf2"),
+                data_seed=np.asarray(seeds["data"]),
+            )
+            log(f"saved discovery simulations and PCA basis to {save_path}")
         fish_dir, scaler = train_fishnet_ensemble(config, data, outdir, seeds)
         runtime_seconds["fishnets"] = time.time() - stage_start
     except Exception as exc:

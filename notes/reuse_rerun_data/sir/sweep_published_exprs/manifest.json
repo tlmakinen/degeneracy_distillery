@@ -1,0 +1,166 @@
+{
+  "config": {
+    "args": {
+      "nsims": [
+        500,
+        1000,
+        2500,
+        5000
+      ],
+      "out_dir": "results/reuse_rerun/sir/sweep_published_exprs",
+      "seed": 0,
+      "n_test": 1000,
+      "training_data": "results/reuse_rerun/sir/discovery_sims.npz",
+      "training_data_train_only": false,
+      "noise_std": 0.01,
+      "scale_theta": false,
+      "scaler_data_min": [
+        0.1,
+        0.05,
+        0.0
+      ],
+      "scaler_data_max": [
+        1.0,
+        0.5,
+        2.0
+      ],
+      "scaler_feature_range": [
+        1.0,
+        2.0
+      ],
+      "training_data_scaled": false,
+      "n_examples": 8,
+      "n_posterior_samples": 10000,
+      "fom_nsims": 1000,
+      "run_coverage": true,
+      "coverage_nsims": null,
+      "coverage_n_test": 1000,
+      "coverage_num_samples": 1000,
+      "coverage_seed": null,
+      "epochs": 1000,
+      "validation_smoothing_window": 10,
+      "batch_size": 32,
+      "adaptive_batch_size": false,
+      "target_steps_per_epoch": 20,
+      "adaptive_batch_min": 8,
+      "adaptive_batch_val_fraction": 0.1,
+      "learning_rate": 0.0001,
+      "repeats_maf": 2,
+      "hidden_features": 50,
+      "num_transforms": 5,
+      "device": "cpu",
+      "theta_to_eta": [
+        "(-0.061*X1 + 0.823*X2 + 0.072)/(0.434*X1 + 0.923*sqrt(X2))",
+        "0.713*sqrt(X2)",
+        "X3"
+      ],
+      "eta_to_theta": [
+        "(1.6189*X2**2 - 1.2945*X1*X2 + 0.072)/(0.434*X1 + 0.061)",
+        "1.9671*X2**2",
+        "X3"
+      ],
+      "jacobian_correction_samples": 512,
+      "eta_inverse": "numeric",
+      "coverage_all_nsims": true,
+      "paired_arm_seeds": true,
+      "eval_test_logprob": true,
+      "device_resolved": "cpu"
+    },
+    "sir": {
+      "n_pop": 1000,
+      "i0_mean": 8.0,
+      "r0_init": 0.0,
+      "n_timepoints": 30,
+      "t_max": 50.0,
+      "noise_std": 0.01,
+      "delta": 0.15,
+      "beta_min": 0.1,
+      "beta_max": 1.0,
+      "gamma_min": 0.05,
+      "gamma_max": 0.5
+    },
+    "theta_labels": [
+      "$\\beta$",
+      "$\\gamma$",
+      "$I_0 / 10$"
+    ],
+    "eta_labels": [
+      "$\\eta_0$",
+      "$\\eta_1$",
+      "$\\eta_2$"
+    ],
+    "theta_prior_low": [
+      0.10000000149011612,
+      0.05000000074505806,
+      0.0
+    ],
+    "theta_prior_high": [
+      1.0,
+      0.5,
+      5.0
+    ],
+    "theta_to_eta_expressions": [
+      "(-0.061*X1 + 0.823*X2 + 0.072)/(0.434*X1 + 0.923*sqrt(X2))",
+      "0.713*sqrt(X2)",
+      "X3"
+    ],
+    "eta_to_theta_expressions": null,
+    "eta_to_theta_mode": "numeric",
+    "numeric_inverse_round_trip": {
+      "n_points": 3000,
+      "fraction_not_recovered": 0.0,
+      "max_abs_error_over_box_width": 6.622738319341902e-08
+    },
+    "paired_arm_seeds": true,
+    "training_pool": {
+      "n_discovery_train": 500,
+      "n_discovery_heldout": 500,
+      "simulator_settings_verified": true,
+      "train_only": false,
+      "n_loaded": 1000,
+      "n_from_file": 1000,
+      "n_generated": 4000
+    },
+    "coverage_nsims_values": [
+      500,
+      1000,
+      2500,
+      5000
+    ],
+    "scale_theta": false,
+    "training_data_scaled": false,
+    "theta_scaler": null,
+    "theta_training_space": "physical theta",
+    "effective_batch_sizes": {
+      "500": 32,
+      "1000": 32,
+      "2500": 32,
+      "5000": 32
+    }
+  },
+  "outputs": {
+    "metrics_csv": "metrics.csv",
+    "metrics_npz": "metrics.npz",
+    "metrics_aggregate_csv": "metrics_aggregate.csv",
+    "metrics_aggregate_npz": "metrics_aggregate.npz",
+    "fom_comparison_csv": "fom_comparison.csv",
+    "fom_comparison_npz": "fom_comparison.npz",
+    "training_histories_npz": "training_histories.npz",
+    "posterior_samples_npz": "posterior_samples.npz",
+    "dataset_reference_npz": "dataset_reference.npz",
+    "coverage_outputs_npz": "coverage_outputs.npz"
+  },
+  "notes": [
+    "For eta runs, best_validation_log_prob_raw is in eta density units.",
+    "best_validation_log_prob_theta_density uses the smoothed validation curve when --validation-smoothing-window > 1.",
+    "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
+    "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
+    "posterior *_theta_samples arrays are mapped to physical theta coordinates.",
+    "Invalid eta->theta samples outside the original theta prior are set to NaN.",
+    "Coverage outputs are saved only when --run-coverage is set.",
+    "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
+    "FoM is 1/sqrt(det(cov(beta, gamma))) for --fom-nsims, default 1000.",
+    "batch_size_used is the actual training_batch_size used by lampe for each run. When --adaptive-batch-size is set it varies with nsims; otherwise it equals --batch-size for every run.",
+    "When --scale-theta is set, theta is rescaled to the scaler's feature_range before MAF training; the eta expressions act on scaled theta; logdet_dtheta_deta_correction for method=theta is the constant scaler Jacobian, and for method=eta it is the full log|det(d theta_physical / d eta)| via finite differences."
+  ]
+}

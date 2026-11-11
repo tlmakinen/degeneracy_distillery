@@ -883,6 +883,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip the downstream NPE/CRPS/coverage stage entirely (inference "
         "fields stay null); the core discovery pipeline still runs and is scored.",
     )
+    parser.add_argument(
+        "--save-training-data",
+        type=Path,
+        default=None,
+        help="Write the discovery simulations (theta_train, data_train, theta_test, "
+        "data_test exactly as simulator_data produced them) and the simulator "
+        "constants to this .npz, so scripts/sir_nsims_logprob_sweep.py "
+        "--training-data can reuse them as the head of its NPE training pool.",
+    )
     return parser.parse_args()
 
 
@@ -977,6 +986,29 @@ def main() -> None:
     try:
         stage_start = time.time()
         data = simulator_data(config, seeds["data"])
+        if args.save_training_data is not None:
+            save_path = args.save_training_data.resolve()
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            # theta is (beta, gamma, I0/10) in physical units, the 3-D form
+            # sir_nsims_logprob_sweep.load_training_pool expects. The simulator
+            # constants ride along so the sweep can refuse a mismatched pool.
+            np.savez_compressed(
+                save_path,
+                theta_train=data["theta_train"],
+                data_train=data["data_train"],
+                theta_test=data["theta_test"],
+                data_test=data["data_test"],
+                sim_n_pop=np.asarray(N_POP),
+                sim_i0_mean=np.asarray(float(I0_MEAN)),
+                sim_n_timepoints=np.asarray(N_TIMEPOINTS),
+                sim_t_max=np.asarray(float(T_MAX)),
+                sim_noise_std=np.asarray(float(NOISE_STD)),
+                sim_delta=np.asarray(float(DELTA)),
+                sim_beta_range=np.asarray([BETA_MIN, BETA_MAX], dtype=np.float64),
+                sim_gamma_range=np.asarray([GAMMA_MIN, GAMMA_MAX], dtype=np.float64),
+                data_seed=np.asarray(seeds["data"]),
+            )
+            log(f"saved discovery simulations to {save_path}")
         scaler, theta_train_s, theta_test_s = fit_scaler(data)
         fish_dir = train_fishnet_ensemble(config, data, theta_train_s, theta_test_s, outdir, seeds)
         runtime_seconds["fishnets"] = time.time() - stage_start

@@ -183,6 +183,65 @@ def parse_args() -> argparse.Namespace:
         default=512,
         help="Number of eta training points used to estimate mean log|dtheta/deta|.",
     )
+    parser.add_argument(
+        "--training-data",
+        type=Path,
+        default=None,
+        help=(
+            "Discovery archive written by the matching *_notebook_run.py "
+            "--save-training-data. The NPE training pool then starts with the "
+            "discovery training simulations, followed by the discovery held-out "
+            "simulations, followed by fresh simulations up to max(--nsims). The "
+            "archive's PCA basis replaces the sweep's own PCA fit, so the fresh "
+            "simulations and the test set are compressed exactly like the "
+            "discovery ones. Discovery masses with m1 < m2 have their labels "
+            "swapped (the waveform is symmetric), matching this sweep's m1 >= m2 "
+            "domain. Without this flag the legacy generate-everything path is used."
+        ),
+    )
+    parser.add_argument(
+        "--training-data-train-only",
+        action="store_true",
+        help=(
+            "With --training-data pointing at a discovery archive, put only its "
+            "training simulations (theta_train/data_train) at the head of the pool "
+            "and fill the rest with fresh simulations. By default the archive's "
+            "held-out simulations (theta_test/data_test), which the discovery "
+            "pipeline also consumed, follow the training ones."
+        ),
+    )
+    parser.add_argument(
+        "--eta-inverse",
+        choices=["expression", "numeric"],
+        default="expression",
+        help=(
+            "How eta is mapped back to theta. 'expression' (default) evaluates "
+            "--eta-to-theta. 'numeric' ignores --eta-to-theta and inverts "
+            "--theta-to-eta numerically on the scaled m1 >= m2 domain (damped "
+            "Gauss-Newton from a nearest-neighbour start); the Jacobian correction "
+            "is then taken from the forward map."
+        ),
+    )
+    parser.add_argument(
+        "--paired-arm-seeds",
+        action="store_true",
+        help=(
+            "Give every method the theta arm's run seed. ltu-ili draws the 90/10 "
+            "train/validation split, the initial weights and the minibatch order "
+            "from the torch seed, so with this flag all arms train and validate on "
+            "exactly the same simulations. Without it (default, legacy) the seeds "
+            "differ by the method index and so do the splits."
+        ),
+    )
+    parser.add_argument(
+        "--eval-test-logprob",
+        action="store_true",
+        help=(
+            "Also evaluate every trained posterior on the held-out test set and "
+            "save the mean mass-density log-prob (per-point Jacobian for eta) to "
+            "test_logprob.csv / test_logprob_points.npz."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -739,16 +798,90 @@ def main() -> None:
 
     print(f"Using device: {device}")
     print(f"Frequency grid: {cfg.f_low}-{freqs[-1]:.0f} Hz, {len(freqs)} bins, df={cfg.df}")
-    print(f"Generating {max_nsims} training masses and {args.n_test} test masses.")
+    pool_info = None
+    discovery = None
+    if args.training_data is not None:
+        from reuse_pool_utils import load_gw_discovery_pool
 
-    theta_pool = sample_masses(max_nsims, rng, cfg)
+        print(f"Loading discovery simulations and PCA basis from {args.training_data}")
+        discovery = load_gw_discovery_pool(
+            args.training_data,
+            freqs=freqs,
+            whiten_factor=whiten_factor,
+            n_pca=cfg.n_pca,
+            prior_low=cfg.prior_low,
+            prior_high=cfg.prior_high,
+            waveform="taylorf2",
+        )
+        if args.training_data_train_only:
+            discovery["theta"] = discovery["theta"][: discovery["n_train"]]
+            discovery["data"] = discovery["data"][: discovery["n_train"]]
+        n_loaded = discovery["theta"].shape[0]
+        n_from_file = min(n_loaded, max_nsims)
+        n_extra = max(0, max_nsims - n_loaded)
+        pool_info = {
+            "n_discovery_train": discovery["n_train"],
+            "n_discovery_heldout": discovery["n_heldout"],
+            "train_only": bool(args.training_data_train_only),
+            "n_discovery_labels_swapped_to_m1_ge_m2": discovery["n_label_swapped"],
+            "n_loaded": int(n_loaded),
+            "n_from_file": int(n_from_file),
+            "n_generated": int(n_extra),
+            "pca_basis": "discovery archive",
+            "n_pca_basis_waveforms": discovery["n_pca_basis_waveforms"],
+            "simulator_settings_verified": True,
+        }
+        print(
+            f"Archive has {discovery['n_train']} train + {discovery['n_heldout']} held-out "
+            f"discovery sims ({discovery['n_label_swapped']} labels swapped to m1 >= m2); "
+            f"pool takes the first {n_from_file} of {n_loaded}"
+            f"{' (train only)' if args.training_data_train_only else ''}. Generating {n_extra} more "
+            f"training masses and {args.n_test} test masses."
+        )
+        theta_extra = (
+            sample_masses(n_extra, rng, cfg) if n_extra > 0 else np.empty((0, 2), dtype=np.float32)
+        )
+        theta_pool = np.concatenate([discovery["theta"][:n_from_file], theta_extra], axis=0)
+    else:
+        print(f"Generating {max_nsims} training masses and {args.n_test} test masses.")
+        theta_pool = sample_masses(max_nsims, rng, cfg)
     theta_test = sample_masses(args.n_test, rng, cfg)
     if args.eta_to_theta is None:
         raise ValueError(
             "eta-to-theta expressions are required. Set DEFAULT_ETA_TO_THETA_EXPRS "
             "or pass --eta-to-theta; this script no longer numerically solves inverses."
         )
-    eta_to_theta_scaled = make_expression_transform(args.eta_to_theta)
+    numeric_inverse_check = None
+    forward64 = None
+    if args.eta_inverse == "numeric" or args.eval_test_logprob:
+        from reuse_pool_utils import (
+            NumericInverse,
+            forward_logabsdet,
+            make_expression_transform64,
+            mean_inverse_logdet_from_forward,
+            posterior_log_prob,
+        )
+
+        forward64 = make_expression_transform64(args.theta_to_eta, aliases=("m1", "m2"))
+        conventional_forward64 = make_expression_transform64(
+            CONVENTIONAL_COORDS, aliases=("m1", "m2")
+        )
+
+        def scaled64(theta_mass: np.ndarray) -> np.ndarray:
+            theta_mass = np.asarray(theta_mass, dtype=np.float64)
+            return theta_mass * theta_scaler.scale_ + theta_scaler.min_
+
+    if args.eta_inverse == "numeric":
+        eta_to_theta_scaled = NumericInverse(
+            forward64,
+            theta_scaled_prior_low,
+            theta_scaled_prior_high,
+            domain_fn=lambda pts: pts[:, 0] >= pts[:, 1],
+            n_ref=100_000,
+            seed=args.seed + 30_000,
+        )
+    else:
+        eta_to_theta_scaled = make_expression_transform(args.eta_to_theta)
 
     def eta_to_theta(eta: np.ndarray) -> np.ndarray:
         return inverse_scale_theta(eta_to_theta_scaled(eta), theta_scaler)
@@ -759,12 +892,28 @@ def main() -> None:
     def conventional_to_theta(coords: np.ndarray) -> np.ndarray:
         return inverse_scale_theta(conventional_to_theta_scaled(coords), theta_scaler)
 
-    check_scaled_eta_inverse(
-        theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
-        theta_scaler=theta_scaler,
-        theta_to_eta_fn=theta_to_eta,
-        eta_to_theta_mass_fn=eta_to_theta,
-    )
+    if args.eta_inverse == "numeric":
+        check_theta = np.concatenate([theta_pool[:2000], theta_test[:2000]], axis=0)
+        frac_failed, max_err = eta_to_theta_scaled.round_trip_error(scaled64(check_theta))
+        numeric_inverse_check = {
+            "n_points": int(check_theta.shape[0]),
+            "fraction_not_recovered": frac_failed,
+            "max_abs_error_over_box_width": max_err,
+        }
+        print(f"Numeric eta->theta round trip on pool/test points: {numeric_inverse_check}")
+        if frac_failed > 0.01 or not (max_err < 1e-3):
+            raise ValueError(
+                "Numeric inverse of --theta-to-eta fails the round-trip check; the "
+                "coordinates are probably not injective on the m1 >= m2 domain: "
+                f"{numeric_inverse_check}"
+            )
+    else:
+        check_scaled_eta_inverse(
+            theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
+            theta_scaler=theta_scaler,
+            theta_to_eta_fn=theta_to_eta,
+            eta_to_theta_mass_fn=eta_to_theta,
+        )
     if args.compare_conventional_coords:
         check_scaled_eta_inverse(
             theta_mass=np.concatenate([theta_pool[:128], theta_test[:128]], axis=0),
@@ -773,12 +922,31 @@ def main() -> None:
             eta_to_theta_mass_fn=conventional_to_theta,
         )
 
-    theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
-    print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")
-    pca, cumvar = build_pca(theta_for_pca, freqs, whiten_factor, rng, cfg)
+    if discovery is not None:
+        pca = discovery["pca"]
+        cumvar = pca.explained_variance_ratio_.cumsum().astype(np.float32)
+        print(
+            "Using the discovery run's PCA basis "
+            f"({cfg.n_pca} components, {cumvar[-1] * 100:.1f}% variance); no new PCA fit."
+        )
+        print("Generating noisy PCA-compressed waveform observations for the fresh sims.")
+        data_extra, snr_extra = generate_gw_dataset(
+            theta_extra, pca, freqs, whiten_factor, rng, cfg, "extra train waveforms"
+        )
+        data_pool = np.concatenate(
+            [discovery["data"][:n_from_file], data_extra], axis=0
+        ).astype(np.float32)
+        # Whitened-waveform norm of the reused sims is not stored with the archive.
+        snr_pool = np.concatenate(
+            [np.full(n_from_file, np.nan, dtype=np.float32), snr_extra], axis=0
+        )
+    else:
+        theta_for_pca = np.concatenate([theta_pool, theta_test], axis=0)
+        print(f"Building PCA basis from {min(cfg.pca_bank_size, theta_for_pca.shape[0])} clean waveforms.")
+        pca, cumvar = build_pca(theta_for_pca, freqs, whiten_factor, rng, cfg)
 
-    print("Generating noisy PCA-compressed waveform observations.")
-    data_pool, snr_pool = generate_gw_dataset(theta_pool, pca, freqs, whiten_factor, rng, cfg, "train waveforms")
+        print("Generating noisy PCA-compressed waveform observations.")
+        data_pool, snr_pool = generate_gw_dataset(theta_pool, pca, freqs, whiten_factor, rng, cfg, "train waveforms")
     data_test, snr_test = generate_gw_dataset(theta_test, pca, freqs, whiten_factor, rng, cfg, "test waveforms")
 
     if args.n_examples > args.n_test:
@@ -837,6 +1005,8 @@ def main() -> None:
     )
 
     metrics_rows: list[dict[str, Any]] = []
+    test_logprob_rows: list[dict[str, Any]] = []
+    test_logprob_points: dict[str, np.ndarray] = {}
     history_arrays: dict[str, np.ndarray] = {}
     coverage_arrays: dict[str, np.ndarray] = {}
     if args.run_coverage:
@@ -870,7 +1040,7 @@ def main() -> None:
 
         for method_idx, method in enumerate(methods):
             start = time.time()
-            run_seed = args.seed + nsims * 10 + method_idx
+            run_seed = args.seed + nsims * 10 + (0 if args.paired_arm_seeds else method_idx)
             print(f"\nTraining method={method}, nsims={nsims}, seed={run_seed}")
 
             if method == "theta":
@@ -882,12 +1052,22 @@ def main() -> None:
                 train_params = theta_to_eta(train_theta_scaled)
                 prior_low = train_params.min(axis=0)
                 prior_high = train_params.max(axis=0)
-                logdet_correction = inverse_logdet_jacobian(
-                    train_params,
-                    eta_to_theta_fn=eta_to_theta,
-                    max_points=args.jacobian_correction_samples,
-                    seed=run_seed,
-                )
+                if args.eta_inverse == "numeric":
+                    # log|det dtheta_mass/deta| = log|det dtheta_mass/dtheta_scaled|
+                    # - log|det deta/dtheta_scaled| at the same training points.
+                    logdet_correction = theta_scale_logdet + mean_inverse_logdet_from_forward(
+                        forward64,
+                        scaled64(train_theta),
+                        max_points=args.jacobian_correction_samples,
+                        seed=run_seed,
+                    )
+                else:
+                    logdet_correction = inverse_logdet_jacobian(
+                        train_params,
+                        eta_to_theta_fn=eta_to_theta,
+                        max_points=args.jacobian_correction_samples,
+                        seed=run_seed,
+                    )
             elif method == "conventional_coordinates":
                 train_params = conventional_to_coords(train_theta_scaled)
                 prior_low = train_params.min(axis=0)
@@ -939,6 +1119,48 @@ def main() -> None:
                     validation_log_probs_smoothed - logdet_correction
                 ).astype(np.float32)
 
+
+            if args.eval_test_logprob:
+                test_scaled64 = scaled64(theta_test)
+                test_scaled = scale_theta(theta_test, theta_scaler)
+                if method == "theta":
+                    test_logp = posterior_log_prob(posterior, test_scaled, data_test, device)
+                elif method == "eta":
+                    test_logp = posterior_log_prob(
+                        posterior, theta_to_eta(test_scaled), data_test, device
+                    ) + forward_logabsdet(forward64, test_scaled64)
+                elif method == "conventional_coordinates":
+                    test_logp = posterior_log_prob(
+                        posterior, conventional_to_coords(test_scaled), data_test, device
+                    ) + forward_logabsdet(conventional_forward64, test_scaled64)
+                # scaled-theta density -> mass density
+                test_logp = test_logp - theta_scale_logdet
+                finite_logp = test_logp[np.isfinite(test_logp)]
+                test_logprob_rows.append(
+                    {
+                        "nsims": nsims,
+                        "method": method,
+                        "n_test": int(test_logp.size),
+                        "n_finite": int(finite_logp.size),
+                        "test_log_prob_theta_density_mean": float(np.mean(finite_logp)),
+                        "test_log_prob_theta_density_sem": float(
+                            np.std(finite_logp, ddof=1) / np.sqrt(finite_logp.size)
+                        ),
+                        "test_log_prob_theta_density_median": float(np.median(finite_logp)),
+                    }
+                )
+                test_logprob_points[f"n{nsims}_{method}"] = test_logp
+                pd.DataFrame(test_logprob_rows).to_csv(
+                    args.out_dir / "test_logprob.csv", index=False
+                )
+                np.savez_compressed(
+                    args.out_dir / "test_logprob_points.npz", **test_logprob_points
+                )
+                print(
+                    f"  held-out test log-prob (mass density): "
+                    f"{test_logprob_rows[-1]['test_log_prob_theta_density_mean']:.4f} "
+                    f"+/- {test_logprob_rows[-1]['test_log_prob_theta_density_sem']:.4f}"
+                )
 
             if args.run_coverage and nsims in coverage_nsims_values:
                 coverage_theta_samples = []
@@ -1018,7 +1240,13 @@ def main() -> None:
 
     manifest = {
         "config": {
-            "args": vars(args) | {"out_dir": str(args.out_dir), "device_resolved": device},
+            "args": vars(args) | {
+                "out_dir": str(args.out_dir),
+                "training_data": (
+                    str(args.training_data) if args.training_data is not None else None
+                ),
+                "device_resolved": device,
+            },
             "gw_waveform": asdict(cfg),
             "theta_labels": THETA_LABELS,
             "eta_labels": ETA_LABELS,
@@ -1033,8 +1261,13 @@ def main() -> None:
             "theta_scaler_min": theta_scaler.min_.tolist(),
             "logdet_dtheta_mass_dtheta_scaled": theta_scale_logdet,
             "theta_to_eta_expressions": list(args.theta_to_eta),
-            "eta_to_theta_expressions": list(args.eta_to_theta),
-            "eta_to_theta_mode": "expression",
+            "eta_to_theta_expressions": (
+                list(args.eta_to_theta) if args.eta_inverse == "expression" else None
+            ),
+            "eta_to_theta_mode": args.eta_inverse,
+            "numeric_inverse_round_trip": numeric_inverse_check,
+            "paired_arm_seeds": bool(args.paired_arm_seeds),
+            "training_pool": pool_info,
             "compare_conventional_coords": bool(args.compare_conventional_coords),
             "conventional_coordinate_expressions": list(CONVENTIONAL_COORDS),
             "inverse_conventional_coordinate_expressions": list(INV_CONVENTIONAL_COORDS),
@@ -1044,9 +1277,9 @@ def main() -> None:
             "frequency_bins": int(len(freqs)),
             "pca_cumulative_variance_final": float(cumvar[-1]),
             "snr_train_min_median_max": [
-                float(np.min(snr_pool)),
-                float(np.median(snr_pool)),
-                float(np.max(snr_pool)),
+                float(np.nanmin(snr_pool)),
+                float(np.nanmedian(snr_pool)),
+                float(np.nanmax(snr_pool)),
             ],
         },
         "outputs": {

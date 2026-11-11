@@ -1,0 +1,57 @@
+{
+  "problem": "sir",
+  "discovery_dir": "results/reuse_rerun/sir/discovery",
+  "expressions_pruned_driver_scaled": [
+    "0.27*X1 - 0.01*X2",
+    "0.03*X1 + 0.75*X2"
+  ],
+  "expressions_canonical_mdl": [
+    "(0.564985 + (0.661918 * (1.181539 * X2)))",
+    "(1.624781 + ((-0.557194) * ((1.187307 * X2) + ((-0.815080) * X1))))"
+  ],
+  "expressions_physical_rounded": [
+    "0.31*beta - 0.022*gamma + 0.221",
+    "0.034*beta + 1.672*gamma + 0.692"
+  ],
+  "driver_scaler": {
+    "scale_": [
+      1.149976372718811,
+      2.2289700508117676,
+      0.625
+    ],
+    "min_": [
+      0.8507708311080933,
+      0.8884775638580322,
+      0.9375
+    ],
+    "sr_offset": 0.0
+  },
+  "sweep_input_convention": "X1, X2, X3 = beta, gamma, I0/10 (physical)",
+  "sweep_theta_to_eta": [
+    "0.31049362063407900*X1 - 0.022289700508117676*X2 + 0.22082334876060487",
+    "0.034499291181564330*X1 + 1.6717275381088257*X2 + 0.69188129782676697",
+    "X3"
+  ],
+  "rounding_check": [
+    {
+      "component": 0,
+      "exact_nonfinite_fraction_on_prior": 0.0,
+      "rounded_nonfinite_fraction_on_prior": 0.0,
+      "max_abs_difference": 0.0003015629224522032,
+      "exact_range_on_prior": [
+        0.2500552333719595,
+        0.529954386793128
+      ]
+    },
+    {
+      "component": 1,
+      "exact_nonfinite_fraction_on_prior": 0.0,
+      "rounded_nonfinite_fraction_on_prior": 0.0,
+      "max_abs_difference": 0.0003660765107916797,
+      "exact_range_on_prior": [
+        0.7796369429451425,
+        1.5611939669985069
+      ]
+    }
+  ]
+}

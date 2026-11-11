@@ -1,0 +1,54 @@
+{
+  "problem": "imrphenomd",
+  "discovery_dir": "results/reuse_rerun/imrphenomd/discovery",
+  "expressions_pruned_driver_scaled": [
+    "0.9*X1 - 0.7",
+    "-0.5*X2/(-0.427596*X1 + exp(0.278071*X1)) + 0.6"
+  ],
+  "expressions_canonical_mdl": [
+    "((-0.583141) + (4.068391 * ((0.124592 * X2) / (exp((0.278071 * X1)) + ((-0.427596) * X1)))))",
+    "((-0.688288) + (2.366827 * (0.377217 * X1)))"
+  ],
+  "expressions_physical_rounded": [
+    "0.02*m1 + 0.099",
+    "(0.006*m1 + 0.011*m2 - 0.768*exp(0.006*m1) + 0.671)/(0.01*m1 - 1.28*exp(0.006*m1) + 0.38)"
+  ],
+  "driver_scaler": {
+    "scale_": [
+      0.022291118279099464,
+      0.02230810560286045
+    ],
+    "min_": [
+      0.888242781162262,
+      0.8865346908569336
+    ],
+    "sr_offset": 0.0
+  },
+  "sweep_input_convention": "X1, X2 = m1 / 50, m2 / 50 (the sweep's MinMax scaling of [5, 50] to [0.1, 1])",
+  "sweep_theta_to_eta": [
+    "1.0031003225594759*X1 + 0.099418503046035831",
+    "-0.500000000000000*(1.1154052801430225*X2 + 0.88653469085693359)/(-0.47657965058349070*X1 + 1.2801721465752950*exp(0.30992567754937337*X1) - 0.37980906025385854) + 0.600000000000000"
+  ],
+  "rounding_check": [
+    {
+      "component": 0,
+      "exact_nonfinite_fraction_on_prior": 0.0,
+      "rounded_nonfinite_fraction_on_prior": 0.0,
+      "max_abs_difference": 0.003518816583724993,
+      "exact_range_on_prior": [
+        0.20140404735104714,
+        1.1025159066328492
+      ]
+    },
+    {
+      "component": 1,
+      "exact_nonfinite_fraction_on_prior": 0.0,
+      "rounded_nonfinite_fraction_on_prior": 0.0,
+      "max_abs_difference": 0.045045110190412685,
+      "exact_range_on_prior": [
+        -0.5245733213217464,
+        0.040460513111714946
+      ]
+    }
+  ]
+}

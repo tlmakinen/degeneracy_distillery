@@ -1,0 +1,182 @@
+{
+  "config": {
+    "args": {
+      "nsims": [
+        500,
+        1000,
+        2500,
+        5000
+      ],
+      "out_dir": "results/reuse_rerun/taylorf2/sweep_train_only",
+      "seed": 0,
+      "n_test": 1000,
+      "n_examples": 8,
+      "n_posterior_samples": 10000,
+      "fom_nsims": 1000,
+      "run_coverage": true,
+      "coverage_all_nsims": true,
+      "coverage_nsims": null,
+      "coverage_n_test": 1000,
+      "coverage_num_samples": 1000,
+      "coverage_seed": null,
+      "epochs": 1000,
+      "validation_smoothing_window": 10,
+      "batch_size": 32,
+      "learning_rate": 0.0001,
+      "repeats_maf": 2,
+      "hidden_features": 50,
+      "num_transforms": 5,
+      "device": "cpu",
+      "theta_to_eta": [
+        "0.17344885247272350*X1 - 0.0447750810752291*(1.1154052801430225*X2 + 0.88653469085693359)**2 + 0.14135566544861816",
+        "-0.14944690939406588*X2 + 1.00000300000000*((0.022401799646392466*X2 - 0.085375837268829340)*exp(1.7028923548516119*exp(0.29474319688947870*X1 + 0.37421958689326420*X2)) + 2.09752000000000)**1.42653700000000 - 0.11878682036416743"
+      ],
+      "eta_to_theta": [
+        "5.0*X1",
+        "-5.0*X1 + 2.5*sqrt(3.40949618447685 - 2.0*logAbs(X2))"
+      ],
+      "compare_conventional_coords": false,
+      "jacobian_correction_samples": 512,
+      "training_data": "results/reuse_rerun/taylorf2/discovery_sims.npz",
+      "training_data_train_only": true,
+      "eta_inverse": "numeric",
+      "paired_arm_seeds": true,
+      "eval_test_logprob": true,
+      "device_resolved": "cpu"
+    },
+    "gw_waveform": {
+      "m_sun_sec": 4.925491025543576e-06,
+      "mpc_sec": 102927125030000.0,
+      "m1_min": 5.0,
+      "m1_max": 50.0,
+      "m2_min": 5.0,
+      "m2_max": 50.0,
+      "d_l_mpc": 200.0,
+      "f_low": 20.0,
+      "df": 0.5,
+      "n_pca": 40,
+      "pca_bank_size": 5000
+    },
+    "theta_labels": [
+      "$m_1$",
+      "$m_2$"
+    ],
+    "eta_labels": [
+      "$\\eta_0$",
+      "$\\eta_1$"
+    ],
+    "theta_prior_low": [
+      5.0,
+      5.0
+    ],
+    "theta_prior_high": [
+      50.0,
+      50.0
+    ],
+    "theta_training_space": "MinMaxScaler(feature_range=(0.1, 1.0))",
+    "theta_scaled_prior_low": [
+      0.10000000149011612,
+      0.10000000149011612
+    ],
+    "theta_scaled_prior_high": [
+      1.0,
+      1.0
+    ],
+    "theta_scaler_data_min": [
+      5.0,
+      5.0
+    ],
+    "theta_scaler_data_max": [
+      50.0,
+      50.0
+    ],
+    "theta_scaler_scale": [
+      0.02,
+      0.02
+    ],
+    "theta_scaler_min": [
+      0.0,
+      0.0
+    ],
+    "logdet_dtheta_mass_dtheta_scaled": 7.824046010856292,
+    "theta_to_eta_expressions": [
+      "0.17344885247272350*X1 - 0.0447750810752291*(1.1154052801430225*X2 + 0.88653469085693359)**2 + 0.14135566544861816",
+      "-0.14944690939406588*X2 + 1.00000300000000*((0.022401799646392466*X2 - 0.085375837268829340)*exp(1.7028923548516119*exp(0.29474319688947870*X1 + 0.37421958689326420*X2)) + 2.09752000000000)**1.42653700000000 - 0.11878682036416743"
+    ],
+    "eta_to_theta_expressions": null,
+    "eta_to_theta_mode": "numeric",
+    "numeric_inverse_round_trip": {
+      "n_points": 3000,
+      "fraction_not_recovered": 0.0,
+      "max_abs_error_over_box_width": 4.76837158203125e-08
+    },
+    "paired_arm_seeds": true,
+    "training_pool": {
+      "n_discovery_train": 500,
+      "n_discovery_heldout": 500,
+      "train_only": true,
+      "n_discovery_labels_swapped_to_m1_ge_m2": 477,
+      "n_loaded": 500,
+      "n_from_file": 500,
+      "n_generated": 4500,
+      "pca_basis": "discovery archive",
+      "n_pca_basis_waveforms": 1000,
+      "simulator_settings_verified": true
+    },
+    "compare_conventional_coords": false,
+    "conventional_coordinate_expressions": [
+      "(X1 * X2) ** (3./5.) / ((X1 + X2) ** (1./5.))",
+      "X2 / X1"
+    ],
+    "inverse_conventional_coordinate_expressions": [
+      "(X1**5*X2**2*(X2 + 1.0))**(1/5)/X2",
+      "(X1**5*X2**2*(X2 + 1.0))**(1/5)"
+    ],
+    "methods": [
+      "theta",
+      "eta"
+    ],
+    "coverage_nsims_values": [
+      500,
+      1000,
+      2500,
+      5000
+    ],
+    "coverage_all_nsims": true,
+    "frequency_bins": 840,
+    "pca_cumulative_variance_final": 0.9124360680580139,
+    "snr_train_min_median_max": [
+      83.45928192138672,
+      127.43416595458984,
+      189.6189727783203
+    ]
+  },
+  "outputs": {
+    "metrics_csv": "metrics.csv",
+    "metrics_npz": "metrics.npz",
+    "metrics_aggregate_csv": "metrics_aggregate.csv",
+    "metrics_aggregate_npz": "metrics_aggregate.npz",
+    "fom_comparison_csv": "fom_comparison.csv",
+    "fom_comparison_npz": "fom_comparison.npz",
+    "training_histories_npz": "training_histories.npz",
+    "posterior_samples_npz": "posterior_samples.npz",
+    "dataset_reference_npz": "dataset_reference.npz",
+    "coverage_outputs_npz": "coverage_outputs.npz"
+  },
+  "notes": [
+    "For eta runs, best_validation_log_prob_raw is in eta density units.",
+    "best_validation_log_prob_theta_density uses the smoothed validation curve when --validation-smoothing-window > 1.",
+    "best_validation_log_prob_raw is the raw validation value at the epoch selected by the smoothed curve.",
+    "best_validation_log_prob_theta_density subtracts mean log|det(dtheta/deta)|.",
+    "posterior *_theta_samples arrays are mapped to physical (m1, m2) coordinates.",
+    "Set --compare_conventional_coords to add a conventional chirp-mass/mass-ratio coordinate baseline.",
+    "Training and test masses are generated on the triangular domain m1 >= m2.",
+    "Invalid posterior samples outside m1/m2 bounds or with m1 < m2 are set to NaN for plots/FoM.",
+    "Coverage diagnostics are computed in scaled theta coordinates [0.1, 1.0]; theta_true_mass preserves physical units.",
+    "Coverage test cases are filtered to m1 >= m2 and m1 >= 10 before sampling.",
+    "Coverage posterior samples are not truncated to the prior box; only non-finite samples are dropped.",
+    "Coverage outputs are saved only when --run-coverage is set; --coverage-all-nsims runs them at every nsims.",
+    "Coverage ranks and predicted_percentiles follow ltu-ili PosteriorCoverage marginal-rank diagnostics.",
+    "FoM is 1/sqrt(det(cov(m1, m2))) for --fom-nsims, default 1000."
+  ]
+}

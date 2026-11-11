@@ -152,6 +152,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--training-data-train-only",
+        action="store_true",
+        help=(
+            "With --training-data pointing at a discovery archive, put only its "
+            "training simulations (theta_train/data_train) at the head of the pool "
+            "and fill the rest with fresh simulations. By default the archive's "
+            "held-out simulations (theta_test/data_test), which the discovery "
+            "pipeline also consumed, follow the training ones."
+        ),
+    )
+    parser.add_argument(
         "--noise-std",
         type=float,
         default=0.05,
@@ -325,6 +336,44 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
         help="Number of eta training points used to estimate the mean log|dtheta/deta|.",
+    )
+    parser.add_argument(
+        "--eta-inverse",
+        choices=["expression", "numeric"],
+        default="expression",
+        help=(
+            "How eta is mapped back to theta. 'expression' (default) evaluates "
+            "--eta-to-theta. 'numeric' ignores --eta-to-theta and inverts "
+            "--theta-to-eta numerically on the prior box (damped Gauss-Newton from "
+            "a nearest-neighbour start), for discovered coordinates without a "
+            "closed-form inverse; the Jacobian correction is then taken from the "
+            "forward map."
+        ),
+    )
+    parser.add_argument(
+        "--coverage-all-nsims",
+        action="store_true",
+        help="When --run-coverage is set, export coverage diagnostics at every --nsims value.",
+    )
+    parser.add_argument(
+        "--paired-arm-seeds",
+        action="store_true",
+        help=(
+            "Give the eta arm the theta arm's run seed. ltu-ili draws the 90/10 "
+            "train/validation split, the initial weights and the minibatch order "
+            "from the torch seed, so with this flag both arms train and validate "
+            "on exactly the same simulations. Without it (default, legacy) the "
+            "seeds differ by one and so do the splits."
+        ),
+    )
+    parser.add_argument(
+        "--eval-test-logprob",
+        action="store_true",
+        help=(
+            "Also evaluate every trained posterior on the held-out test set and "
+            "save the mean theta-density log-prob (per-point Jacobian for eta) to "
+            "test_logprob.csv / test_logprob_points.npz."
+        ),
     )
     return parser.parse_args()
 
@@ -506,6 +555,55 @@ def load_training_pool(path: Path, n_timepoints: int) -> tuple[np.ndarray, np.nd
             f"expected {n_timepoints}."
         )
     return theta, data
+
+
+def check_pool_simulator_settings(path: Path, cfg: "SirConfig") -> dict[str, Any]:
+    """Compare the simulator constants stored with a discovery archive to ``cfg``.
+
+    ``sir_notebook_run.py --save-training-data`` stores them as ``sim_*`` keys.
+    A mismatch is an error: the loaded simulations and the ones generated here
+    to extend the pool (and the test set) must come from the same simulator.
+    Returns what was found, for the manifest.
+    """
+    with np.load(path) as archive:
+        stored = {key: np.asarray(archive[key]) for key in archive.files if key.startswith("sim_")}
+        n_train = int(archive["theta_train"].shape[0]) if "theta_train" in archive.files else None
+        n_test = int(archive["theta_test"].shape[0]) if "theta_test" in archive.files else None
+    info: dict[str, Any] = {
+        "n_discovery_train": n_train,
+        "n_discovery_heldout": n_test,
+        "simulator_settings_verified": False,
+    }
+    if not stored:
+        print(
+            "WARNING: the training pool carries no sim_* simulator constants; cannot "
+            "verify that it matches this sweep's simulator settings."
+        )
+        return info
+    expected = {
+        "sim_n_pop": cfg.n_pop,
+        "sim_i0_mean": cfg.i0_mean,
+        "sim_n_timepoints": cfg.n_timepoints,
+        "sim_t_max": cfg.t_max,
+        "sim_noise_std": cfg.noise_std,
+        "sim_delta": cfg.delta,
+        "sim_beta_range": [cfg.beta_min, cfg.beta_max],
+        "sim_gamma_range": [cfg.gamma_min, cfg.gamma_max],
+    }
+    mismatches = []
+    for key, want in expected.items():
+        if key not in stored:
+            mismatches.append(f"{key}: missing from archive")
+        elif not np.allclose(np.asarray(stored[key], dtype=np.float64), np.asarray(want, dtype=np.float64)):
+            mismatches.append(f"{key}: archive={stored[key].tolist()} sweep={want}")
+    if mismatches:
+        raise ValueError(
+            "The training pool was simulated with different settings than this sweep "
+            "would use to extend it: " + "; ".join(mismatches)
+        )
+    print("Training pool simulator constants match this sweep's SirConfig.")
+    info["simulator_settings_verified"] = True
+    return info
 
 
 def in_theta_prior(theta: np.ndarray) -> np.ndarray:
@@ -895,12 +993,73 @@ def main() -> None:
         theta_to_eta = theta_to_eta_expr
         eta_to_theta = eta_to_theta_expr
 
+    # Float64 forward map on the coordinates the expressions act on (scaled theta
+    # with --scale-theta, physical theta otherwise) and its log|det| in physical
+    # theta. Only used by --eta-inverse numeric and --eval-test-logprob.
+    forward64 = None
+    numeric_inverse = None
+    if args.eta_inverse == "numeric" or args.eval_test_logprob:
+        from reuse_pool_utils import (
+            NumericInverse,
+            forward_logabsdet,
+            make_expression_transform64,
+            mean_inverse_logdet_from_forward,
+            posterior_log_prob,
+        )
+
+        forward64 = make_expression_transform64(args.theta_to_eta)
+
+        def expr_coords(theta_physical: np.ndarray) -> np.ndarray:
+            theta_physical = np.asarray(theta_physical, dtype=np.float64)
+            if args.scale_theta:
+                return theta_physical * theta_scaler.scale_ + theta_scaler.min_
+            return theta_physical
+
+        def eta_logabsdet_physical(theta_physical: np.ndarray) -> np.ndarray:
+            """Per-point log|det(d eta / d theta_physical)|."""
+            logdet = forward_logabsdet(forward64, expr_coords(theta_physical))
+            if args.scale_theta:
+                logdet = logdet + float(np.sum(np.log(theta_scaler.scale_)))
+            return logdet
+
+    if args.eta_inverse == "numeric":
+        box_low = expr_coords(THETA_PRIOR_LOW[None, :])[0]
+        box_high = expr_coords(THETA_PRIOR_HIGH[None, :])[0]
+
+        def _supercritical(points: np.ndarray) -> np.ndarray:
+            if args.scale_theta:
+                points = (points - theta_scaler.min_) / theta_scaler.scale_
+            return points[:, 0] / points[:, 1] >= 1.0 + cfg.delta
+
+        numeric_inverse = NumericInverse(
+            forward64,
+            box_low,
+            box_high,
+            domain_fn=_supercritical,
+            n_ref=200_000,
+            seed=args.seed + 30_000,
+        )
+        if args.scale_theta:
+
+            def eta_to_theta(eta: np.ndarray) -> np.ndarray:
+                return theta_scaler.inverse_transform(numeric_inverse(eta))
+        else:
+            eta_to_theta = numeric_inverse
+
     print(f"Using device: {device}")
     print(f"SIR noise_std = {cfg.noise_std}")
     print(f"scale-theta mode: {args.scale_theta}")
     if args.training_data is not None:
         print(f"Loading training pool from {args.training_data}")
         loaded_theta, loaded_data = load_training_pool(args.training_data, cfg.n_timepoints)
+        pool_info = check_pool_simulator_settings(args.training_data, cfg)
+        if args.training_data_train_only:
+            if pool_info["n_discovery_train"] is None:
+                raise ValueError("--training-data-train-only needs theta_train/data_train keys.")
+            loaded_theta = loaded_theta[: pool_info["n_discovery_train"]]
+            loaded_data = loaded_data[: pool_info["n_discovery_train"]]
+            print("  --training-data-train-only: keeping the discovery training sims only.")
+        pool_info["train_only"] = bool(args.training_data_train_only)
         if args.training_data_scaled:
             assert theta_scaler is not None
             print(
@@ -927,14 +1086,37 @@ def main() -> None:
         else:
             theta_pool = theta_pool_pre.astype(np.float32)
             data_pool = data_pool_pre.astype(np.float32)
+        pool_info |= {
+            "n_loaded": int(n_loaded),
+            "n_from_file": int(n_from_file),
+            "n_generated": int(n_extra),
+        }
         print(f"Generating {args.n_test} test simulations.")
         theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
     else:
+        pool_info = None
         print(
             f"Generating {max_nsims} training simulations and {args.n_test} test simulations."
         )
         theta_pool, data_pool = generate_sir_dataset(max_nsims, rng, cfg, "train sims")
         theta_test, data_test = generate_sir_dataset(args.n_test, rng, cfg, "test sims")
+
+    numeric_inverse_check = None
+    if numeric_inverse is not None:
+        check_theta = np.concatenate([theta_pool[:2000], theta_test[:2000]], axis=0)
+        frac_failed, max_err = numeric_inverse.round_trip_error(expr_coords(check_theta))
+        numeric_inverse_check = {
+            "n_points": int(check_theta.shape[0]),
+            "fraction_not_recovered": frac_failed,
+            "max_abs_error_over_box_width": max_err,
+        }
+        print(f"Numeric eta->theta round trip on pool/test points: {numeric_inverse_check}")
+        if frac_failed > 0.01 or not (max_err < 1e-3):
+            raise ValueError(
+                "Numeric inverse of --theta-to-eta fails the round-trip check; the "
+                "coordinates are probably not injective on the prior domain: "
+                f"{numeric_inverse_check}"
+            )
 
     if args.n_examples > args.n_test:
         raise ValueError("--n-examples cannot exceed --n-test.")
@@ -942,7 +1124,8 @@ def main() -> None:
     example_indices = example_rng.choice(args.n_test, size=args.n_examples, replace=False)
 
     coverage_nsims = args.fom_nsims if args.coverage_nsims is None else args.coverage_nsims
-    if args.run_coverage and coverage_nsims not in args.nsims:
+    coverage_nsims_values = list(args.nsims) if args.coverage_all_nsims else [coverage_nsims]
+    if args.run_coverage and not set(coverage_nsims_values) <= set(args.nsims):
         raise ValueError("Coverage nsims must be included in --nsims.")
     coverage_indices = np.array([], dtype=np.int64)
     if args.run_coverage:
@@ -973,11 +1156,16 @@ def main() -> None:
     np.savez_compressed(args.out_dir / "dataset_reference.npz", **dataset_reference)
 
     metrics_rows: list[dict[str, Any]] = []
+    test_logprob_rows: list[dict[str, Any]] = []
+    test_logprob_points: dict[str, np.ndarray] = {}
     history_arrays: dict[str, np.ndarray] = {}
     coverage_arrays: dict[str, np.ndarray] = {}
     if args.run_coverage:
         coverage_arrays = {
-            "coverage_nsims": np.asarray(coverage_nsims, dtype=np.int64),
+            "coverage_nsims": np.asarray(
+                coverage_nsims_values if args.coverage_all_nsims else coverage_nsims,
+                dtype=np.int64,
+            ),
             "coverage_indices": coverage_indices.astype(np.int64),
             "coverage_num_samples": np.asarray(args.coverage_num_samples, dtype=np.int64),
             "theta_true": theta_test[coverage_indices].astype(np.float32),
@@ -1025,7 +1213,9 @@ def main() -> None:
 
         for method in ("theta", "eta"):
             start = time.time()
-            run_seed = args.seed + nsims * 10 + (0 if method == "theta" else 1)
+            run_seed = args.seed + nsims * 10 + (
+                0 if method == "theta" or args.paired_arm_seeds else 1
+            )
             print(
                 f"\nTraining method={method}, nsims={nsims}, seed={run_seed}, "
                 f"batch_size={effective_batch_size}"
@@ -1040,12 +1230,22 @@ def main() -> None:
                 train_params = theta_to_eta(train_theta)
                 prior_low = train_params.min(axis=0)
                 prior_high = train_params.max(axis=0)
-                logdet_correction = inverse_logdet_jacobian(
-                    train_params,
-                    eta_to_theta_fn=eta_to_theta,
-                    max_points=args.jacobian_correction_samples,
-                    seed=run_seed,
-                )
+                if args.eta_inverse == "numeric":
+                    # log|det dtheta_phys/deta| = -log|det deta/dtheta_phys| at the
+                    # same training points, from the forward map.
+                    logdet_correction = mean_inverse_logdet_from_forward(
+                        forward64,
+                        expr_coords(train_theta),
+                        max_points=args.jacobian_correction_samples,
+                        seed=run_seed,
+                    ) + (theta_method_logdet if args.scale_theta else 0.0)
+                else:
+                    logdet_correction = inverse_logdet_jacobian(
+                        train_params,
+                        eta_to_theta_fn=eta_to_theta,
+                        max_points=args.jacobian_correction_samples,
+                        seed=run_seed,
+                    )
 
             posterior, summaries = train_posterior(
                 train_data,
@@ -1090,7 +1290,43 @@ def main() -> None:
                 ).astype(np.float32)
 
 
-            if args.run_coverage and nsims == coverage_nsims:
+            if args.eval_test_logprob:
+                if method == "theta":
+                    test_params = theta_scaler.transform(theta_test) if args.scale_theta else theta_test
+                    test_logp = posterior_log_prob(posterior, test_params, data_test, device)
+                    test_logp = test_logp - theta_method_logdet
+                else:
+                    test_logp = posterior_log_prob(
+                        posterior, theta_to_eta(theta_test), data_test, device
+                    ) + eta_logabsdet_physical(theta_test)
+                finite_logp = test_logp[np.isfinite(test_logp)]
+                test_logprob_rows.append(
+                    {
+                        "nsims": nsims,
+                        "method": method,
+                        "n_test": int(test_logp.size),
+                        "n_finite": int(finite_logp.size),
+                        "test_log_prob_theta_density_mean": float(np.mean(finite_logp)),
+                        "test_log_prob_theta_density_sem": float(
+                            np.std(finite_logp, ddof=1) / np.sqrt(finite_logp.size)
+                        ),
+                        "test_log_prob_theta_density_median": float(np.median(finite_logp)),
+                    }
+                )
+                test_logprob_points[f"n{nsims}_{method}"] = test_logp
+                pd.DataFrame(test_logprob_rows).to_csv(
+                    args.out_dir / "test_logprob.csv", index=False
+                )
+                np.savez_compressed(
+                    args.out_dir / "test_logprob_points.npz", **test_logprob_points
+                )
+                print(
+                    f"  held-out test log-prob (theta density): "
+                    f"{test_logprob_rows[-1]['test_log_prob_theta_density_mean']:.4f} "
+                    f"+/- {test_logprob_rows[-1]['test_log_prob_theta_density_sem']:.4f}"
+                )
+
+            if args.run_coverage and nsims in coverage_nsims_values:
                 coverage_theta_samples = []
                 coverage_valid_masks = []
                 for idx in tqdm(coverage_indices, desc=f"coverage samples {method} n={nsims}"):
@@ -1222,7 +1458,14 @@ def main() -> None:
             "theta_prior_low": THETA_PRIOR_LOW.tolist(),
             "theta_prior_high": THETA_PRIOR_HIGH.tolist(),
             "theta_to_eta_expressions": list(args.theta_to_eta),
-            "eta_to_theta_expressions": list(args.eta_to_theta),
+            "eta_to_theta_expressions": (
+                list(args.eta_to_theta) if args.eta_inverse == "expression" else None
+            ),
+            "eta_to_theta_mode": args.eta_inverse,
+            "numeric_inverse_round_trip": numeric_inverse_check,
+            "paired_arm_seeds": bool(args.paired_arm_seeds),
+            "training_pool": pool_info,
+            "coverage_nsims_values": coverage_nsims_values if args.run_coverage else [],
             "scale_theta": args.scale_theta,
             "training_data_scaled": args.training_data_scaled,
             "theta_scaler": scaler_manifest,

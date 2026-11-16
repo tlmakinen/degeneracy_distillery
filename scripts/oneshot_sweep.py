@@ -409,7 +409,7 @@ def parse_args() -> argparse.Namespace:
                    help="info: count probe axes above --info-floor nats of held-out "
                         "information. nll: the NLL drop test, which depends on the "
                         "units of theta.")
-    p.add_argument("--delta-init", choices=("zeros", "glorot"), default="zeros",
+    p.add_argument("--delta-init", choices=("zeros", "glorot", "mlp"), default="zeros",
                    help="Init for the Flattener's MLP branch. 'zeros' starts "
                         "eta as exactly the linear skip, a prior toward linear "
                         "solutions; 'glorot' starts it active. The logdet(JJ^T) "

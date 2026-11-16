@@ -405,6 +405,26 @@ The notebook writes to `results/camels_top13_deep` and downloads
 information 8.63 / 7.81 / 8.28 nats at 13 latents, remainder after a linear
 fit 0.7 to 2.1% of the variance per coordinate.
 
+## CAMELS: parameter map without the linear path, third Colab run (prepared 16 Nov 2026)
+
+The deeper data network changed nothing material (rank 6 in all splits;
+8.44 / 7.23 / 8.13 nats at 13 latents against 8.63 / 7.81 / 8.28; coordinates
+still 98 to 99% linear; same six-dimensional subspace to within 5 degrees;
+`results/whittle_camels/colab_top13_deep/compare_with_first_run.txt`). So the
+data-side shortcut was not what kept the coordinates near-linear.
+
+The parameter map eta(theta) is a linear skip plus an MLP branch. With
+`--delta-init zeros` it starts exactly linear. `--delta-init glorot` hardly
+changes that: at initialisation the branch is about 0.15 of the skip in size
+and the map is 0.4 to 0.5% nonlinear over the box. New option
+`--delta-init mlp`: no linear skip, eta is the MLP alone (13 -> 128 -> 128 ->
+128 -> m, GELU, glorot output layer), 18 to 20% nonlinear at initialisation.
+
+Notebook: `notebooks/camels_top13_ensemble_nonlinear_theta_colab.ipynb`
+(`THETA_MAP = "mlp"`, deeper data network as in the second run). Output
+`results/camels_top13_theta_mlp`, zip `camels_top13_theta_mlp.zip`. Compare with
+`scripts/camels_deep_compare.py`.
+
 ## Not done
 
 - Discovery on the survivors of the d = 100 trials (stopped at the author's

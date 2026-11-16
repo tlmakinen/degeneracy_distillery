@@ -70,6 +70,11 @@ class Flattener(nn.Module):
     #: is carried by the skip, not the zeros: measured at init, cond(J) is
     #: 1.000 with zeros and 1.179 with glorot, and logdet is 9.704 vs 9.901.
     #: So zeros is a prior toward linear solutions, not a numerical need.
+    #: "glorot" barely changes that: at initialisation the branch is about
+    #: 0.15 of the linear skip in size and the map is 0.4-0.5% nonlinear.
+    #: "mlp" removes the linear skip altogether: eta is the MLP alone
+    #: (glorot output layer), about 18-20% nonlinear over the box at
+    #: initialisation, with no dedicated linear path to fall back on.
     delta_init: str = "zeros"
 
     @nn.compact
@@ -83,15 +88,17 @@ class Flattener(nn.Module):
             h = nn.gelu(nn.Dense(w)(h))
         if self.delta_init == "zeros":
             d_kernel = nn.initializers.zeros
-        elif self.delta_init == "glorot":
+        elif self.delta_init in ("glorot", "mlp"):
             d_kernel = nn.initializers.glorot_uniform()
         else:
-            raise ValueError(f"delta_init must be zeros|glorot, got {self.delta_init!r}")
+            raise ValueError(f"delta_init must be zeros|glorot|mlp, got {self.delta_init!r}")
         delta = nn.Dense(
             self.m,
             kernel_init=d_kernel,
             bias_init=nn.initializers.zeros,
         )(h)
+        if self.delta_init == "mlp":
+            return delta
         skip = nn.Dense(
             self.m,
             use_bias=False,

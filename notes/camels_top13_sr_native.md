@@ -4,9 +4,14 @@
 (`results/whittle_camels/colab_top13/`, data network 256-256-128 with a linear
 shortcut). Background: `notes/whittle_procedure.md`.
 
-A second Colab run with a deeper data network (512-512-256-128, no shortcut) was
-started the same day. Everything here should be repeated on it; the commands are
-at the end.
+**All fits here use the 205 test simulations of each split, not augmented
+inputs.** The first run saved nothing else. Treat the expressions as provisional:
+the fit that counts is on the augmentation sets (20000 fresh theta per split,
+every member's aligned coordinates) and the saved models, which the second Colab
+run writes (`augmented_*.npz`, `models.pkl`; branch `camels-whittle`, 0c89fa9).
+
+That second run also uses a deeper data network (512-512-256-128, no shortcut).
+Everything here should be repeated on it; the commands are at the end.
 
 ## Summary
 
@@ -160,14 +165,41 @@ All picks: `results/whittle_camels/sr_native/picks.json`; table:
 ## 4. Search on the nonlinear remainder alone
 
 Same search with the target replaced by the remainder of section 2
-(`--residual`). Running at the time of writing; results to be added here
-(`results/whittle_camels/sr_native_residual/`).
+(`--residual`, 40 nodes at most). Output: `results/whittle_camels/sr_native_residual/`.
+
+| | description length only | R² + description length |
+|---|---|---|
+| searches | 18 | 18 |
+| picks that are a constant (zero) | 18 | 2 |
+| median nodes | 2 | 5 |
+| share of the remainder explained, held out (median; best) | −0.02; 0.00 | −0.01; 0.21 |
+| same, on the other two splits (median) | −0.01 | −0.01 |
+| χ² per held-out point, pick against zero | 0.54 against 0.54 | 0.55 against 0.54 |
+
+- **By the description length, no nonlinear term is worth its cost** on 155
+  points with the member spread as the weight: every pick of the
+  description-length search is zero.
+- With R² as a further objective the picks are one small term in one parameter.
+  The only ones that explain anything held out are a concave term in Omega_b
+  for η₁ (split 0, 0.21) and a term in H_0 for η₂ (split 1, 0.12). Neither comes
+  back in the other splits.
+- This does not contradict section 2. The remainder repeats across splits, but
+  it is spread over many small terms, each below what 155 points can pay for.
+
+**This is the result to redo on augmented inputs.** With 20000 points the
+residual term grows in proportion and small terms become affordable. Note for
+that fit: augmented points are not independent data (the networks saw 819
+simulations), so the description length will overstate the evidence for small
+terms unless the weights or the number of points account for it. Check any
+term it adds against the other splits.
 
 ## Limits
 
-- **205 points per split.** The run kept the coordinates on the test simulations
-  only, so there is no augmentation with fresh prior draws through the networks.
-  The second Colab run does not change this; it needs the fitted networks.
+- **205 points per split, no augmentation.** The first run kept the coordinates
+  on the test simulations only. The second run saves the models and 20000
+  augmented theta per draw; `camels_sr_native_mdl.py` still has to be pointed
+  at those files (rotate the augmented member coordinates with the rotation
+  found on the test set, then search).
 - **Informative axes identified through variance.** The first run did not save
   the data summaries, so the six leading axes are taken from the variance of the
   coordinates, not from the information itself. The second run saves them.

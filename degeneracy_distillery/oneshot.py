@@ -112,6 +112,10 @@ class Estimator(nn.Module):
     m: int
     features: Sequence[int] = (256, 256, 128)
     act: Callable = nn.gelu
+    #: Linear shortcut from x to the output. With it the map starts (and can
+    #: stay) close to linear in the data. ``False`` leaves only the MLP, so
+    #: every dependence on the data goes through the hidden layers.
+    skip: bool = True
 
     @nn.compact
     def __call__(self, x):
@@ -123,6 +127,8 @@ class Estimator(nn.Module):
             kernel_init=nn.initializers.zeros,
             bias_init=nn.initializers.zeros,
         )(h)
+        if not self.skip:
+            return out
         return out + nn.Dense(self.m, kernel_init=nn.initializers.normal(1e-2))(x)
 
 
@@ -155,7 +161,7 @@ EST_ACTS: dict[str, Callable] = {
 }
 
 
-def estimator_factory_for(features: Sequence[int], act: str = "gelu"):
+def estimator_factory_for(features: Sequence[int], act: str = "gelu", skip: bool = True):
     """One eta(x) factory with a fixed architecture, tagged for logging."""
     feats = tuple(int(w) for w in features)
     if act not in EST_ACTS:
@@ -163,11 +169,12 @@ def estimator_factory_for(features: Sequence[int], act: str = "gelu"):
     fn = EST_ACTS[act]
 
     def factory(m: int):
-        return Estimator(m=int(m), features=feats, act=fn)
+        return Estimator(m=int(m), features=feats, act=fn, skip=bool(skip))
 
     factory.features = feats  # type: ignore[attr-defined]
     factory.act_name = act  # type: ignore[attr-defined]
-    factory.tag = f"{act}:{'x'.join(str(w) for w in feats)}"  # type: ignore[attr-defined]
+    factory.skip = bool(skip)  # type: ignore[attr-defined]
+    factory.tag = f"{act}:{'x'.join(str(w) for w in feats)}" + ("" if skip else ":noskip")  # type: ignore[attr-defined]
     return factory
 
 
@@ -179,6 +186,7 @@ def estimator_bank(
     n_layers: tuple[int, int] = (2, 4),
     acts: Optional[Sequence[str]] = None,
     first: Optional[Sequence[int]] = None,
+    skip: bool = True,
 ) -> list:
     """``k`` eta(x) factories with sampled width, depth and activation.
 
@@ -199,12 +207,12 @@ def estimator_bank(
     out = []
     for i in range(k):
         if i == 0 and first is not None:
-            out.append(estimator_factory_for(first, acts[0]))
+            out.append(estimator_factory_for(first, acts[0], skip=skip))
             continue
         depth = int(rng.integers(n_layers[0], n_layers[1] + 1))
         width = int(rng.integers(hids[0], hids[1]))
         a = str(acts[int(rng.integers(0, len(acts)))])
-        out.append(estimator_factory_for((width,) * depth, a))
+        out.append(estimator_factory_for((width,) * depth, a, skip=skip))
     return out
 
 

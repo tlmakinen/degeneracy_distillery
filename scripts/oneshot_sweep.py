@@ -624,6 +624,18 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
     # that might raise. Without this a failed calibration call loses the
     # only copy of the member spread and the run has to be repeated to get
     # a number that was already computed.
+    # Per member, on the test simulations and before alignment: eta(theta) and
+    # the data summary eta_hat(x). With these the held-out information per
+    # axis, and how nonlinear the data side is, can be measured afterwards.
+    extras = {}
+    try:
+        extras["eta_raw"] = np.asarray(ens["eta_ensemble_raw"], dtype=np.float32)
+        extras["eta_hat_raw"] = np.stack(
+            [np.asarray(f.eta_hat(x_va)) for f in ens["fits"]]
+        ).astype(np.float32)
+        extras["rotmats"] = np.asarray(ens["rotmats"], dtype=np.float32)
+    except Exception as exc:
+        print(f"[ensemble] member summaries not saved: {exc}", flush=True)
     try:
         np.savez_compressed(
             workdir / "ensemble.npz",
@@ -632,6 +644,7 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
             oob_nlls=np.asarray(ens["oob_nlls"]),
             jtj_ranks=np.asarray(ens["jtj_ranks"]),
             arch=np.array(row.get("ensemble_arch", ""), dtype=object),
+            **extras,
         )
     except Exception as exc:
         print(f"[ensemble] dump failed: {exc}", flush=True)

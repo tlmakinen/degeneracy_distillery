@@ -49,8 +49,25 @@ DEFAULT_DATA = "data_scratch/data_L50_TNG_v3.hdf5"
 #: theta is min-max scaled into this range, so ``use_log_features`` is safe.
 THETA_RANGE = (1.0, 2.0)
 
-#: eta(x) trunk for the ladder and for ensemble member 0.
-EST_FEATURES = (256, 256, 128)
+#: eta(x) trunk for the ladder and for ensemble member 0: 344 -> 512 -> 512 ->
+#: 256 -> 128 -> m. Until 16 Nov 2026 this was (256, 256, 128) with a linear
+#: shortcut from the data to the output; that map started linear in the data
+#: and the aligned coordinates came out 98-99% linear in the parameters.
+EST_FEATURES = (512, 512, 256, 128)
+#: No linear shortcut: every dependence on the data goes through the trunk.
+EST_SKIP = False
+#: Width and depth ranges of the other ensemble members.
+EST_BANK_HIDS = (128, 512)
+EST_BANK_LAYERS = (3, 5)
+
+
+def _as_features(value) -> tuple:
+    """``(512, 512, 256, 128)``, ``"512x512x256x128"`` or ``"512,512,256,128"``."""
+    if isinstance(value, str):
+        return tuple(int(v) for v in value.replace("x", ",").split(",") if v.strip())
+    if isinstance(value, (int, float)):
+        return (int(value),)
+    return tuple(int(v) for v in value)
 
 
 class CamelsProblem:
@@ -71,12 +88,16 @@ class CamelsProblem:
         test_size: float = 0.2,
         m_probe: int = 12,
         prior_draw: str = "uniform",
+        est_features=None,
+        est_skip=None,
         **_ignored,
     ):
         self.name = "camels"
         if prior_draw not in ("uniform", "empirical"):
             raise ValueError(f"prior_draw must be uniform|empirical, got {prior_draw!r}")
         self.prior_draw = prior_draw
+        self.est_features = EST_FEATURES if est_features is None else _as_features(est_features)
+        self.est_skip = EST_SKIP if est_skip is None else bool(int(est_skip))
         self.d = N_PARAMS
         self.param_names = PARAM_NAMES
         self.use_log_features = True
@@ -205,20 +226,21 @@ class CamelsProblem:
 
     # ------------------------------------------------------------ networks
     def estimator_factory(self, m: int):
-        return estimator_factory_for(EST_FEATURES, "gelu")(m)
+        return estimator_factory_for(self.est_features, "gelu", skip=self.est_skip)(m)
 
     def estimator_factories(self, k: int, seed: Optional[int] = None) -> list:
         """``k`` eta(x) factories varying width, depth and activation.
 
-        Member 0 is pinned to ``EST_FEATURES`` so the ladder map can be
+        Member 0 is pinned to ``est_features`` so the ladder map can be
         reused warm as the ensemble reference.
         """
         return estimator_bank(
             int(k),
             seed=self.seed if seed is None else int(seed),
-            hids=(64, 320),
-            n_layers=(2, 4),
-            first=EST_FEATURES,
+            hids=EST_BANK_HIDS,
+            n_layers=EST_BANK_LAYERS,
+            first=self.est_features,
+            skip=self.est_skip,
         )
 
     # -------------------------------------------------------------- scoring

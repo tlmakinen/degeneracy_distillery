@@ -284,7 +284,108 @@ split. Information is on the 205 test simulations.
   fit does not show.
 
 Limits: the refits use one split; the members are restarts, not an aligned
-ensemble, so there are no per-coordinate error bars yet; no symbolic regression.
+ensemble (see the Colab section below for that); no symbolic regression.
+
+## Next step: aligned ensemble on Colab
+
+`notebooks/camels_top13_ensemble_colab.ipynb` on branch `camels-whittle` runs
+the neural compression step as an aligned ensemble on the 13 selected
+parameters (raw features, 10 members with varied data-network architectures,
+bootstrapped, three splits), once with 13 latents and once at the informative
+rank, without symbolic regression. It needs the 3.4 MB data file uploaded and,
+if the repository is private, a `GH_TOKEN` Colab secret. The run was checked
+from a fresh clone of the branch in an environment with only JAX, Flax, Optax,
+h5py and pyoperon. `notebooks/` is git-ignored, so the notebook was added with
+`git add -f`.
+
+## CAMELS: aligned ensemble on the top 13, Colab (16 Nov 2026)
+
+Run from the notebook above on a Colab GPU. Outputs copied to
+`results/whittle_camels/colab_top13/` (`m13/`, `rank/`, `summary.txt`);
+analysis: `scripts/camels_ensemble_summary.py`. Settings: probe 20000 steps,
+members 5000 steps, 10 members, bootstrap, varied data networks, 819 training
+and 205 test simulations per split, three splits.
+
+The first attempt failed on Colab because its preinstalled Flax was older than
+its JAX (`jax.core.get_opaque_trace_state was removed`). The notebook now
+upgrades Flax and checks the pair before any run.
+
+| | split 0 | split 1 | split 2 |
+|---|---|---|---|
+| rank by the 0.5-nat rule | 6 | 6 | 6 |
+| held-out information, 13 latents (nats) | 8.63 | 7.81 | 8.28 |
+| held-out information, 7 latents (nats) | 7.43 | 6.67 | 6.83 |
+| weak axes 7 and 8, 13 latents (nats) | 0.32, 0.34 | 0.44, 0.28 | 0.36, 0.23 |
+| member spread / range, six leading axes, 13 latents | 0.13–0.22 | 0.12–0.20 | 0.16–0.24 |
+| member spread / range, six leading axes, 7 latents | 0.21–0.30 | 0.23–0.33 | 0.22–0.40 |
+| calibration, worst leave-one-out ratio, 13 / 7 latents | 1.10 / 1.14 | 1.34 / 1.19 | 1.28 / 1.07 |
+
+"Range" is the standard deviation of the coordinate over the test simulations.
+"Leading axes" are the principal axes of the ensemble-mean coordinates; their
+variances track the information per axis, so the first six are the informative
+ones. The error on the ensemble mean is the spread divided by sqrt(10).
+
+- **Six informative directions, the same ones in every run.** The parameter
+  subspaces spanned by the six leading axes agree across the three splits and
+  the two settings to within 12 degrees (principal angles). A seventh direction
+  is not shared (23 to 79 degrees). On one split, the six leading axes of the
+  13-latent and 7-latent fits have canonical correlations of 0.99 or more for
+  five, and 0.86 to 0.90 for the sixth.
+- **What the six directions are**, in one sparse (varimax) basis of the shared
+  subspace, loadings on the standardised scaled parameters:
+  - Omega_b alone (+1.00); H_0 alone (+0.98); Omega_m alone (+0.97);
+  - IMFslope +0.90, WindDumpFactor +0.26, sigma_8 −0.22, n_s −0.20;
+  - A_SN2 +0.80, WindFreeTravelDensFac −0.49, WindDumpFactor +0.26, MinWindVel +0.22;
+  - A_SN1 +0.70, n_s −0.43, sigma_8 −0.41, SNII_MinMass −0.33.
+
+  Each of the six runs captures each of these directions at 0.96 or more
+  (squared cosine). sigma_8 and n_s are not constrained on their own.
+- **The coordinates are close to linear in the 13 scaled parameters.**
+  Cross-validated R² of a linear fit is 0.96 to 0.99 per axis; a quadratic fit
+  reaches 0.99 or more. The non-linear part is 1 to 4% of the variance, about
+  the size of the squared error on the ensemble mean (0.2 to 1.7%). Symbolic
+  regression will mostly return linear combinations. The map has a linear skip
+  path, so this is what the map learned from 819 simulations, not proof that
+  the sufficient coordinates are linear.
+- **The 7-latent fit holds 1.2 to 1.5 nats less than the 13-latent fit and its
+  members disagree more.** The two weak axes account for 0.6 to 0.7 nats of the
+  difference.
+- **The member spread does not say which directions the data constrain.** In
+  the 13-latent fit the uninformative directions have the *smallest* spread
+  (8 to 12% of their range). Every member is warm-started from the same eta(theta)
+  network (`fit_oneshot_ensemble`, `init_fit`), and nothing moves the directions
+  the data do not reach. The spread measures stability under resampling and a
+  change of data network from a common start. Use the information rule for the
+  rank, and the spread only as the weight for symbolic regression.
+- **The spread is slightly too small in a few coordinates** (leave-one-out
+  ratio up to 1.34), and it varies by a factor of about four across simulations.
+
+Not saved by the run, and needed to do better: the data summaries of each
+member on the test set and the information axes. Without them the informative
+directions of the 13-latent fit are identified only through the variance of
+the coordinates.
+
+## CAMELS: deeper data network, second Colab run (prepared 16 Nov 2026)
+
+The aligned coordinates of the first run are 98 to 99% linear in the 13 scaled
+parameters. Both networks start linear: the data network eta_hat(x) was
+256-256-128 (GELU) with a zero-initialised output layer plus a linear shortcut
+from the 344 features, and eta(theta) has the same structure. To test whether
+that start holds the map near-linear, branch `camels-whittle` changes the
+CAMELS data network to 344 -> 512 -> 512 -> 256 -> 128 -> m with no linear
+shortcut (`EST_FEATURES`, `EST_SKIP` in `problems/camels.py`; override with
+`--problem-arg est_features=256x256x128 --problem-arg est_skip=true`). The
+other ensemble members draw 3 to 5 layers of width 128 to 512, also without
+the shortcut. Other problems keep the shortcut (`Estimator.skip` defaults to
+true). The eta(theta) network is unchanged.
+
+`ensemble.npz` now also holds, per member and before alignment, `eta_raw` and
+the data summaries `eta_hat_raw` on the test simulations, and `rotmats`.
+
+The notebook writes to `results/camels_top13_deep` and downloads
+`camels_top13_deep.zip`. Compare against the first run (same splits): held-out
+information 8.63 / 7.81 / 8.28 nats at 13 latents, remainder after a linear
+fit 0.7 to 2.1% of the variance per coordinate.
 
 ## Not done
 

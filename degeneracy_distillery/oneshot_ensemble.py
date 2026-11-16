@@ -275,3 +275,104 @@ def ensemble_calibration(
             # How much the floor/alignment inflated the raw spread.
             out["y_std_over_raw"] = np.median(ys / np.maximum(s_in, 1e-30), axis=0)
     return out
+
+
+# =============================================================================
+# Saving the ensemble, so that it can be evaluated at new theta after the run
+# =============================================================================
+_ALIGN_KEYS = ("rotmats", "member_means", "reference_offset", "eta_coordinate_shift")
+
+
+def _plain(tree):
+    """Nested dicts of numpy arrays, whatever mapping type the parameters came in."""
+    if hasattr(tree, "items"):
+        return {str(k): _plain(v) for k, v in tree.items()}
+    return np.asarray(tree)
+
+
+def _box(v):
+    a = np.asarray(v, dtype=np.float64)
+    return float(a) if a.ndim == 0 else tuple(float(x) for x in a.ravel())
+
+
+def save_ensemble_models(path, fits, aligned, weights) -> None:
+    """Write everything needed to evaluate the aligned ensemble at new theta.
+
+    Plain numpy arrays and an architecture description, no pickled network
+    objects, so the file loads under a different JAX / Flax version.
+    Read it back with :func:`load_ensemble_models`.
+    """
+    import pickle
+
+    from degeneracy_distillery.oneshot import EST_ACTS
+
+    members = []
+    for f in fits:
+        if f.coord_fn is not None:
+            raise ValueError("a member with a fixed coordinate function cannot be saved this way")
+        fm, em = f.flat_mod, f.est_mod
+        act = next((k for k, v in EST_ACTS.items() if v is em.act), None)
+        if act is None:
+            raise ValueError("data-network activation is not one of EST_ACTS")
+        members.append(dict(
+            params=_plain(f.params),
+            m=int(f.m), m0=int(f.m0), g_dim=int(f.g_dim), const=float(f.const),
+            best_val=float(f.best_val), scale_boost=float(f.scale_boost),
+            lo=_box(f.lo), hi=_box(f.hi), use_log_features=bool(f.use_log_features),
+            flat=dict(m=int(fm.m), lo=_box(fm.lo), hi=_box(fm.hi), features=tuple(int(w) for w in fm.features),
+                      use_log_features=bool(fm.use_log_features), z_lo=float(fm.z_lo), z_hi=float(fm.z_hi),
+                      delta_init=str(fm.delta_init)),
+            est=dict(m=int(em.m), features=tuple(int(w) for w in em.features), act=act, skip=bool(em.skip)),
+        ))
+    al = {k: np.asarray(aligned[k], dtype=np.float64) for k in _ALIGN_KEYS if aligned.get(k) is not None}
+    al["n_d"] = float(aligned.get("n_d", 1.0))
+    with open(path, "wb") as fh:
+        pickle.dump(dict(format=1, members=members, aligned=al,
+                         weights=np.asarray(weights, dtype=np.float64)), fh, protocol=4)
+
+
+def load_ensemble_models(path):
+    """Inverse of :func:`save_ensemble_models`: ``(fits, aligned, weights)``."""
+    import pickle
+
+    from degeneracy_distillery.oneshot import EST_ACTS, Estimator, Flattener
+
+    with open(path, "rb") as fh:
+        d = pickle.load(fh)
+    fits = []
+    for mem in d["members"]:
+        fl, es = mem["flat"], mem["est"]
+        flat_mod = Flattener(m=fl["m"], lo=fl["lo"], hi=fl["hi"], features=tuple(fl["features"]),
+                             use_log_features=fl["use_log_features"], z_lo=fl["z_lo"], z_hi=fl["z_hi"],
+                             delta_init=fl["delta_init"])
+        est_mod = Estimator(m=es["m"], features=tuple(es["features"]), act=EST_ACTS[es["act"]], skip=es["skip"])
+        fits.append(OneShotFit(
+            params=mem["params"], flat_mod=flat_mod, est_mod=est_mod,
+            m=mem["m"], m0=mem["m0"], g_dim=mem["g_dim"], const=mem["const"], best_val=mem["best_val"],
+            scale_boost=mem["scale_boost"], coord_fn=None, lo=mem["lo"], hi=mem["hi"],
+            use_log_features=mem["use_log_features"],
+        ))
+    return fits, d["aligned"], d["weights"]
+
+
+def aligned_at(fits, aligned, weights, theta, batch: int = 4096) -> dict[str, np.ndarray]:
+    """Aligned member coordinates at new ``theta``: the augmentation set for SR.
+
+    Returns ``ys`` ``(K, n, m)`` per member, their weighted mean ``y`` and
+    spread ``y_std`` (ddof = 0, as the SR step uses).
+    """
+    from degeneracy_distillery.align_coords import apply_ensemble_alignment
+
+    theta = np.asarray(theta, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+    w = w / np.maximum(w.sum(), 1e-12)
+    out = []
+    for i in range(0, len(theta), int(batch)):
+        etas = np.stack([np.asarray(f.eta(theta[i:i + batch]), dtype=np.float64) for f in fits], 0)
+        dummy = np.zeros(etas.shape + (1,))
+        ys, _ = apply_ensemble_alignment(etas, dummy, aligned)
+        out.append(ys)
+    ys = np.concatenate(out, 1)
+    y = np.einsum("k,kni->ni", w, ys)
+    y_std = np.sqrt(np.einsum("k,kni->ni", w, (ys - y[None]) ** 2))
+    return {"ys": ys, "y": y, "y_std": y_std}

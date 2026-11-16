@@ -248,6 +248,49 @@ def augment_aligned(fits, aligned, weights, X_sr, fisher_mode, ridge):
     return y, y_std, dy, make_fisher(dy, fisher_mode, ridge)
 
 
+def save_models_and_augmentation(problem, ens, n_aug: int, seed: int, workdir) -> None:
+    """Keep the fitted ensemble and a large augmentation set for SR.
+
+    ``models.pkl`` is the ensemble itself (``load_ensemble_models``).
+    ``augmented_<draw>.npz`` holds ``n_aug`` fresh theta with the aligned
+    coordinates of every member (``ys``), their mean ``y`` and spread
+    ``y_std``, in the same frame as ``ensemble.npz``. Two draws where the
+    problem offers them: ``empirical`` follows the marginals of the training
+    simulations, ``uniform`` covers the scaled box evenly.
+    """
+    from degeneracy_distillery.oneshot_ensemble import aligned_at, save_ensemble_models
+
+    try:
+        save_ensemble_models(workdir / "models.pkl", ens["fits"], ens["aligned"], ens["weights"])
+        print(f"[augment] models saved: {len(ens['fits'])} members", flush=True)
+    except Exception as exc:
+        print(f"[augment] models not saved: {exc}", flush=True)
+
+    base = getattr(problem, "base", problem)
+    kinds = ("empirical", "uniform") if hasattr(base, "prior_draw") else ("prior",)
+    for i, kind in enumerate(kinds):
+        try:
+            rng = np.random.default_rng(int(seed) + 9001 + i)
+            old = getattr(base, "prior_draw", None)
+            if old is not None:
+                base.prior_draw = kind
+            try:
+                X_aug = np.asarray(problem.sample_prior(int(n_aug), rng), dtype=np.float64)
+            finally:
+                if old is not None:
+                    base.prior_draw = old
+            a = aligned_at(ens["fits"], ens["aligned"], ens["weights"], X_aug)
+            np.savez_compressed(
+                workdir / f"augmented_{kind}.npz",
+                X=X_aug.astype(np.float32), ys=a["ys"].astype(np.float32),
+                y=a["y"].astype(np.float32), y_std=a["y_std"].astype(np.float32),
+            )
+            print(f"[augment] {kind}: {len(X_aug)} theta, median y_std "
+                  f"{np.round(np.median(a['y_std'], 0), 3)}", flush=True)
+        except Exception as exc:
+            print(f"[augment] {kind} not saved: {exc}", flush=True)
+
+
 def rescore_frozen(
     candidates: list[tuple[list[str], float, float]],
     th_fit, x_fit, th_val, x_val,
@@ -399,6 +442,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--align-subsample", type=int, default=None)
 
     p.add_argument("--sr-time-limit", type=int, default=300)
+    p.add_argument("--save-aug", type=int, default=20000,
+                   help="after the ensemble is aligned, save this many prior draws of theta with the "
+                        "aligned coordinates of every member (augmented_<draw>.npz), and the fitted "
+                        "models (models.pkl). 0 turns both off")
     p.add_argument("--sr-n-aug", type=int, default=None)
     p.add_argument("--sr-n-aug-per-dim", type=int, default=1000)
     p.add_argument("--sr-allowed-symbols", type=str, default=None,
@@ -648,6 +695,9 @@ def run_oneshot_trial(problem, th, x, th_te, x_te, args, seed, workdir) -> dict:
         )
     except Exception as exc:
         print(f"[ensemble] dump failed: {exc}", flush=True)
+
+    if int(getattr(args, "save_aug", 0) or 0) > 0:
+        save_models_and_augmentation(problem, ens, int(args.save_aug), seed, workdir)
 
     try:
         from degeneracy_distillery.oneshot_ensemble import ensemble_calibration

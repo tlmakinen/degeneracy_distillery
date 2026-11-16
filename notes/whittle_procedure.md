@@ -365,6 +365,11 @@ member on the test set and the information axes. Without them the informative
 directions of the 13-latent fit are identified only through the variance of
 the coordinates.
 
+## CAMELS: symbolic regression on the aligned coordinates (16 Nov 2026)
+
+Written up separately: `notes/camels_top13_sr_native.md` (alignment to a common
+basis, linear part and nonlinear remainder, native-MDL Operon search, figures).
+
 ## CAMELS: deeper data network, second Colab run (prepared 16 Nov 2026)
 
 The aligned coordinates of the first run are 98 to 99% linear in the 13 scaled
@@ -381,6 +386,19 @@ true). The eta(theta) network is unchanged.
 
 `ensemble.npz` now also holds, per member and before alignment, `eta_raw` and
 the data summaries `eta_hat_raw` on the test simulations, and `rotmats`.
+
+Each run also writes, unless `--save-aug 0`:
+
+- `models.pkl`: the fitted ensemble as plain arrays plus an architecture
+  description. `load_ensemble_models(path)` returns `(fits, aligned, weights)`
+  and `aligned_at(fits, aligned, weights, theta)` gives the aligned member
+  coordinates at any theta (`degeneracy_distillery/oneshot_ensemble.py`).
+- `augmented_empirical.npz`, `augmented_uniform.npz`: `--save-aug` fresh theta
+  each (default 20000) with `ys` (every member), `y`, `y_std`, in the frame of
+  `ensemble.npz`. Symbolic regression should be fitted to these, not to the 205
+  test simulations. *Empirical* follows the training marginals (four of the 13
+  parameters are log-sampled); *uniform* covers the box evenly and so puts
+  weight where the training simulations are sparse.
 
 The notebook writes to `results/camels_top13_deep` and downloads
 `camels_top13_deep.zip`. Compare against the first run (same splits): held-out
